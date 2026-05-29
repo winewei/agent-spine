@@ -49,7 +49,7 @@ def _make_handler(module_name: str, func_name: str) -> Callable[[argparse.Namesp
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="npc",
-        description="new-plan-changes 工程化下沉 CLI（contract v0.1，详见 docs/cli.md）。",
+        description="agent-spine：Agent skill 的确定性执行层 CLI（契约详见 docs/cli.md）。",
     )
     parser.add_argument("--version", action="version", version=f"npc {__version__}")
     parser.add_argument(
