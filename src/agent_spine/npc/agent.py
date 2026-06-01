@@ -16,7 +16,7 @@ import argparse
 import json
 from pathlib import Path
 
-from . import _io, paths as _paths, templates
+from . import _io, paths as _paths, telemetry as _telemetry, templates
 from .fixer import render_findings
 from .review import parse_review
 from .state import read_state, update_state
@@ -285,6 +285,17 @@ def spawn_prompt(args: argparse.Namespace) -> None:
         change_id=args.change_id,
         prompt_file=str(prompt_file),
         extension=extension_text,
+    )
+
+    _telemetry.emit_agent_spawn(
+        proj_key=p.proj_key,
+        run_ts=p.run_ts,
+        change_seq=seq,
+        change_id=args.change_id,
+        phase=phase,
+        round_n=round_n,
+        prompt_file=prompt_file,
+        state_json=p.state_json,
     )
 
     _io.emit(

@@ -451,6 +451,74 @@ def _build_parser() -> argparse.ArgumentParser:
         handler=_make_handler("summary", "index_append"), _cmd_path="index append"
     )
 
+    # ===== telemetry =====
+    p_tel = sub.add_parser(
+        "telemetry",
+        help="跨 run 指标流（~/task_log/_telemetry/events.ndjson）与聚合",
+    )
+    sub_tel = p_tel.add_subparsers(dest="telemetry_cmd", required=True)
+
+    p_tel_emit = sub_tel.add_parser(
+        "emit",
+        help="手动追加一条指标事件（排错用；正常由 pipeline/events/agent 自动 emit）",
+    )
+    p_tel_emit.add_argument("--kind", required=True, help="事件类型，如 phase.exit / review.round")
+    p_tel_emit.add_argument("--seq", type=int, default=None)
+    p_tel_emit.add_argument("--change-id", default=None)
+    p_tel_emit.add_argument("--phase", default=None)
+    p_tel_emit.add_argument("--status", default=None, choices=["done", "failed", None])
+    p_tel_emit.add_argument("--duration-ms", dest="duration_ms", type=int, default=None)
+    p_tel_emit.add_argument("--proj-key", dest="proj_key", default=None)
+    p_tel_emit.add_argument("--run-ts", dest="run_ts", default=None)
+    p_tel_emit.add_argument("--extra", default=None, help="合并到 record 的 JSON 对象")
+    p_tel_emit.set_defaults(
+        handler=_make_handler("telemetry", "cli_emit"), _cmd_path="telemetry emit"
+    )
+
+    p_tel_tail = sub_tel.add_parser("tail", help="看最近 N 条原始 telemetry 事件")
+    p_tel_tail.add_argument("--kind", default=None, help="仅保留某 kind")
+    p_tel_tail.add_argument("--last", type=int, default=20)
+    p_tel_tail.set_defaults(
+        handler=_make_handler("telemetry", "cli_tail"), _cmd_path="telemetry tail"
+    )
+
+    p_tel_agg = sub_tel.add_parser(
+        "agg",
+        help="按维度聚合并写 aggregates/by-<by>.json",
+    )
+    p_tel_agg.add_argument(
+        "--by", choices=["phase", "change", "week"], default=None,
+        help="省略则三个维度全跑",
+    )
+    p_tel_agg.add_argument(
+        "--since", default=None, help="只统计该窗口内的事件，如 7d / 24h / 30m / ISO 8601",
+    )
+    p_tel_agg.add_argument(
+        "--no-write", action="store_true", help="只在 stdout 输出，不写 aggregates/",
+    )
+    p_tel_agg.set_defaults(
+        handler=_make_handler("telemetry", "cli_agg"), _cmd_path="telemetry agg"
+    )
+
+    p_tel_hot = sub_tel.add_parser(
+        "hotspots",
+        help="按 (failure_rate × p50_duration × retries) 排序，给出最值得优化的前 N 个 phase",
+    )
+    p_tel_hot.add_argument("--top", type=int, default=5)
+    p_tel_hot.add_argument("--since", default=None)
+    p_tel_hot.set_defaults(
+        handler=_make_handler("telemetry", "cli_hotspots"), _cmd_path="telemetry hotspots"
+    )
+
+    p_tel_est = sub_tel.add_parser(
+        "estimate-tokens", help="单文件 token 估算（bytes/4）",
+    )
+    p_tel_est.add_argument("file")
+    p_tel_est.set_defaults(
+        handler=_make_handler("telemetry", "cli_estimate_tokens"),
+        _cmd_path="telemetry estimate-tokens",
+    )
+
     return parser
 
 

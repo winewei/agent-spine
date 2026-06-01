@@ -14,7 +14,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from . import _io, paths as _paths, state as _state
+from . import _io, paths as _paths, state as _state, telemetry as _telemetry
 
 
 def _phase_base_event_name(phase: str) -> str:
@@ -247,6 +247,23 @@ def phase_rotate(args: argparse.Namespace) -> None:
                 **prev_extra,
             },
         )
+        if not (
+            prev["phase"].startswith("review-r")
+            or (prev["phase"] == "archive" and prev_status == "done")
+        ):
+            _telemetry.emit_phase_exit(
+                proj_key=p.proj_key,
+                run_ts=p.run_ts,
+                change_seq=seq,
+                change_id=change_id,
+                phase=prev["phase"],
+                status=prev_status,
+                duration_ms=prev["duration_ms"],
+                base=base,
+                state_json=p.state_json,
+                run_events=p.run_events,
+                outcome_reason=prev_extra.get("reason") if isinstance(prev_extra, dict) else None,
+            )
 
     # 2) 新 phase 的 start 事件
     append_event(
@@ -353,6 +370,21 @@ def phase_exit(args: argparse.Namespace) -> None:
         **extra,
     }
     append_event(per_change_events, p.run_events, event)
+    # telemetry：与 pipeline._do_phase_exit 同口径，跳过 review-rN / archive.done（由专用 emit 覆盖）
+    if not (phase.startswith("review-r") or (phase == "archive" and status == "done")):
+        _telemetry.emit_phase_exit(
+            proj_key=p.proj_key,
+            run_ts=p.run_ts,
+            change_seq=seq,
+            change_id=captured["change_id"],
+            phase=phase,
+            status=status,
+            duration_ms=captured["duration_ms"],
+            base=base,
+            state_json=p.state_json,
+            run_events=p.run_events,
+            outcome_reason=extra.get("reason") if isinstance(extra, dict) else None,
+        )
 
     _io.emit(
         {

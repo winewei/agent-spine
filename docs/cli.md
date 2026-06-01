@@ -1,4 +1,4 @@
-# npc CLI 契约 v1.0
+# npc CLI 契约 v1.2
 
 本文件定义 `npc` 命令行工具的稳定对外接口。所有命令默认：
 
@@ -782,6 +782,131 @@ RESULT: commit=<hash> fixed=<n> tests=<pass|fail> summary=<path> categories_scan
 
 ---
 
+## 8b. Telemetry：跨 run 指标流（1.2+）
+
+设计目标见 `docs/design.md > Telemetry 第一阶段`。本节给出契约。
+
+### 8b.1 文件布局
+
+```
+~/task_log/_telemetry/
+├── events.ndjson           # append-only 派生指标流（一行一 JSON）
+├── schema-v1.json          # 字段契约（首次写入时由 CLI 自动拷一份）
+└── aggregates/
+    ├── by-phase.json
+    ├── by-change.json
+    └── by-week.json
+```
+
+- 主 session **永远不读** `events.ndjson` 原文；只读 `aggregates/*.json` 与 `npc telemetry hotspots` stdout。
+- 路径可通过环境变量 `NPC_TELEMETRY_ROOT` 覆盖（测试 / 隔离用）。
+
+### 8b.2 record 字段（schema_version=1）
+
+| 字段 | 类型 | 备注 |
+|---|---|---|
+| `schema_version` | int | 固定 `1` |
+| `ts` | ISO 8601 | 含本地时区偏移 |
+| `kind` | enum | `phase.exit` / `review.round` / `archive.done` / `agent.spawn` / `agent.timeout` |
+| `proj_key` | string | 工程 mangle key |
+| `run_ts` | string \| null | YYYY-MM-DD-HHMM |
+| `change_seq`, `change_id`, `phase` | 可空 | |
+| `status` | enum | `done` / `failed` |
+| `duration_ms` | int \| null | |
+| `tokens` | object \| null | `{prompt_bytes, output_bytes, est_input_tokens, est_output_tokens, method}`；估算法默认 `bytes_div_4` |
+| `verdict` | enum | review.round 专用：`pass` / `should-fix` / `must-fix` |
+| `blocking_count`, `blocking_categories` | review.round 专用 | |
+| `engine` | string | review.round 专用：`codex` / `claude` |
+| `retry_count` | int | review codex 重试次数 |
+| `outcome_reason` | string \| null | failed 时的 reason |
+| `archive_commit`, `total_rounds` | archive.done 专用 | |
+| `pointer` | object | `{state_json, run_events, per_change_events, summary_md, review_json, focus_md, prompt_md}` 绝对路径 |
+
+完整 JSON Schema：`src/agent_spine/npc/telemetry_schema_v1.json`（与首次写入时拷出的 `_telemetry/schema-v1.json` 内容一致）。
+
+### 8b.3 自动 emit 时机
+
+| 现有流程 | 触发 kind |
+|---|---|
+| `pipeline._do_phase_exit`（implement / fix-rN / archive failed） | `phase.exit` |
+| `events.phase_exit` / `events.phase_rotate`（CLI 低层调用同口径） | `phase.exit` |
+| `pipeline.run_review_round`（成功与失败均发 1 条） | `review.round` |
+| `pipeline.run_archive`（成功路径） | `archive.done` |
+| `agent.spawn_prompt`（生成引导语之后） | `agent.spawn` |
+
+约束：review-rN / archive done **不重复发** `phase.exit`，由专用 kind 接管，避免 phase 计数膨胀。
+
+任何 emit 失败都被 swallow（写 stderr warning），不影响主流程。
+
+### 8b.4 子命令
+
+#### `npc telemetry emit`
+
+```
+npc telemetry emit --kind <K> [--seq N] [--change-id CID] [--phase X] [--status done|failed] \
+                   [--duration-ms N] [--proj-key K] [--run-ts TS] [--extra '<JSON>']
+```
+
+手动追加一条 record（排错用）。`--proj-key` 缺省时按 cwd → repo_root 推。`--extra` 合并到 record（与已有字段同名 key 不覆盖）。stdout：
+
+```json
+{"ok":true,"kind":"phase.exit","path":"<events.ndjson 绝对路径>"}
+```
+
+#### `npc telemetry tail`
+
+```
+npc telemetry tail [--kind K] [--last N=20]
+```
+
+输出最近 N 条 record（可按 kind 过滤）。stdout：
+
+```json
+{"ok":true,"count":N,"total":过滤后总数,"events":[...]}
+```
+
+#### `npc telemetry agg`
+
+```
+npc telemetry agg [--by phase|change|week] [--since 7d|24h|30m|ISO] [--no-write]
+```
+
+`--by` 省略时三个维度全跑；`--no-write` 只输出 stdout 不写 `aggregates/`。
+
+每个维度返回：`{count, done, failed, failure_rate, duration_ms{p50,p95,max,sum}, est_input_tokens_sum, est_output_tokens_sum, retry_count_sum, blocking_total, review_rounds, kinds, reasons, verdicts}`。
+
+#### `npc telemetry hotspots`
+
+```
+npc telemetry hotspots [--top N=5] [--since DUR]
+```
+
+按 `(failure_rate + 0.1) × (p50_duration_ms + 1) × (1 + retry_count_sum)` 排序，给出最值得优化的前 N 个 phase。`+0.1` / `+1` 是常数项，防止全成功 phase 永远 score=0 把高 retry 的项压住。stdout：
+
+```json
+{
+  "ok": true,
+  "since": "7d",
+  "top": 5,
+  "events_considered": 42,
+  "hotspots": [
+    {"phase":"fix-r0","score":33000.0,"count":2,"failure_rate":1.0,
+     "p50_duration_ms":55000,"p95_duration_ms":60000,"retry_count_sum":3,
+     "top_reasons":[["fixer",2]],"top_verdicts":[]}
+  ]
+}
+```
+
+#### `npc telemetry estimate-tokens <file>`
+
+单文件 token 估算（bytes ÷ 4）。返回 `{ok, file, bytes, est_tokens, method}`。
+
+### 8b.5 与第二阶段 meta-agent 的衔接
+
+`aggregates/*.json` 与 `npc telemetry hotspots` 输出是后续 meta-agent 的唯一输入：meta-agent 不读 `events.ndjson`、不读 transcript、不读 jsonl 原文。这样每次自动迭代只需消耗 < 5KB 派生数据。
+
+---
+
 ## 9. 收尾
 
 ### `npc summary render`
@@ -899,11 +1024,13 @@ npc index append
 
 ## 12. 版本
 
-当前契约版本：`v1.0`（与代码 package version 同步）。
+当前契约版本：`v1.2`（与代码 package version 同步）。
 
 | 版本 | 关键变化 |
 |---|---|
-| **1.0** | 新增 `agent prompt render` / `agent spawn-prompt`，§A Implementer / §B Fixer 模板从 skill 文档下沉到 CLI 包资源；主 session 不再 Write 模板内容、不再把模板传给 Agent 工具 |
+| **1.2** | 新增 `telemetry` 子命令族（emit/tail/agg/hotspots/estimate-tokens）+ events/pipeline/agent 自动 emit 钩子；`~/task_log/_telemetry/events.ndjson` 派生指标流落盘，主 session 仍零接触 |
+| 1.1 | 文档与版本对齐（初始 release 即包含 1.0 全部能力） |
+| 1.0 | 新增 `agent prompt render` / `agent spawn-prompt`，§A Implementer / §B Fixer 模板从 skill 文档下沉到 CLI 包资源；主 session 不再 Write 模板内容、不再把模板传给 Agent 工具 |
 | 0.3 | 新增 pipeline 章节（review run / archive run / implement record / fix record） |
 | 0.2 | 子命令自包含；新增 run.json / active.json + 全局 --run-ts / --task-log-dir；`--shell-exports` 标 deprecated |
 | 0.1 | 初始契约（NPC_* 环境变量 + 细粒度命令） |

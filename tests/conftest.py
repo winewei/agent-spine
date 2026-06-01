@@ -67,3 +67,11 @@ def make_args():
         return ns
 
     return _factory
+
+
+@pytest.fixture(autouse=True)
+def isolate_telemetry(tmp_path: Path, monkeypatch) -> Path:
+    """把 NPC_TELEMETRY_ROOT 隔离到 tmp，避免污染真实 ~/task_log/_telemetry。"""
+    tel_root = tmp_path / "_telemetry"
+    monkeypatch.setenv("NPC_TELEMETRY_ROOT", str(tel_root))
+    return tel_root

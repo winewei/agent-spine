@@ -1,6 +1,6 @@
 [project]
 name = "agent-spine"
-version = "1.1.0"
+version = "1.2.0"
 description = "Agent skill 的确定性执行层：把脚本化的确定性逻辑下沉到 Python CLI（执行机械动作的 NPC，让 LLM 专注决策）"
 requires-python = ">=3.11"
 authors = [{ name = "alpha" }]

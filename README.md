@@ -13,7 +13,9 @@
 - **降低维护成本**：bash + jq 散落片段 → Python 类型化模块 + pytest 覆盖
 - **统一调用契约**：CLI 子命令名稳定，skill.md 引用接口而非内部实现
 
-配套 skill：`/new-plan-changes-v2`——主 session 侧负责 plan→implement→review→archive 的编排与人机交互，把确定性动作委托给 `npc`。
+配套 skill：[`/new-plan-changes-v2`](plugins/agent-spine/commands/new-plan-changes-v2.md)——主 session 侧负责 plan→implement→review→archive 的编排与人机交互，把确定性动作委托给 `npc`。skill 通过 Claude Code **plugin 体系**分发（见下文「Claude Code Plugin 安装」段）。
+
+> **推荐用法**：`npc` 单独可用，但要发挥最大价值需 **CLI + plugin + CLAUDE.md 三层一起配置**。完整步骤（含可直接粘贴的 CLAUDE.md 片段）见 [docs/usage.md](docs/usage.md)。
 
 ---
 
@@ -71,6 +73,22 @@ uv run pytest -q       # 跑测试套件
 ```bash
 uv tool install --reinstall --editable .
 ```
+
+### Claude Code Plugin 安装
+
+`npc` CLI 提供机械动作执行能力，**配套 slash command `/new-plan-changes-v2`** 通过本仓库自带的 Claude Code marketplace 分发，标准两步安装：
+
+```text
+# 在 Claude Code 中执行（任选其一）：
+/plugin marketplace add winewei/agent-spine        # 从 GitHub 装（推荐）
+/plugin marketplace add /Users/alpha/claude_tools  # 从本地仓库装（开发态）
+
+/plugin install agent-spine@agent-spine
+```
+
+随后在任意工程内输入 `/new-plan-changes-v2` 即可。Plugin 升级用 `/plugin update agent-spine@agent-spine`。
+
+> Plugin 与 CLI 互相独立：CLI 装一次（机器级，所有 Claude Code session 共享），plugin 装一次（用户级，所有 Claude Code project 共享）。两者版本应保持一致——升级 CLI 后建议同步 `/plugin update`。
 
 ### 系统依赖
 
@@ -215,6 +233,18 @@ Fix 阶段额外做的事：自动从 `$BASE/round-(N-1).review.json` 抽 blocki
 | `npc archive precheck <seq>` | archive 前 commit chain 一致性校验（低层；archive run 内部调用） |
 | `npc summary render` | 写 `<run_dir>/run-summary.md` |
 | `npc index append` | 追加 `<task_log_dir>/index.jsonl` |
+
+### Telemetry（跨 run 指标，1.2+）
+
+| 命令 | 职责 |
+|---|---|
+| `npc telemetry tail [--kind K] [--last N]` | 看 `~/task_log/_telemetry/events.ndjson` 最近 N 条原始指标事件 |
+| `npc telemetry agg [--by phase\|change\|week] [--since 7d]` | 按维度聚合并落盘到 `_telemetry/aggregates/by-*.json` |
+| `npc telemetry hotspots [--top 5]` | 按 (failure_rate × p50_duration × retries) 排序，给出最值得优化的 phase |
+| `npc telemetry estimate-tokens <file>` | 单文件 token 估算（bytes/4） |
+| `npc telemetry emit --kind K [...]` | 手动追加 record（排错；正常由 pipeline/events/agent 自动 emit） |
+
+埋点已嵌入 `events.phase_exit` / `events.phase_rotate` / `pipeline._do_phase_exit` / `pipeline.run_review_round` / `pipeline.run_archive` / `agent.spawn_prompt`，全部 best-effort——失败 swallow，主流程零影响。主 session 永远只读 `aggregates/*.json` 与 `hotspots` 输出，不读 events.ndjson 原文。
 
 完整契约（参数、stdout JSON schema、exit code）见 [docs/cli.md](docs/cli.md)。
 
@@ -388,9 +418,19 @@ agent-spine/
 ├── README.md
 ├── pyproject.toml              # uv 管理；scripts: npc -> agent_spine.npc.cli:main
 ├── uv.lock
+├── .claude-plugin/
+│   └── marketplace.json        # Claude Code marketplace 元数据（仓库根 = 一个 marketplace）
+├── plugins/
+│   └── agent-spine/            # 唯一 plugin
+│       ├── .claude-plugin/
+│       │   └── plugin.json
+│       ├── README.md
+│       └── commands/
+│           └── new-plan-changes-v2.md  # 配套 slash command；/plugin install 后 /new-plan-changes-v2 可用
 ├── docs/
 │   ├── design.md               # 总体方案 + 设计决策记录
-│   └── cli.md                  # CLI 契约
+│   ├── cli.md                  # CLI 契约
+│   └── usage.md                # 推荐用法：CLI + skill + CLAUDE.md 三层配置
 ├── src/agent_spine/
 │   ├── __init__.py
 │   └── npc/

@@ -29,6 +29,7 @@ from . import (
     paths as _paths,
     review as _review,
     state as _state,
+    telemetry as _telemetry,
 )
 from .config import Config, ConfigError, load_config
 from .engines import (
@@ -265,6 +266,22 @@ def _do_phase_exit(
             **extra,
         },
     )
+    # telemetry：高层 review-rN / archive-done 走专用 emit；其余统一走 phase.exit
+    if not (phase.startswith("review-r") or (phase == "archive" and status == "done")):
+        _telemetry.emit_phase_exit(
+            proj_key=p.proj_key,
+            run_ts=p.run_ts,
+            change_seq=seq,
+            change_id=captured["change_id"],
+            phase=phase,
+            status=status,
+            duration_ms=captured["duration_ms"],
+            base=base,
+            state_json=p.state_json,
+            run_events=p.run_events,
+            outcome_reason=extra.get("reason") if isinstance(extra, dict) else None,
+            extra={"engine": extra.get("engine")} if isinstance(extra, dict) and extra.get("engine") else None,
+        )
     return {
         "change_id": captured["change_id"],
         "base": captured["base"],
@@ -574,12 +591,30 @@ def run_review_round(
 
     if review_data is None:
         error_code = f"{selected_engine}-exec-failed"
-        _do_phase_exit(
+        exit_info = _do_phase_exit(
             p,
             seq,
             phase,
             status="failed",
             extra={"reason": error_code, "error": last_error, "engine": selected_engine},
+        )
+        _telemetry.emit_review_round(
+            proj_key=p.proj_key,
+            run_ts=p.run_ts,
+            change_seq=seq,
+            change_id=change_id,
+            round_n=round_n,
+            base=base,
+            ok=False,
+            engine=selected_engine,
+            verdict=None,
+            blocking_count=None,
+            blocking_categories=None,
+            duration_ms=exit_info.get("duration_ms"),
+            retry_count=max(0, attempts - 1),
+            outcome_reason=error_code,
+            state_json=p.state_json,
+            run_events=p.run_events,
         )
         return {
             "ok": False,
@@ -596,12 +631,30 @@ def run_review_round(
     try:
         metrics = _review.parse_review(review_data)
     except ValueError as e:
-        _do_phase_exit(
+        exit_info = _do_phase_exit(
             p,
             seq,
             phase,
             status="failed",
             extra={"reason": "invalid_review_schema", "error": str(e)},
+        )
+        _telemetry.emit_review_round(
+            proj_key=p.proj_key,
+            run_ts=p.run_ts,
+            change_seq=seq,
+            change_id=change_id,
+            round_n=round_n,
+            base=base,
+            ok=False,
+            engine=selected_engine,
+            verdict=None,
+            blocking_count=None,
+            blocking_categories=None,
+            duration_ms=exit_info.get("duration_ms"),
+            retry_count=max(0, attempts - 1),
+            outcome_reason="invalid_review_schema",
+            state_json=p.state_json,
+            run_events=p.run_events,
         )
         return {
             "ok": False,
@@ -613,6 +666,31 @@ def run_review_round(
 
     # 5. phase exit + trend（原子）
     stale = _do_review_phase_exit_and_trend(p, seq, phase, metrics)
+    # 计算 review-rN 的 duration_ms（从 state 重新读最简单）
+    _review_round_duration_ms = (
+        _state.read_state(p.state_json).get("progress", [{}])[seq - 1]
+        .get("phases", {})
+        .get(phase, {})
+        .get("duration_ms")
+    )
+    _telemetry.emit_review_round(
+        proj_key=p.proj_key,
+        run_ts=p.run_ts,
+        change_seq=seq,
+        change_id=change_id,
+        round_n=round_n,
+        base=base,
+        ok=True,
+        engine=selected_engine,
+        verdict=metrics.get("verdict"),
+        blocking_count=metrics.get("blocking"),
+        blocking_categories=metrics.get("categories"),
+        duration_ms=_review_round_duration_ms,
+        retry_count=max(0, attempts - 1),
+        outcome_reason=None,
+        state_json=p.state_json,
+        run_events=p.run_events,
+    )
 
     # 6. fixer findings 自动渲染（下一轮 fix 用），仅在 blocking>0 时
     findings_path: str | None = None
@@ -779,7 +857,7 @@ def run_archive(
         default=0,
     )
 
-    _do_phase_exit(
+    exit_info = _do_phase_exit(
         p,
         seq,
         "archive",
@@ -793,6 +871,19 @@ def run_archive(
             "archive_commit": archive_commit,
             "total_rounds": total_rounds,
         },
+    )
+
+    _telemetry.emit_archive_done(
+        proj_key=p.proj_key,
+        run_ts=p.run_ts,
+        change_seq=seq,
+        change_id=change_id,
+        archive_commit=archive_commit,
+        total_rounds=total_rounds,
+        duration_ms=exit_info.get("duration_ms"),
+        state_json=p.state_json,
+        run_events=p.run_events,
+        base=base,
     )
 
     return {
