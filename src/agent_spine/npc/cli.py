@@ -371,6 +371,69 @@ def _build_parser() -> argparse.ArgumentParser:
     p_doctor = sub.add_parser("doctor", help="环境前置体检（git/openspec/codex/claude/mimo.env/...）")
     p_doctor.set_defaults(handler=_make_handler("doctor", "run"), _cmd_path="doctor")
 
+    # ===== spec =====
+    p_spec = sub.add_parser("spec", help="spec 一致性分析")
+    sub_spec = p_spec.add_subparsers(dest="spec_cmd", required=True)
+    p_spec_an = sub_spec.add_parser("analyze", help="spec↔tasks 漂移/覆盖检查（实现前闸门）")
+    p_spec_an.add_argument("--change", required=True, help="change-id")
+    p_spec_an.set_defaults(handler=_make_handler("spec_analyze", "run"), _cmd_path="spec analyze")
+
+    # ===== plan =====
+    p_plan = sub.add_parser("plan", help="阶段前置门 + change 脚手架")
+    sub_plan = p_plan.add_subparsers(dest="plan_cmd", required=True)
+    p_plan_chk = sub_plan.add_parser("check", help="阶段前置门：apply 所需 artifact 是否齐全")
+    p_plan_chk.add_argument("--change", required=True)
+    p_plan_chk.add_argument("--phase", default="implement")
+    p_plan_chk.add_argument("--openspec-bin", dest="openspec_bin", default=None)
+    p_plan_chk.set_defaults(handler=_make_handler("plan", "cli_check"), _cmd_path="plan check")
+    p_plan_new = sub_plan.add_parser("new-change", help="脚手架一个 openspec change")
+    p_plan_new.add_argument("--change", required=True, help="kebab-case change-id")
+    p_plan_new.add_argument("--description", default=None)
+    p_plan_new.add_argument("--schema", default=None)
+    p_plan_new.add_argument("--openspec-bin", dest="openspec_bin", default=None)
+    p_plan_new.set_defaults(handler=_make_handler("plan", "cli_new_change"), _cmd_path="plan new-change")
+
+    # ===== git =====
+    p_git = sub.add_parser("git", help="SDD git 卫生（分支/脏树/commit）")
+    sub_git = p_git.add_subparsers(dest="git_cmd", required=True)
+    p_git_br = sub_git.add_parser("branch-for", help="为 change 切到确定性分支 change/<id>")
+    p_git_br.add_argument("--change", required=True)
+    p_git_br.set_defaults(handler=_make_handler("git_ops", "cli_branch_for"), _cmd_path="git branch-for")
+    p_git_ec = sub_git.add_parser("ensure-clean", help="工作树脏则拒绝（exit 1）")
+    p_git_ec.set_defaults(handler=_make_handler("git_ops", "cli_ensure_clean"), _cmd_path="git ensure-clean")
+    p_git_ci = sub_git.add_parser("commit", help="git add -A + commit（消息可派生）")
+    p_git_ci.add_argument("--message", default=None)
+    p_git_ci.add_argument("--change", default=None)
+    p_git_ci.add_argument("--phase", default=None)
+    p_git_ci.set_defaults(handler=_make_handler("git_ops", "cli_commit"), _cmd_path="git commit")
+
+    # ===== deliver / pr =====（对外动作；skill 人闸）
+    p_deliver = sub.add_parser("deliver", help="push 当前分支到远程（对外动作）")
+    p_deliver.add_argument("--remote", default="origin")
+    p_deliver.add_argument("--branch", default=None)
+    p_deliver.add_argument("--no-set-upstream", dest="set_upstream", action="store_false", default=True)
+    p_deliver.set_defaults(handler=_make_handler("deliver", "cli_deliver"), _cmd_path="deliver")
+    p_pr = sub.add_parser("pr", help="PR 操作（对外动作）")
+    sub_pr = p_pr.add_subparsers(dest="pr_cmd", required=True)
+    p_pr_open = sub_pr.add_parser("open", help="gh pr create（body 可从 run-summary 派生）")
+    p_pr_open.add_argument("--title", default=None)
+    p_pr_open.add_argument("--body", default=None)
+    p_pr_open.add_argument("--body-file", dest="body_file", default=None)
+    p_pr_open.add_argument("--base", default=None)
+    p_pr_open.add_argument("--draft", action="store_true")
+    p_pr_open.set_defaults(handler=_make_handler("deliver", "cli_pr_open"), _cmd_path="pr open")
+
+    # ===== status / cost / clean =====
+    p_status = sub.add_parser("status", help="当前 run 进度一览（只读）")
+    p_status.set_defaults(handler=_make_handler("status", "run"), _cmd_path="status")
+    p_cost = sub.add_parser("cost", help="按后端拆 token 成本（Claude vs MiMo ...）")
+    p_cost.add_argument("--since", default=None, help="如 7d/24h/30m/ISO")
+    p_cost.set_defaults(handler=_make_handler("cost", "run"), _cmd_path="cost")
+    p_clean = sub.add_parser("clean", help="清理陈旧/已中止 run 目录（默认 dry-run）")
+    p_clean.add_argument("--yes", action="store_true", help="真删（默认 dry-run）")
+    p_clean.add_argument("--keep-days", dest="keep_days", type=int, default=14)
+    p_clean.set_defaults(handler=_make_handler("clean", "run"), _cmd_path="clean")
+
     # ===== agent =====
     p_agent = sub.add_parser(
         "agent", help="Sub-agent prompt 渲染与 spawn 引导语生成（v1.0+）"
