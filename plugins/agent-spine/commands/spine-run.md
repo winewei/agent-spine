@@ -13,7 +13,14 @@ tags: [harness, autonomous, orchestration, openspec, review-loop]
 - 一个/多个已存在的 change 名（kebab-case，如 `add-rate-limit`）—— 直接跑；或
 - 空 —— 用 AskUserQuestion 问用户要做什么。
 
-**模式标志**：参数含 `--auto` → 全自主档（fire-and-forget，决策点交给 `npc auto-decide`）；否则 → 交互档（关键闸口问用户）。
+**模式标志**：参数含 `--auto` → 全自主档；否则 → 交互档（关键闸口问用户）。
+
+**`--auto` 的硬规则（fire-and-forget）**：auto 档下你**绝不调用 AskUserQuestion**，每一个分叉都用确定性默认或 `npc auto-decide` 自主决定，一路跑到底：
+
+- **范围决策**（目标拆成 N 个依赖递进的 change → 这轮跑哪些）→ **跑完整依赖链**：把拆出来的全部 change 按依赖顺序排进 plan_order 一次跑完，不挑子集、不问。
+- **plan 确认** → 不确认，直接 `init-run`。
+- **执行中例行决策**（review 卡死 / archive 失败 / implement 失败）→ `npc auto-decide`。
+- 唯一例外：硬依赖缺失（exit 4）或需要人类凭据/外部授权时，停下说明——这不是"决策"，是无法自主完成的客观阻塞。
 
 ---
 
@@ -72,7 +79,7 @@ npc state init-run --plan-order '["change-a","change-b","change-c"]'
 ```
 
 - **交互档**：把 plan_order + 每个 change 一句话意图列给用户，AskUserQuestion 确认/调整后再 `init-run`。
-- **auto 档**：直接 `init-run`，无需确认。
+- **auto 档**：把拆出来的**全部** change 按依赖顺序排进 plan_order，直接 `init-run`——不挑子集、不问"这轮跑哪些"、不确认。一次跑完整条依赖链。
 
 ---
 
@@ -190,7 +197,8 @@ npc index append          # 追加跨 run 索引
 - **你不读 prompt 模板 / review.json / summary.md 原文**。只读 npc 子命令返回的一行 JSON 的关键字段。需要细节时引用 npc 给的 `pointer` 路径，不要把原文拉进 context。
 - **每个 npc 命令后检查 `.ok` 与 exit code**：exit 1 业务失败 / 2 用法错 / 3 环境错 / 4 依赖缺失。依赖缺失（4）立即停并提示安装。
 - **review-fix 循环必须有上限**（默认 20 轮）且尊重 `stale` 闸门——绝不无限打磨。
-- **auto 档绝不因例行选择打断用户**；交互档绝不在未确认时执行破坏性动作（archive / abort）。
+- **auto 档绝不调用 AskUserQuestion**——范围、计划、执行决策一律用确定性默认或 `npc auto-decide` 自主解决；只有硬依赖缺失（exit 4）或缺人类凭据这类**客观阻塞**才停。交互档绝不在未确认时执行破坏性动作（archive / abort）。
+- **Claude Code 的工具权限提示（Write/Edit/Bash 授权弹窗）不归本 skill 管**——那是运行时 permission 层。要无人值守跑 auto，请在受信工程里用 acceptEdits / bypassPermissions 权限模式，或在 settings 里给本工程加 scoped allowlist（见 docs/usage.md）。
 - **续跑优先**：`npc init` 报 `needs_resume` 时永远先 `resume detect` 接断点，不要新建覆盖。
 - **change 粒度单一**：拆解目标时，一个 change 只做一件可独立交付的事；过大就再拆。
 - 全程用 **TodoWrite** 反映真实进度，让用户可实时观察这个长时 run。
