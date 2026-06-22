@@ -8,6 +8,5 @@
   "license": "MIT",
   "homepage": "https://github.com/winewei/agent-spine",
   "repository": "https://github.com/winewei/agent-spine",
-  "category": "workflow",
   "keywords": ["harness", "autonomous", "orchestration", "openspec", "code-review", "subagent", "npc"]
 }
