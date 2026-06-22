@@ -36,11 +36,15 @@
 
 ## 不变量 4 — 成本分层：廉价层只许执行，不许决策与分析
 
-便宜模型（当前：MiMo `mimo-v2.5-pro`）**只用于 coder 层（生成/执行）**。**决策**（主 session 编排）与**分析/验证**（`npc review run`、`/spine-analyze`）**必须**留在 premium 层（Claude / codex）。
+便宜模型（如 MiMo `mimo-v2.5-pro`）**只可用于 coder 层（生成/执行）**，**绝不**用于决策（主 session 编排）与分析/验证（`npc review run`、`/spine-analyze`）——后者恒留 premium（Claude / codex）。
 
-- 路由按 **provider 两档**：coder(bulk，token 大头) → MiMo；orchestrator + review + analyze → Claude/codex。
-- 这同时满足不变量 1（review 与 coder 天然异源）与成本目标（把 bulk 从 Claude 订阅卸载）。
-- 实现：`scripts/spine-coder-mimo.sh`（headless `claude -p` 路由到 MiMo）；MiMo 密钥存仓库外 `~/.config/npc/mimo.env`（chmod 600，绝不入 git）。缺 mimo.env 时回退到 Claude 上的 spine-coder subagent。
+- **MiMo 默认不启用**（MiMo 较慢，按需开）。开启方式（`[coder]` 配置，显式）：
+  - 全局 `[coder].backend = "mimo"`；或
+  - **per-phase** `[coder.phase].fix = "mimo"`（如只把 fix 给 MiMo，implement 仍 claude）；或
+  - 临时 `npc implement/fix run --backend mimo`。
+  - 无配置 → 默认 `claude`。`~/.config/npc/mimo.env` 是否存在**不再**自动触发路由。
+- 不变量约束（由 `npc verify routing` 在代码层强制）：review 永不与 coder 同源；review 引擎/bin/model 含 mimo 即 violation。
+- MiMo 密钥存仓库外 `~/.config/npc/mimo.env`（chmod 600，绝不入 git）；backend=mimo 时由 `npc implement/fix run` 注入到子进程 env。
 
 ---
 

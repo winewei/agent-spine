@@ -67,21 +67,36 @@ class CoderConfig:
     - ``codex``：``codex exec``
     """
 
-    backend: str | None = None  # None = 未显式配置（resolve 时走自动探测）；显式值见 SUPPORTED
+    backend: str | None = None  # None = 未显式配置 → 默认 claude（不自动启用 mimo）
     mimo_env_file: str | None = None  # 省略则默认 ~/.config/npc/mimo.env
     model: str | None = None  # 如 mimo-v2.5-pro；省略走 backend 默认
     bin: str | None = None  # claude/codex 可执行文件覆盖
+    # per-phase 后端覆盖（如只把 fix 给 mimo）。((phase, backend), ...)，保持 frozen 可哈希。
+    phase_backends: tuple[tuple[str, str], ...] = ()
 
     @property
     def effective_backend(self) -> str:
         """未显式配置时的有效默认（claude）。供 check_routing 等只读消费者用。"""
         return self.backend or "claude"
 
+    def backend_for_phase(self, phase: str) -> str | None:
+        """该 phase 的显式后端（phase 覆盖 > 全局 backend）；都未设返回 None。"""
+        for ph, be in self.phase_backends:
+            if ph == phase:
+                return be
+        return self.backend
+
     def __post_init__(self) -> None:
         if self.backend is not None and self.backend not in SUPPORTED_CODER_BACKENDS:
             raise ConfigError(
                 f"未知 coder backend：{self.backend!r}（仅支持 {'/'.join(SUPPORTED_CODER_BACKENDS)}）"
             )
+        for ph, be in self.phase_backends:
+            if be not in SUPPORTED_CODER_BACKENDS:
+                raise ConfigError(
+                    f"未知 coder phase 后端：[coder.phase].{ph}={be!r}"
+                    f"（仅支持 {'/'.join(SUPPORTED_CODER_BACKENDS)}）"
+                )
 
 
 @dataclass(frozen=True)
@@ -193,6 +208,16 @@ def _build(data: dict, source: str) -> Config:
     )
     mimo_env = _opt_str(coder_mimo.get("env_file"), "coder.mimo.env_file", source)
 
+    phase_raw = coder_raw.get("phase") or {}
+    if not isinstance(phase_raw, dict):
+        raise ConfigError(f"[coder.phase] 节必须是 table（{source}）")
+    phase_backends_list: list[tuple[str, str]] = []
+    for ph, be in phase_raw.items():
+        if not isinstance(be, str):
+            raise ConfigError(f"[coder.phase].{ph} 必须是字符串（{source}）")
+        phase_backends_list.append((str(ph), be))
+    phase_backends = tuple(sorted(phase_backends_list))
+
     verify_raw = data.get("verify") or {}
     if not isinstance(verify_raw, dict):
         raise ConfigError(f"[verify] 节必须是 table（{source}）")
@@ -210,6 +235,7 @@ def _build(data: dict, source: str) -> Config:
             mimo_env_file=mimo_env,
             model=coder_model,
             bin=coder_bin,
+            phase_backends=phase_backends,
         ),
         verify=VerifyConfig(
             test=_opt_str(verify_raw.get("test"), "verify.test", source),

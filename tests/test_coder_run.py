@@ -62,43 +62,42 @@ def _fake_runner(stdout: str, exit_code: int = 0):
 
 def test_resolve_backend_override_wins():
     cfg = Config()
-    assert _coder.resolve_backend(cfg, "codex") == "codex"
+    assert _coder.resolve_backend(cfg, "implement", "codex") == "codex"
     # 即使配置非默认，override 也优先
-    cfg2 = Config(coder=CoderConfig(backend="mimo"), source="/some/config.toml")
-    assert _coder.resolve_backend(cfg2, "claude") == "claude"
+    cfg2 = Config(coder=CoderConfig(backend="mimo"))
+    assert _coder.resolve_backend(cfg2, "fix", "claude") == "claude"
 
 
-def test_resolve_backend_from_config_when_non_default_source():
-    cfg = Config(coder=CoderConfig(backend="mimo"), source="/some/config.toml")
-    assert _coder.resolve_backend(cfg, None) == "mimo"
+def test_resolve_backend_from_global_config():
+    cfg = Config(coder=CoderConfig(backend="mimo"))
+    assert _coder.resolve_backend(cfg, "implement", None) == "mimo"
 
 
-def test_resolve_backend_auto_mimo_present(tmp_path: Path):
+def test_resolve_backend_default_claude_no_config():
+    # 裸跑无配置 → 默认 claude
+    assert _coder.resolve_backend(Config(), "implement", None) == "claude"
+
+
+def test_resolve_backend_mimo_not_auto_enabled_when_env_present(tmp_path: Path):
+    # 关键：mimo.env 存在也不再自动启用 mimo（MiMo 默认不启用，按需开）
     env_file = tmp_path / "mimo.env"
     env_file.write_text("export ANTHROPIC_BASE_URL=https://x\n")
-    cfg = Config(coder=CoderConfig(mimo_env_file=str(env_file)))  # source=<default>
-    assert _coder.resolve_backend(cfg, None) == "mimo"
+    cfg = Config(coder=CoderConfig(mimo_env_file=str(env_file)))
+    assert _coder.resolve_backend(cfg, "implement", None) == "claude"
 
 
-def test_resolve_backend_auto_claude_when_no_mimo(tmp_path: Path):
-    missing = tmp_path / "nope.env"
-    cfg = Config(coder=CoderConfig(mimo_env_file=str(missing)))  # source=<default>
-    assert _coder.resolve_backend(cfg, None) == "claude"
+def test_resolve_backend_per_phase_routing():
+    # 只把 fix 路由到 mimo，implement 仍默认 claude
+    cfg = Config(coder=CoderConfig(phase_backends=(("fix", "mimo"),)))
+    assert _coder.resolve_backend(cfg, "fix", None) == "mimo"
+    assert _coder.resolve_backend(cfg, "implement", None) == "claude"
 
 
-def test_resolve_backend_config_without_coder_backend_auto_mimo(tmp_path: Path):
-    """有 config（source 非默认）但 TOML 未写 [coder].backend → backend=None → 走自动探测。
-
-    根治旧 `cfg.source != "<default>"` hack：只要 backend 未显式配置，
-    无论是否有 config 文件，都按 mimo.env 是否存在自动路由。
-    """
-    env_file = tmp_path / "mimo.env"
-    env_file.write_text("export ANTHROPIC_BASE_URL=https://x\n")
-    cfg = Config(
-        coder=CoderConfig(mimo_env_file=str(env_file)),  # backend 仍 None
-        source="/some/config.toml",  # 有 config，但没写 [coder].backend
-    )
-    assert _coder.resolve_backend(cfg, None) == "mimo"
+def test_resolve_backend_phase_overrides_global():
+    # 全局 mimo，但 implement 显式回退 claude
+    cfg = Config(coder=CoderConfig(backend="mimo", phase_backends=(("implement", "claude"),)))
+    assert _coder.resolve_backend(cfg, "implement", None) == "claude"
+    assert _coder.resolve_backend(cfg, "fix", None) == "mimo"
 
 
 # ============================================================

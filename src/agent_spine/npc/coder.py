@@ -51,25 +51,22 @@ class CoderRunResult:
 Runner = Callable[..., CoderRunResult]
 
 
-def resolve_backend(cfg: Config, override: str | None = None) -> str:
-    """决定 coder backend。
+def resolve_backend(cfg: Config, phase: str, override: str | None = None) -> str:
+    """决定某 phase 的 coder backend。
 
     优先级：
     1. ``override``（CLI ``--backend``）
-    2. ``cfg.coder.backend``（仅当 TOML 显式写了 ``[coder].backend`` 时为非 None）
-    3. 自动探测：``mimo_env_file``（默认 ``~/.config/npc/mimo.env``）存在 → "mimo"，否则 → "claude"
+    2. per-phase 覆盖 ``[coder.phase].<phase>``（如只把 fix 给 mimo）
+    3. 全局 ``[coder].backend``
+    4. 默认 ``claude``
 
-    ``CoderConfig.backend`` 默认 ``None`` 表示"未显式配置"——此时直接走自动探测，
-    无需再靠 ``cfg.source`` 来猜测是否显式指定。这样裸跑（无配置文件）或仅配了
-    其它字段时，都能根据 mimo.env 是否存在自动路由到廉价层。
+    **MiMo 默认不启用**：只有在 ``--backend mimo`` / ``[coder].backend="mimo"`` /
+    ``[coder.phase].<phase>="mimo"`` 显式指定时才用 MiMo。mimo.env 是否存在不再
+    自动触发路由（MiMo 较慢，按需开启）。
     """
-    return override or cfg.coder.backend or _auto_detect(cfg)
-
-
-def _auto_detect(cfg: Config) -> str:
-    """无显式 backend 时的自动探测：mimo.env 存在 → mimo，否则 claude。"""
-    env_file = _resolve_mimo_env_file(cfg)
-    return "mimo" if env_file.is_file() else "claude"
+    if override:
+        return override
+    return cfg.coder.backend_for_phase(phase) or "claude"
 
 
 def _resolve_mimo_env_file(cfg: Config) -> Path:
@@ -325,7 +322,7 @@ def run_implement(
 ) -> dict:
     """跑完整 implement coder：phase enter → 渲染 prompt → backend 子进程 → record。"""
     cfg = load_config(p.repo_root, override_path=config_path)
-    selected = resolve_backend(cfg, backend)
+    selected = resolve_backend(cfg, "implement", backend)
 
     _pipeline._do_phase_enter(p, seq, "implement")
 
@@ -432,7 +429,7 @@ def run_fix(
 ) -> dict:
     """跑完整 fix coder：phase enter → 渲染 prompt → backend 子进程 → record。"""
     cfg = load_config(p.repo_root, override_path=config_path)
-    selected = resolve_backend(cfg, backend)
+    selected = resolve_backend(cfg, "fix", backend)
 
     phase = f"fix-r{round_n}"
     _pipeline._do_phase_enter(p, seq, phase)
