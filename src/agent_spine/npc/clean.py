@@ -17,6 +17,7 @@ CLI handler：run
 from __future__ import annotations
 
 import argparse
+import re
 import shutil
 from pathlib import Path
 
@@ -25,6 +26,10 @@ from . import _io, paths as _paths, state as _state
 
 # 默认保留窗口（天）。
 DEFAULT_KEEP_DAYS = 14
+
+# run_ts 格式：YYYY-MM-DD-HHMM（与 paths.make_run_ts 一致）。
+# 安全护栏：只有匹配此格式的目录才会被 clean 当作 run 候选。
+RUN_TS_RE = re.compile(r"\d{4}-\d{2}-\d{2}-\d{4}")
 
 # 可清理的顶层 status 集合。in-progress 永不在此集合。
 _REMOVABLE_TOP_STATUS = frozenset({"completed", "completed-with-issues", "aborted"})
@@ -154,6 +159,10 @@ def scan_runs(task_log_dir: Path) -> list[dict]:
         if not entry.is_dir():
             continue
         run_ts = entry.name
+        # 安全：只把符合 run_ts 格式（YYYY-MM-DD-HHMM）的目录视为 run。
+        # 杜绝把 task_log 下的外来目录（backup/、tmp/、submodule…）误当孤儿 run 删掉。
+        if not RUN_TS_RE.fullmatch(run_ts):
+            continue
         state_json = task_log_dir / f"{run_ts}-plan-state.json"
         runs.append(
             {
@@ -208,6 +217,14 @@ def run(args: argparse.Namespace) -> None:
     keep_days = getattr(args, "keep_days", None)
     if keep_days is None:
         keep_days = DEFAULT_KEEP_DAYS
+    # 安全：keep_days < 1 会把 cutoff 拉到 now，--yes 即刻删光所有终态 run。拒绝。
+    if keep_days < 1:
+        _io.emit_error(
+            "invalid_args",
+            f"--keep-days 必须 >= 1（收到 {keep_days}）：太小会删掉刚跑完的 run",
+            exit_code=2,
+        )
+        return
 
     yes = bool(getattr(args, "yes", False))
 
