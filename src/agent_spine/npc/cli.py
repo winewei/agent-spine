@@ -298,6 +298,24 @@ def _build_parser() -> argparse.ArgumentParser:
         handler=_make_handler("pipeline", "cli_implement_record"), _cmd_path="implement record"
     )
 
+    p_impl_run = sub_implement.add_parser(
+        "run",
+        help="跑 coder 子进程完成 implement（render prompt → coder 后端 → 抽 RESULT → record）",
+    )
+    p_impl_run.add_argument("--seq", type=int, required=True)
+    p_impl_run.add_argument("--change-id", default=None, help="可选；与 state 中的 seq 一致性校验")
+    p_impl_run.add_argument(
+        "--backend",
+        choices=["claude", "mimo", "codex"],
+        default=None,
+        help="覆盖 coder 后端（默认从 [coder].backend 读，或 mimo.env 存在时自动 mimo）",
+    )
+    p_impl_run.add_argument("--timeout", type=int, default=None, help="coder 子进程超时秒数")
+    p_impl_run.add_argument("--config", default=None, help="显式 TOML 配置路径")
+    p_impl_run.set_defaults(
+        handler=_make_handler("coder", "cli_implement_run"), _cmd_path="implement run"
+    )
+
     # ===== fix =====
     p_fix = sub.add_parser("fix", help="Fix 阶段记录")
     sub_fix = p_fix.add_subparsers(dest="fix_cmd", required=True)
@@ -313,6 +331,45 @@ def _build_parser() -> argparse.ArgumentParser:
     p_fix_rec.set_defaults(
         handler=_make_handler("pipeline", "cli_fix_record"), _cmd_path="fix record"
     )
+
+    p_fix_run = sub_fix.add_parser(
+        "run",
+        help="跑 coder 子进程完成 fix-rN（render fix prompt → coder 后端 → 抽 RESULT → record）",
+    )
+    p_fix_run.add_argument("--seq", type=int, required=True)
+    p_fix_run.add_argument("--round", dest="round_n", type=int, required=True)
+    p_fix_run.add_argument("--change-id", default=None)
+    p_fix_run.add_argument(
+        "--backend", choices=["claude", "mimo", "codex"], default=None,
+        help="覆盖 coder 后端",
+    )
+    p_fix_run.add_argument("--timeout", type=int, default=None)
+    p_fix_run.add_argument("--config", default=None)
+    p_fix_run.set_defaults(
+        handler=_make_handler("coder", "cli_fix_run"), _cmd_path="fix run"
+    )
+
+    # ===== verify =====
+    p_verify = sub.add_parser("verify", help="质量门 + 路由不变量校验")
+    sub_verify = p_verify.add_subparsers(dest="verify_cmd", required=True)
+    p_verify_tests = sub_verify.add_parser(
+        "tests", help="按 repo 清单探测并真实复跑测试（不裸信自报）"
+    )
+    p_verify_tests.add_argument("--config", default=None, help="显式 TOML 配置路径")
+    p_verify_tests.set_defaults(
+        handler=_make_handler("verify", "run_tests"), _cmd_path="verify tests"
+    )
+    p_verify_routing = sub_verify.add_parser(
+        "routing", help="校验 coder/review 路由不变量（生成⊥验证 + MiMo 只许执行）"
+    )
+    p_verify_routing.add_argument("--config", default=None, help="显式 TOML 配置路径")
+    p_verify_routing.set_defaults(
+        handler=_make_handler("verify", "run_routing"), _cmd_path="verify routing"
+    )
+
+    # ===== doctor =====
+    p_doctor = sub.add_parser("doctor", help="环境前置体检（git/openspec/codex/claude/mimo.env/...）")
+    p_doctor.set_defaults(handler=_make_handler("doctor", "run"), _cmd_path="doctor")
 
     # ===== agent =====
     p_agent = sub.add_parser(
