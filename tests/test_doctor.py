@@ -499,7 +499,7 @@ def test_run_all_green_exit_0(tmp_path: Path, monkeypatch, capsys):
     assert report["summary"]["missing_required"] == []
 
 
-def test_run_git_missing_exit_3_with_full_checks(tmp_path: Path, monkeypatch, capsys):
+def test_run_git_missing_exit_4_single_line(tmp_path: Path, monkeypatch, capsys):
     home = _make_home(tmp_path, mimo=True, schema=True)
     repo = _make_repo(tmp_path, principles=True)
     monkeypatch.setattr(doctor.Path, "home", classmethod(lambda cls: home))
@@ -508,20 +508,20 @@ def test_run_git_missing_exit_3_with_full_checks(tmp_path: Path, monkeypatch, ca
 
     with pytest.raises(SystemExit) as exc:
         doctor.run(_args())
-    assert exc.value.code == 3
+    # required（git）缺失 → exit 4（外部依赖缺失），非 3（环境错）
+    assert exc.value.code == 4
 
     lines = capsys.readouterr().out.strip().splitlines()
-    # 第一行：完整报告（含全部 checks，调用方可知缺哪个 required）
+    # 严守单行 JSON 契约：只有一行，错误信息内嵌在唯一的 report 里
+    assert len(lines) == 1
     report = json.loads(lines[0])
     assert report["ok"] is False
     assert report["summary"]["missing_required"] == ["git"]
     names = {c["name"] for c in report["checks"]}
     assert "git" in names and "config" in names
-    # 第二行：emit_error 的错误体，点名 git
-    err = json.loads(lines[1])
-    assert err["ok"] is False
-    assert err["error"] == "dependency_missing"
-    assert "git" in err["message"]
+    # 错误体内嵌：error/message 点名 git，调用方一行 jq 即可读
+    assert report["error"] == "dependency_missing"
+    assert "git" in report["message"]
 
 
 def test_run_optional_missing_exit_0(tmp_path: Path, monkeypatch, capsys):

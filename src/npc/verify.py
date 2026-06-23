@@ -197,14 +197,21 @@ def check_routing(cfg: _config.Config) -> list[dict]:
     review = cfg.review
     effective_backend = coder.effective_backend
 
-    # 规则 1：后端有效性（用 effective_backend，None 解析为 claude）
-    if effective_backend not in _config.SUPPORTED_CODER_BACKENDS:
-        violations.append(
-            {
-                "rule": "backend_unsupported",
-                "detail": f"coder.backend={effective_backend!r} 不在支持列表 {_config.SUPPORTED_CODER_BACKENDS}",
-            }
-        )
+    # coder 实际会用到的全部后端 = 全局 effective + 每个 per-phase 覆盖。
+    # 校验必须覆盖 per-phase 路由，否则 [coder.phase].fix=mimo 这类「只把某阶段给
+    # mimo」会绕过下面的 gen⊥verify 校验——而这正是本校验存在的根本目的。
+    backends_in_play = {effective_backend}
+    backends_in_play.update(be for _ph, be in coder.phase_backends)
+
+    # 规则 1：后端有效性（覆盖全局 + 每个 phase 覆盖）
+    for be in sorted(backends_in_play):
+        if be not in _config.SUPPORTED_CODER_BACKENDS:
+            violations.append(
+                {
+                    "rule": "backend_unsupported",
+                    "detail": f"coder.backend={be!r} 不在支持列表 {_config.SUPPORTED_CODER_BACKENDS}",
+                }
+            )
     if review.engine not in _config.SUPPORTED_ENGINES:
         violations.append(
             {
@@ -213,14 +220,14 @@ def check_routing(cfg: _config.Config) -> list[dict]:
             }
         )
 
-    # 规则 2：gen ⊥ verify（coder 与 review 解析到同一执行身份 = 自己评自己）
+    # 规则 2：gen ⊥ verify（coder 任一在用后端与 review 解析到同一执行身份 = 自己评自己）
     same_claude_identity = (
-        effective_backend == "claude"
+        "claude" in backends_in_play
         and review.engine == "claude"
         and coder.bin == review.claude_bin
         and coder.model == review.claude_model
     )
-    both_mimo = effective_backend == "mimo" and review.engine == "mimo"
+    both_mimo = "mimo" in backends_in_play and review.engine == "mimo"
     if same_claude_identity or both_mimo:
         violations.append(
             {
@@ -267,6 +274,7 @@ def run_routing(args: argparse.Namespace) -> None:
         {
             "ok": len(violations) == 0,
             "coder_backend": cfg.coder.effective_backend,
+            "coder_phase_backends": {ph: be for ph, be in cfg.coder.phase_backends},
             "review_engine": cfg.review.engine,
             "violations": violations,
         }
