@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_spine.npc import paths as _paths
+from npc import paths as _paths
 
 
 @pytest.fixture

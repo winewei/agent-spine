@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_spine.npc import (
+from npc import (
     agent as _agent,
     auto_decide as _auto_decide,
     events as _events,
@@ -374,7 +374,7 @@ class TestRecordFixPhaseEnterFallback:
         record_fix 应自动补 phase enter（started_at 从 review-r(N-1).done_at 派生），
         最终 duration_ms 非 null。
         """
-        from agent_spine.npc import pipeline as _pipeline
+        from npc import pipeline as _pipeline
 
         _bootstrap(env_setup, capsys, make_args, "add-foo")
         # 1) implement done
@@ -405,7 +405,7 @@ class TestRecordFixPhaseEnterFallback:
         commit_fix = _make_commit(fake_repo, "fix-round-1")
 
         # 3) 调 record_fix（注意：没调 phase enter fix-r1）
-        from agent_spine.npc import paths as _paths
+        from npc import paths as _paths
 
         p = _paths.compute_paths(fake_repo, run_ts=env_setup.run_ts, home=env_setup.task_log_dir.parent.parent)
         result = _pipeline.record_fix(

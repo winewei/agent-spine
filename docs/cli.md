@@ -1024,10 +1024,21 @@ npc index append
 
 ## 12. 版本
 
-当前契约版本：`v1.2`（与代码 package version 同步）。
+当前契约版本：`v1.3`。
+
+新增命令（v1.3，基石加固，全部经独立 review + 充分测试）：
+
+- **`npc doctor`**：环境前置体检（git/openspec/codex/claude/jq/portable-timeout/schema/mimo.env/config/principles.md）。输出 `{ok, checks[], summary}`；required(git) 缺失 exit 3。
+- **`npc verify tests`**：按 repo 清单（pyproject/pytest.ini/tests、package.json scripts.test、Makefile test:）探测并**真实复跑测试**（`shlex.split` + shell=False，杜绝注入）。`{ok, cmd, exit_code, passed, tail}`；passed→0 / fail→1 / 无命令→3。可被 `[verify].test` 覆盖。这是"不裸信 RESULT 自报"硬轨的家。
+- **`npc verify routing`**：把路由不变量编进代码——**生成⊥验证**（coder 与 review 不同源）+ **MiMo 只许执行**（review.engine/bin/model 含 mimo 即 violation，无条件顶层挡）。`{ok, coder_backend, review_engine, violations[]}`；有 violation→1。
+- **`npc implement run --seq N` / `npc fix run --seq N --round M`**：把 coder 子进程编排折进 npc（对标 `review run`）。后端：`--backend` > `[coder.phase].<phase>`（per-phase，如只把 fix 给 mimo）> `[coder].backend` > 默认 `claude`。**MiMo 默认不启用**（较慢，按需显式开）。内部 render prompt → headless `claude -p`（mimo 注入 env 路由到 MiMo）→ 抽 RESULT → record。TimeoutExpired/ConfigError/PermissionError 全部转结构化错误、phase 不悬挂。record ok→0 / 业务失败→1 / 用法→2 / env→3 / 依赖缺失→4。
+- **`npc init --auto`** 新增 `auto_auth`：自动给 `<repo>/.claude/settings.json` 授权（`defaultMode=acceptEdits` + harness 工具 Bash 白名单），**合并保留既有 deny 与其它键**、幂等、坏 JSON 不覆盖、失败不阻塞。交互档不授权。payload 多 `auto_auth` 字段。
+
+配置新增 `[coder]`（backend/mimo.env_file/model/bin）+ `[coder.phase]`（per-phase 后端，如 `fix="mimo"`）+ `[verify]`（test/lint/typecheck/build 覆盖）。MiMo 默认不启用，须显式配置。
 
 | 版本 | 关键变化 |
 |---|---|
+| **1.3** | 新增 `doctor` / `verify tests` / `verify routing` / `implement run` / `fix run`；`init --auto` 自动授权 `.claude/settings.json`；config 增 `[coder]`/`[verify]`。把成本路由、独立验证、复跑测试、auto 授权焊进确定性核心 |
 | **1.2** | 新增 `telemetry` 子命令族（emit/tail/agg/hotspots/estimate-tokens）+ events/pipeline/agent 自动 emit 钩子；`~/task_log/_telemetry/events.ndjson` 派生指标流落盘，主 session 仍零接触 |
 | 1.1 | 文档与版本对齐（初始 release 即包含 1.0 全部能力） |
 | 1.0 | 新增 `agent prompt render` / `agent spawn-prompt`，§A Implementer / §B Fixer 模板从 skill 文档下沉到 CLI 包资源；主 session 不再 Write 模板内容、不再把模板传给 Agent 工具 |

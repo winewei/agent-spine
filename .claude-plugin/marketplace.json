@@ -1,0 +1,21 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "agent-spine",
+  "description": "agent-spine 的 Claude Code marketplace —— 分发自主 harness plugin（spine-run / spine-coder / spine-analyze），由 npc CLI 提供确定性执行底座。",
+  "owner": {
+    "name": "alpha"
+  },
+  "plugins": [
+    {
+      "name": "agent-spine",
+      "description": "本地自主 harness：长时运行、自主决策、逐个 change 跑 implement→review→fix→archive，主 session 只调度、coder subagent 只执行，全轨迹落 ~/task_log 供后续分析迭代。需配套 npc CLI（uv tool install agent-spine）。",
+      "author": {
+        "name": "alpha"
+      },
+      "category": "workflow",
+      "source": "./plugins/agent-spine",
+      "homepage": "https://github.com/winewei/agent-spine",
+      "keywords": ["harness", "autonomous", "orchestration", "openspec", "code-review", "npc"]
+    }
+  ]
+}

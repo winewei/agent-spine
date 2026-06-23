@@ -7,7 +7,7 @@ import subprocess
 
 import pytest
 
-from agent_spine.npc import git_chain as _gc, state as _state
+from npc import git_chain as _gc, state as _state
 
 
 def _commit(repo, msg, file="f.txt", content=""):

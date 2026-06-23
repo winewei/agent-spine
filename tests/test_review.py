@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from agent_spine.npc import review as _review
+from npc import review as _review
 
 
 SAMPLE_REVIEW = {

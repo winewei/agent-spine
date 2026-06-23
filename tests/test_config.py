@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_spine.npc import config as _config
+from npc import config as _config
 
 
 def _write(path: Path, text: str) -> None:
@@ -124,3 +124,47 @@ def test_load_config_invalid_toml_syntax(tmp_path: Path):
     _write(repo / ".npc" / "config.toml", "[review\nengine = ?\n")
     with pytest.raises(_config.ConfigError, match="TOML 解析失败"):
         _config.load_config(repo, home=home)
+
+
+# ============================================================
+# [coder] backend + per-phase 路由（MiMo 默认关，按需开）
+# ============================================================
+
+
+def _write_cfg(tmp_path, body: str):
+    import pathlib
+    d = pathlib.Path(tmp_path) / ".npc"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "config.toml").write_text(body, encoding="utf-8")
+    return pathlib.Path(tmp_path)
+
+
+def test_coder_backend_default_none(tmp_path):
+    from npc.config import load_config
+    cfg = load_config(tmp_path)  # 无配置文件
+    assert cfg.coder.backend is None
+    assert cfg.coder.effective_backend == "claude"
+    assert cfg.coder.phase_backends == ()
+
+
+def test_coder_phase_backends_parsed(tmp_path):
+    from npc.config import load_config
+    repo = _write_cfg(tmp_path, '[coder]\nbackend="claude"\n[coder.phase]\nfix="mimo"\n')
+    cfg = load_config(repo)
+    assert cfg.coder.backend == "claude"
+    assert cfg.coder.backend_for_phase("fix") == "mimo"
+    assert cfg.coder.backend_for_phase("implement") == "claude"
+
+
+def test_coder_phase_unknown_backend_rejected(tmp_path):
+    from npc.config import load_config, ConfigError
+    repo = _write_cfg(tmp_path, '[coder.phase]\nfix="gpt5"\n')
+    with pytest.raises(ConfigError):
+        load_config(repo)
+
+
+def test_coder_unknown_backend_rejected(tmp_path):
+    from npc.config import load_config, ConfigError
+    repo = _write_cfg(tmp_path, '[coder]\nbackend="gpt5"\n')
+    with pytest.raises(ConfigError):
+        load_config(repo)

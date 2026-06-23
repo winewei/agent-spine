@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from agent_spine.npc import templates
+from npc import templates
 
 
 def test_template_version_is_string():

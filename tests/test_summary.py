@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from agent_spine.npc import state as _state, summary as _summary
+from npc import state as _state, summary as _summary
 
 
 def _stuffed_state(run_ts="2026-05-22-1430", status="completed"):

@@ -7,7 +7,7 @@ import os
 import time
 from pathlib import Path
 
-from agent_spine.npc import session as _session
+from npc import session as _session
 
 
 def test_detect_via_mtime_recent_jsonl(tmp_path: Path):

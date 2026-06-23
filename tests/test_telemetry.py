@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_spine.npc import events as _events, state as _state, telemetry as _telemetry
+from npc import events as _events, state as _state, telemetry as _telemetry
 
 
 # ============================================================

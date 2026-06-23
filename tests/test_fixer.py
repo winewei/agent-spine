@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from agent_spine.npc import fixer as _fixer
+from npc import fixer as _fixer
 
 
 def test_render_findings_empty():

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from agent_spine.npc import schema as _schema
+from npc import schema as _schema
 
 
 def test_ensure_schema_creates_when_missing(tmp_path):

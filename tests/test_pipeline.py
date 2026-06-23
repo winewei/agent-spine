@@ -12,8 +12,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from agent_spine.npc import pipeline as _pipeline
-from agent_spine.npc import state as _state
+from npc import pipeline as _pipeline
+from npc import state as _state
 
 
 # ============================================================

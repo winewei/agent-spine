@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from agent_spine.npc import agent as _agent
-from agent_spine.npc import state as _state
+from npc import agent as _agent
+from npc import state as _state
 
 
 # ============================================================

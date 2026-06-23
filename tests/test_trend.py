@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from agent_spine.npc import state as _state, trend as _trend
+from npc import state as _state, trend as _trend
 
 
 def _bootstrap(env_setup, capsys, make_args, *changes):

@@ -14,6 +14,7 @@ import sys
 from pathlib import Path
 
 from . import _io, paths as _paths, schema, session, resume, git_chain as _git_chain, state as _state
+from . import settings_auth as _settings_auth
 
 
 PORTABLE_TIMEOUT_REL = ".local/bin/portable-timeout"
@@ -171,6 +172,19 @@ def run(args: argparse.Namespace) -> None:
 
     mode = "auto" if args.auto else "interactive"
 
+    # 8b. auto 授权：仅 --auto 时给项目 .claude/settings.json 授足够权限（不阻塞 init）
+    auto_auth: dict | None = None
+    if args.auto:
+        try:
+            auto_auth = _settings_auth.grant_auto_permissions(p.repo_root)
+            if auto_auth.get("ok"):
+                _io.info(f"已为 auto 模式授权：{auto_auth['path']}")
+            else:
+                _io.warn(f"auto 授权跳过（{auto_auth.get('skipped')}）：{auto_auth.get('path')}")
+        except OSError as e:
+            _io.warn(f"auto 授权失败（不阻塞 init）：{e}")
+            auto_auth = {"ok": False, "error": str(e)}
+
     # 9. state_drift 扫描（仅 needs_resume 时执行）
     state_drift: dict | None = None
     if needs_resume and resume_state_json is not None:
@@ -206,6 +220,7 @@ def run(args: argparse.Namespace) -> None:
         "state_drift": state_drift,
         "mode": mode,
         "fresh": bool(args.fresh),
+        "auto_auth": auto_auth,
     }
 
     if args.shell_exports:

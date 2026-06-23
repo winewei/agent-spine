@@ -9,8 +9,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from agent_spine.npc import engines as _engines
-from agent_spine.npc.config import ReviewEngineConfig
+from npc import engines as _engines
+from npc.config import ReviewEngineConfig
 
 
 # ============================================================

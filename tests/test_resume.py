@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from agent_spine.npc import resume as _resume, state as _state
+from npc import resume as _resume, state as _state
 
 
 def _base_state(progress_entries: list[dict]) -> dict:

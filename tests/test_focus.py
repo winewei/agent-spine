@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_spine.npc import focus as _focus
+from npc import focus as _focus
 
 
 def test_extract_section_hit():

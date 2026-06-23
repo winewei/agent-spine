@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from agent_spine.npc import paths as _paths, state as _state
+from npc import paths as _paths, state as _state
 
 
 # ----------------------------- 渲染纯函数 -----------------------------

@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_spine.npc import init_cmd as _init
+from npc import init_cmd as _init
 
 
 @pytest.fixture

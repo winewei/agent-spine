@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from agent_spine.npc import events as _events, state as _state
+from npc import events as _events, state as _state
 
 
 def _bootstrap(env_setup, capsys, make_args, *change_ids: str) -> None:
@@ -49,7 +49,7 @@ def test_phase_exit_computes_duration(env_setup, capsys, monkeypatch, make_args)
     _bootstrap(env_setup, capsys, make_args, "add-foo")
 
     # 注入可控时间
-    from agent_spine.npc import _io
+    from npc import _io
 
     times = iter([1000, 5500, 5500])  # enter_ms, exit_ms (state), exit_ms (event)
     monkeypatch.setattr(_io, "now_ms", lambda: next(times))
