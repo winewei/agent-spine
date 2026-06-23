@@ -55,6 +55,18 @@ def _fake_runner(stdout: str, exit_code: int = 0):
     return runner
 
 
+@pytest.fixture(autouse=True)
+def _stub_coder_bin(monkeypatch):
+    """让 coder 的 _find_bin 不依赖宿主 PATH：默认把 claude/codex 解析到假路径。
+
+    这些用例已用注入的 _fake_runner 绕开真实子进程，但 `_run_backend` 在调 runner
+    之前会先 `shutil.which` 找 bin——本机有 claude 时碰巧绿，干净 CI 环境（无 claude）
+    则 FileNotFoundError。打桩 which 让测试真正 hermetic。需要测「bin 缺失」语义的
+    用例可在体内再 `monkeypatch.setattr(_coder.shutil, "which", ...)` 覆盖（后设生效）。
+    """
+    monkeypatch.setattr(_coder.shutil, "which", lambda name: f"/fake/bin/{name}")
+
+
 # ============================================================
 # resolve_backend（纯函数）
 # ============================================================
