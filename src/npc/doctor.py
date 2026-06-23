@@ -242,10 +242,11 @@ def build_report(checks: list[dict]) -> dict:
 
 
 def run(args: argparse.Namespace) -> None:
-    """doctor 主入口：探测 repo_root → 体检 → emit JSON → 按 required 决定退出码。
+    """doctor 主入口：探测 repo_root → 体检 → emit 单行 JSON → 按 required 决定退出码。
 
-    任一 required 项缺失：仍把完整报告 emit 出去（调用方据此知道缺哪个），
-    随后以 ``dependency_missing`` / exit 3 退出。
+    任一 required 项缺失：把完整报告（含 ``error``/``message`` 字段，调用方据此知道
+    缺哪个）作为**唯一一行 JSON** emit 出去，随后以 exit 4（外部依赖缺失）退出。
+    严守「stdout 单行 JSON」契约——不再追加第二行 error 体。
     """
     home = Path.home()
 
@@ -257,12 +258,12 @@ def run(args: argparse.Namespace) -> None:
 
     checks = gather_checks(home=home, repo_root=repo_root, which=shutil.which)
     report = build_report(checks)
-    _io.emit(report)
 
     missing_required = report["summary"]["missing_required"]
     if missing_required:
-        _io.emit_error(
-            "dependency_missing",
-            f"缺少必备前置：{', '.join(missing_required)}",
-            exit_code=3,
-        )
+        report["error"] = "dependency_missing"
+        report["message"] = f"缺少必备前置：{', '.join(missing_required)}"
+        _io.emit(report)
+        raise SystemExit(4)
+
+    _io.emit(report)

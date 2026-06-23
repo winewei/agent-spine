@@ -26,6 +26,7 @@ def _cfg(
     coder_backend: str = "claude",
     coder_bin: str | None = None,
     coder_model: str | None = None,
+    coder_phase_backends: tuple[tuple[str, str], ...] = (),
     review_engine: str = "codex",
     review_claude_bin: str | None = None,
     review_claude_model: str | None = None,
@@ -40,6 +41,7 @@ def _cfg(
             backend=coder_backend,
             bin=coder_bin,
             model=coder_model,
+            phase_backends=coder_phase_backends,
         ),
     )
 
@@ -144,6 +146,45 @@ def test_routing_mimo_in_both_model_and_bin_single_violation():
         v for v in _verify.check_routing(cfg) if v["rule"] == "mimo_exec_only"
     ]
     assert len(mimo_violations) == 1
+
+
+def test_routing_per_phase_mimo_vs_mimo_review_caught():
+    """[coder.phase].fix=mimo + review.engine=mimo：全局 backend 仍 claude，
+    旧实现只看 effective_backend 会漏判 gen⊥verify；现在须按 per-phase 在用后端拦下。
+    review.engine=mimo 是非法配置，用 object.__setattr__ 绕过校验模拟（与既有用例同口径）。"""
+    cfg = _cfg(
+        coder_backend="claude",
+        coder_phase_backends=(("fix", "mimo"),),
+        review_engine="codex",
+    )
+    object.__setattr__(cfg.review, "engine", "mimo")
+    rules = {v["rule"] for v in _verify.check_routing(cfg)}
+    assert "gen_not_orthogonal" in rules
+
+
+def test_routing_per_phase_claude_identity_caught():
+    """[coder.phase].implement=claude 且与 review.claude 同 bin+model：须判自评。"""
+    cfg = _cfg(
+        coder_backend="mimo",  # 全局是 mimo，但 implement 阶段回退 claude
+        coder_phase_backends=(("implement", "claude"),),
+        coder_bin="/x/claude",
+        coder_model="opus",
+        review_engine="claude",
+        review_claude_bin="/x/claude",
+        review_claude_model="opus",
+    )
+    rules = {v["rule"] for v in _verify.check_routing(cfg)}
+    assert "gen_not_orthogonal" in rules
+
+
+def test_routing_per_phase_mimo_codex_review_benign():
+    """[coder.phase].fix=mimo + review.engine=codex：合法（review 非同源），不应误判。"""
+    cfg = _cfg(
+        coder_backend="claude",
+        coder_phase_backends=(("fix", "mimo"),),
+        review_engine="codex",
+    )
+    assert _verify.check_routing(cfg) == []
 
 
 def test_routing_mimo_coder_codex_review_benign():
