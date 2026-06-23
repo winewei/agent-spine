@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# spine agent 一键安装：npc CLI（子模块 vendor/npc）+ harness plugin。
+# spine agent 一键安装：npc CLI（内置 src/npc）+ harness plugin。
 # 幂等：可重复运行。从仓库根目录执行：`bash install.sh`
 set -euo pipefail
 
@@ -21,15 +21,14 @@ if command -v claude >/dev/null; then HAVE_CLAUDE=1; ok "claude CLI 就位"; els
   warn "无 claude CLI —— 跳过 plugin 自动安装（稍后在 Claude Code 内 /plugin 安装）"
 fi
 
-# 1. 子模块 npc
-say "拉取 npc 子模块（vendor/npc）"
-git submodule update --init --recursive
-[ -f vendor/npc/pyproject.toml ] || die "vendor/npc 未就绪（检查子模块远程访问权限）"
-ok "vendor/npc 就位"
+# 1. 校验内置 npc
+say "校验内置 npc（src/npc）"
+[ -f pyproject.toml ] && [ -d src/npc ] || die "src/npc 未就绪（仓库不完整？）"
+ok "src/npc 就位"
 
 # 2. 装 npc CLI
-say "安装 npc CLI（来自子模块）"
-uv tool install --force --from vendor/npc npc
+say "安装 npc CLI（内置 src/npc，从仓库根安装）"
+uv tool install --force --from . npc
 NPC_VER="$(npc --version 2>/dev/null || true)"
 [ -n "$NPC_VER" ] || die "npc 安装失败（npc --version 无输出）"
 ok "$NPC_VER"

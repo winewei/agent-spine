@@ -20,8 +20,8 @@
 
 ## 前置依赖
 
-- **`npc` CLI**（必需，独立仓库 [cmzz/npc](https://github.com/cmzz/npc)，本仓库以子模块 `vendor/npc` 引入）：
-  `git submodule update --init` 后 `uv tool install --force --from vendor/npc npc`
+- **`npc` CLI**（必需，内置 `src/npc`；亦作独立仓库 [cmzz/npc](https://github.com/cmzz/npc) 发布供复用）：
+  在 agent-spine 仓库根 `uv tool install --force --from . npc`
 - **`git`**、**`openspec`**（archive + 目标拆解需要）
 - **`codex`**（默认 review 引擎；可经 `.npc/config.toml` 切 `claude` 引擎）
 

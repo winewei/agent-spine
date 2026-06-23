@@ -2,13 +2,13 @@
 
 > 人驾驭的自主 harness（跑在 Claude Code 进程内）——从 spec 到结果交付。
 >
-> 主 session 调度、spine-coder 执行、确定性动作委托给 [`npc`](https://github.com/cmzz/npc)。
+> 主 session 调度、spine-coder 执行、确定性动作委托给内置的 `npc` 执行层（`src/npc`）。
 
-本仓库是 **harness 的上层**（plugin + skill + 宪法）。确定性执行层 `npc` 已抽成**独立仓库 [cmzz/npc](https://github.com/cmzz/npc)**，本仓库以**子模块 `vendor/npc`** 引入——同一套 `npc` 工具也被 aidevos 等复用。
+本仓库是 **harness 的上层**（plugin + skill + 宪法），并**内置完整的确定性执行层 `npc`**（`src/npc`）。同一套 `npc` 工具也以**独立仓库 [cmzz/npc](https://github.com/cmzz/npc)** 发布，供 aidevos 等其它项目复用。
 
 - **智能层**：[`/spine-run`](plugins/agent-spine/commands/spine-run.md) 编排 plan→implement→review→fix→archive；[`/spine-analyze`](plugins/agent-spine/commands/spine-analyze.md) 自迭代。
 - **执行层**：[`spine-coder`](plugins/agent-spine/agents/spine-coder.md) subagent。
-- **底座**：`npc` CLI（子模块 `vendor/npc`）。
+- **底座**：内置 `npc` CLI（`src/npc`）。
 - **宪法**：[docs/principles.md](docs/principles.md) 4 条不变量。
 
 ---
@@ -16,12 +16,11 @@
 ## 安装
 
 ```bash
-git clone --recurse-submodules https://github.com/cmzz/agent-spine.git
+git clone https://github.com/cmzz/agent-spine.git
 cd agent-spine
-# 已克隆但没带子模块：git submodule update --init
 
-# 1) 装 npc CLI（来自子模块）
-uv tool install --force --from vendor/npc npc
+# 1) 装 npc CLI（内置 src/npc，从仓库根安装）
+uv tool install --force --from . npc
 npc --version          # npc 1.3.0
 
 # 2) 装 harness plugin（Claude Code 内）
@@ -29,12 +28,12 @@ npc --version          # npc 1.3.0
 #   /plugin install agent-spine@agent-spine
 ```
 
-> **推荐三层配置**（CLI + plugin + CLAUDE.md 片段）见 [docs/usage.md](docs/usage.md)。`npc` 完整契约见其仓库的 `docs/cli.md`。
+> **推荐三层配置**（CLI + plugin + CLAUDE.md 片段）见 [docs/usage.md](docs/usage.md)。`npc` 完整契约见 [docs/cli.md](docs/cli.md)。
 
 ### 一键安装
 
 ```bash
-bash install.sh        # 子模块 → npc CLI → plugin → 体检（幂等，详见 INSTALL.md）
+bash install.sh        # npc CLI → plugin → 体检（幂等，详见 INSTALL.md）
 ```
 
 ### Claude Code Plugin 安装（手动）
@@ -47,7 +46,7 @@ bash install.sh        # 子模块 → npc CLI → plugin → 体检（幂等，
 
 装完得到 `/spine-run`、`/spine-analyze`、`spine-coder`（**重启 Claude Code 后生效**）。Plugin 升级 `/plugin update agent-spine@agent-spine`。
 
-> npc CLI（来自子模块 `vendor/npc`）与 plugin 相互独立：CLI 机器级装一次，plugin 用户级装一次。`npc` 的命令速查/契约见其独立仓库 [cmzz/npc](https://github.com/cmzz/npc) 的 README 与 `docs/cli.md`。
+> npc CLI（内置 `src/npc`）与 plugin 相互独立：CLI 机器级装一次，plugin 用户级装一次。`npc` 的命令速查/契约见 [docs/cli.md](docs/cli.md)；npc 亦作独立仓库 [cmzz/npc](https://github.com/cmzz/npc) 发布供其它项目复用。
 
 ### 系统依赖
 

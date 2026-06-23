@@ -2,7 +2,7 @@
 
 本指南给 **执行安装的 agent（如 Claude Code）** 用。一键脚本是 `install.sh`；下面是它的每一步 + 验证命令 + 失败处置，便于 agent 自检与排错。
 
-> spine agent = `npc` CLI（确定性执行层，子模块 `vendor/npc`）+ harness plugin（`/spine-run`、`/spine-analyze`、`spine-coder`）。
+> spine agent = `npc` CLI（确定性执行层，内置 `src/npc`）+ harness plugin（`/spine-run`、`/spine-analyze`、`spine-coder`）。
 
 ## 一键安装
 
@@ -23,16 +23,15 @@ command -v git && command -v uv && echo OK
 - 缺 `uv` → 装：`curl -LsSf https://astral.sh/uv/install.sh | sh`
 - `claude` CLI 可选（无则跳过 plugin 自动安装，改在 Claude Code 内手动 `/plugin`）。
 
-### 1. 拉取 npc 子模块
+### 1. 校验内置 npc
 ```bash
-git submodule update --init --recursive
-test -f vendor/npc/pyproject.toml && echo "vendor/npc OK"
+test -f pyproject.toml && test -d src/npc && echo "src/npc OK"
 ```
-- 失败多为子模块远程访问权限（`vendor/npc` → `https://github.com/cmzz/npc.git`，私有仓库需 gh/凭据）。
+- npc 已内置在本仓库（`src/npc`），无需子模块。同一套 npc 亦作独立仓库 [cmzz/npc](https://github.com/cmzz/npc) 发布供其它项目复用。
 
-### 2. 装 npc CLI（来自子模块）
+### 2. 装 npc CLI（内置 src/npc）
 ```bash
-uv tool install --force --from vendor/npc npc
+uv tool install --force --from . npc
 npc --version          # 期望：npc 1.3.0
 ```
 验证：`npc --version` 有输出即成功。`--force` 必需（覆盖旧版）。

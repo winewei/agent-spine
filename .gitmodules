@@ -1,3 +1,0 @@
-[submodule "vendor/npc"]
-	path = vendor/npc
-	url = https://github.com/cmzz/npc.git

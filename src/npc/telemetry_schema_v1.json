@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-spine.local/telemetry/events-v1.json",
+  "title": "npc telemetry events.ndjson record (v1)",
+  "description": "每行一条紧凑 JSON：写到 ~/task_log/_telemetry/events.ndjson。原始事件已在 run.events.jsonl，这里只存优化决策需要的派生指标 + 反查指针。",
+  "type": "object",
+  "required": ["schema_version", "ts", "kind", "proj_key"],
+  "additionalProperties": true,
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "description": "telemetry schema 版本号"
+    },
+    "ts": {
+      "type": "string",
+      "format": "date-time",
+      "description": "事件发生时间（ISO 8601，本地时区偏移）"
+    },
+    "kind": {
+      "type": "string",
+      "enum": [
+        "phase.exit",
+        "review.round",
+        "archive.done",
+        "agent.spawn",
+        "agent.timeout"
+      ],
+      "description": "事件类型；phase.exit 用于 implement/fix/archive 等通用 phase 结束，review.round 是 pipeline.run_review_round 的高层信号"
+    },
+    "proj_key": {
+      "type": "string",
+      "description": "工程 mangle key（与 task_log 子目录同名）"
+    },
+    "run_ts": {
+      "type": ["string", "null"],
+      "description": "本次 run 的时间戳（YYYY-MM-DD-HHMM）"
+    },
+    "change_seq": {
+      "type": ["integer", "null"],
+      "minimum": 1
+    },
+    "change_id": {
+      "type": ["string", "null"]
+    },
+    "phase": {
+      "type": ["string", "null"],
+      "description": "phase 名：implement / review-rN / fix-rN / archive"
+    },
+    "status": {
+      "type": ["string", "null"],
+      "enum": ["done", "failed", null]
+    },
+    "duration_ms": {
+      "type": ["integer", "null"],
+      "minimum": 0
+    },
+    "tokens": {
+      "type": ["object", "null"],
+      "description": "token 估算（非精确）；prompt/output 文件不存在时为 null",
+      "additionalProperties": true,
+      "properties": {
+        "prompt_bytes": {"type": ["integer", "null"], "minimum": 0},
+        "output_bytes": {"type": ["integer", "null"], "minimum": 0},
+        "est_input_tokens": {"type": ["integer", "null"], "minimum": 0},
+        "est_output_tokens": {"type": ["integer", "null"], "minimum": 0},
+        "method": {"type": "string", "description": "估算方法，如 bytes_div_4"}
+      }
+    },
+    "verdict": {
+      "type": ["string", "null"],
+      "enum": ["pass", "should-fix", "must-fix", null]
+    },
+    "blocking_count": {
+      "type": ["integer", "null"],
+      "minimum": 0
+    },
+    "blocking_categories": {
+      "type": ["array", "null"],
+      "items": {"type": "string"}
+    },
+    "round": {
+      "type": ["integer", "null"],
+      "minimum": 0
+    },
+    "retry_count": {
+      "type": ["integer", "null"],
+      "minimum": 0
+    },
+    "outcome_reason": {
+      "type": ["string", "null"],
+      "description": "failed 时的 reason；如 implementer / commit-not-found / openspec-validate-failed"
+    },
+    "engine": {
+      "type": ["string", "null"],
+      "description": "review 引擎；codex / claude"
+    },
+    "archive_commit": {
+      "type": ["string", "null"]
+    },
+    "total_rounds": {
+      "type": ["integer", "null"],
+      "minimum": 0
+    },
+    "pointer": {
+      "type": ["object", "null"],
+      "description": "给 meta-agent 反查的指针（绝对路径）",
+      "additionalProperties": true,
+      "properties": {
+        "state_json": {"type": ["string", "null"]},
+        "run_events": {"type": ["string", "null"]},
+        "per_change_events": {"type": ["string", "null"]},
+        "summary_md": {"type": ["string", "null"]},
+        "review_json": {"type": ["string", "null"]},
+        "focus_md": {"type": ["string", "null"]},
+        "prompt_md": {"type": ["string", "null"]}
+      }
+    }
+  }
+}
