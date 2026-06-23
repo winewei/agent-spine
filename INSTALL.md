@@ -1,16 +1,19 @@
 # 安装 spine agent（面向 LLM 的逐步指南）
 
-本指南给 **执行安装的 agent（如 Claude Code）** 用。一键脚本是 `install.sh`；下面是它的每一步 + 验证命令 + 失败处置，便于 agent 自检与排错。
+本指南给 **执行安装的 agent（如 Claude Code）** 用。下面是一句话安装 + 每步验证 + 失败处置，便于 agent 自检与排错。
 
 > spine agent = `npc` CLI（确定性执行层，内置 `src/npc`）+ harness plugin（`/spine-run`、`/spine-analyze`、`spine-coder`）。
 
-## 一键安装
+## 一句话安装
+
+在 agent-spine 仓库根执行（幂等，可重复跑）：
 
 ```bash
-bash install.sh
+uv tool install --force --from . npc && claude plugin marketplace add "$(pwd)" && claude plugin install agent-spine@agent-spine --scope user
 ```
 
-幂等，可重复跑。若要逐步执行 / 排错，按下面来。
+装完 **重启 Claude Code** 加载 `/spine-run`、`/spine-analyze`、`spine-coder`，再 `npc doctor` 体检。
+无 `claude` CLI 时只跑前半句装 npc，plugin 改在 Claude Code 内 `/plugin` 手动装。若要逐步执行 / 排错，按下面来。
 
 ---
 

@@ -30,10 +30,12 @@ npc --version          # npc 1.3.0
 
 > **推荐三层配置**（CLI + plugin + CLAUDE.md 片段）见 [docs/usage.md](docs/usage.md)。`npc` 完整契约见 [docs/cli.md](docs/cli.md)。
 
-### 一键安装
+### 一句话安装（面向 agent）
+
+在仓库根执行（幂等，详见 [INSTALL.md](INSTALL.md)）：
 
 ```bash
-bash install.sh        # npc CLI → plugin → 体检（幂等，详见 INSTALL.md）
+uv tool install --force --from . npc && claude plugin marketplace add "$(pwd)" && claude plugin install agent-spine@agent-spine --scope user
 ```
 
 ### Claude Code Plugin 安装（手动）
