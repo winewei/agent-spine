@@ -310,6 +310,12 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="覆盖 coder 后端（默认从 [coder].backend 读，或 mimo.env 存在时自动 mimo）",
     )
+    p_impl_run.add_argument(
+        "--dispatch",
+        choices=["headless", "in-session"],
+        default=None,
+        help="覆盖 coder dispatch 模式（headless=子进程 spawn，in-session=当前 session 执行）",
+    )
     p_impl_run.add_argument("--timeout", type=int, default=None, help="coder 子进程超时秒数")
     p_impl_run.add_argument("--config", default=None, help="显式 TOML 配置路径")
     p_impl_run.set_defaults(
@@ -342,6 +348,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p_fix_run.add_argument(
         "--backend", choices=["claude", "mimo", "codex"], default=None,
         help="覆盖 coder 后端",
+    )
+    p_fix_run.add_argument(
+        "--dispatch",
+        choices=["headless", "in-session"],
+        default=None,
+        help="覆盖 coder dispatch 模式（headless=子进程 spawn，in-session=当前 session 执行）",
     )
     p_fix_run.add_argument("--timeout", type=int, default=None)
     p_fix_run.add_argument("--config", default=None)
