@@ -38,12 +38,13 @@
 
 便宜模型（如 MiMo `mimo-v2.5-pro`）**只可用于 coder 层（生成/执行）**，**绝不**用于决策（主 session 编排）与分析/验证（`npc review run`、`/spine-analyze`）——后者恒留 premium（Claude / codex）。
 
+- **premium coder（claude 后端）默认经 in-session subagent 执行**，而非 headless `claude -p` 子进程——这对冲了 headless `claude -p` 被切出订阅的计费风险（in-session Task 工具 subagent 属交互式、官方豁免）。MiMo（廉价层）恒走 headless，不受此约束。
 - **MiMo 默认不启用**（MiMo 较慢，按需开）。开启方式（`[coder]` 配置，显式）：
   - 全局 `[coder].backend = "mimo"`；或
   - **per-phase** `[coder.phase].fix = "mimo"`（如只把 fix 给 MiMo，implement 仍 claude）；或
   - 临时 `npc implement/fix run --backend mimo`。
   - 无配置 → 默认 `claude`。`~/.config/npc/mimo.env` 是否存在**不再**自动触发路由。
-- 不变量约束（由 `npc verify routing` 在代码层强制）：review 永不与 coder 同源；review 引擎/bin/model 含 mimo 即 violation。
+- 不变量约束（由 `npc verify routing` 在代码层强制）：review 永不与 coder 同源；review 引擎/bin/model 含 mimo 即 violation；mimo + in-session 亦是 violation。
 - MiMo 密钥存仓库外 `~/.config/npc/mimo.env`（chmod 600，绝不入 git）；backend=mimo 时由 `npc implement/fix run` 注入到子进程 env。
 
 ---

@@ -26,16 +26,19 @@ tags: [harness, autonomous, orchestration, openspec, review-loop]
 
 ## 成本感知路由（模型分层，见 docs/principles.md 不变量 1 & 4）
 
-coder 后端由 npc 按配置决定（`npc implement/fix run` 内部 resolve）：
+coder 后端与分发方式由 npc 按配置决定（`npc implement/fix run` 内部 resolve）：
 
-| 层 | 角色 | 跑在哪 |
-|---|---|---|
-| **执行层** | coder（implement / fix 写代码） | 默认 **Claude**；按需在 `[coder]` / `[coder.phase]` 配 `mimo` 卸到廉价层 |
-| **premium 层（决策 + 分析/验证）** | 主 session 编排、`npc review run`、`/spine-analyze` | 恒 Claude / codex |
+| 层 | 角色 | 跑在哪 | 分发方式 |
+|---|---|---|---|
+| **执行层（premium）** | coder（implement / fix 写代码），claude 后端 | 默认 **Claude** | **in-session**（`npc implement/fix run` 返回 `deferred=true` 指令，由编排者 spawn `spine-coder` subagent） |
+| **执行层（廉价）** | coder，mimo 后端 | 按需配 `mimo` 卸到廉价层 | **headless**（`npc implement/fix run` 一行内完成 spawn→record） |
+| **premium 层（决策 + 分析/验证）** | 主 session 编排、`npc review run`、`/spine-analyze` | 恒 Claude / codex | — |
 
-**MiMo 默认不启用**（较慢，按需开）。开启：全局 `[coder].backend="mimo"`、或 per-phase `[coder.phase].fix="mimo"`（只把 fix 给 MiMo）、或临时 `--backend mimo`。
+**为何 premium coder 走 in-session**：headless `claude -p` 面临被切出订阅的计费风险；in-session Task 工具 subagent 属交互式、官方豁免。这是 `coder-dispatch-routing` 固化的默认。
 
-**铁律**：MiMo **只许执行，绝不用于决策与分析/验证**。review 恒留 codex/Claude——`npc verify routing` 在代码层强制（review 与 coder 不同源；review 含 mimo 即 violation）。
+**MiMo 默认不启用**（较慢，按需开）。开启：全局 `[coder].backend="mimo"`、或 per-phase `[coder.phase].fix="mimo"`（只把 fix 给 MiMo）、或临时 `--backend mimo`。MiMo 后端恒走 headless——绝不与 in-session 绑定。
+
+**铁律**：MiMo **只许执行，绝不用于决策与分析/验证**。review 恒留 codex/Claude——`npc verify routing` 在代码层强制（review 与 coder 不同源；review 含 mimo 即 violation；mimo + in-session 亦是 violation）。
 
 ---
 
@@ -109,13 +112,27 @@ npc state add-change $SEQ "$CID"
 
 ### 3a. Implement
 
-**一行跑完**（npc 内部：render prompt → coder 子进程[按配置选后端，默认 claude；配了 mimo 才走 MiMo] → 抽 RESULT → record，全确定性、已测）：
 ```bash
 IMPL=$(npc implement run --seq $SEQ)
 [ "$(echo "$IMPL" | jq -r '.ok')" = "true" ] || { 进入 Step 3d 决策点; }
 ```
 
-> 备选（想用 in-session 子代理而非 headless 子进程）：`npc agent prompt render --phase implement --change-id "$CID"` → `npc agent spawn-prompt ...` → `Agent(subagent_type=spine-coder, prompt=$PROMPT_TEXT)` → `npc implement record --seq $SEQ --result "$RESULT_LINE"`。
+**按 `deferred` 字段分发**（`npc implement run` 内部 resolve 好后端与分发方式，编排者只看这一个字段）：
+
+- **`deferred=true`（in-session，claude 后端默认）**：npc 已 render prompt，等编排者 spawn subagent：
+  ```bash
+  SPAWN_PROMPT=$(echo "$IMPL" | jq -r '.spawn_prompt')
+  # 调 Task 工具，由主 session 原地 spawn spine-coder subagent：
+  RESULT_LINE=$(Agent subagent_type=spine-coder prompt="$SPAWN_PROMPT")
+  # 抽末尾 RESULT: 行，装订：
+  npc implement record --seq $SEQ --result "$RESULT_LINE"
+  ```
+  > `spawn_prompt` 已含 prompt 文件绝对路径（`prompt_file` 字段亦可直接取）；RESULT 行格式见 spine-coder 契约。
+
+- **`deferred=false`（headless，mimo 后端或显式配置）**：npc 内部已完成 spawn→record，一行跑完，无需额外操作：
+  ```bash
+  # IMPL.ok=true 即代表 coder 已跑完并 record，直接进 review
+  ```
 
 ### 3b. Review-Fix 循环（反复打磨，直到干净或卡死）
 
@@ -126,9 +143,19 @@ while [ "$(echo "$R" | jq -r '.blocking')" -gt 0 ] \
    && [ "$(echo "$R" | jq -r '.stale')" = "false" ] \
    && [ $N -lt 20 ]; do
   N=$((N+1))
-  # 一行跑完 fix（npc 内部 render fix prompt[注入上轮 blocking findings + 修复历史] → coder 子进程 → record）
+  # npc 内部 render fix prompt（注入上轮 blocking findings + 修复历史），按 deferred 分发：
   FIX=$(npc fix run --seq $SEQ --round $N)
   [ "$(echo "$FIX" | jq -r '.ok')" = "true" ] || break
+
+  # 同 3a：按 deferred 字段分发
+  if [ "$(echo "$FIX" | jq -r '.deferred')" = "true" ]; then
+    # in-session（claude 后端默认）：spawn spine-coder subagent，装订结果
+    SPAWN_PROMPT=$(echo "$FIX" | jq -r '.spawn_prompt')
+    RESULT_LINE=$(Agent subagent_type=spine-coder prompt="$SPAWN_PROMPT")
+    npc fix record --seq $SEQ --round $N --result "$RESULT_LINE"
+  fi
+  # headless（mimo/显式）：npc 内部已 record，无需额外步骤
+
   R=$(npc review run --seq $SEQ --round $N)
 done
 ```
@@ -196,7 +223,7 @@ npc index append          # 追加跨 run 索引
 
 ## Guardrails（硬约束）
 
-- **你不写业务代码**。所有实现/修复一律交给 coder（默认 MiMo 启动器，回退 `spine-coder` subagent）。你只触发 coder、收 RESULT 行、调 npc 装订。
+- **你不写业务代码**。所有实现/修复一律交给 coder：claude 后端默认经 in-session subagent（`deferred=true`）执行，mimo 后端经 headless 子进程执行。你只触发 `npc implement/fix run`，按 `deferred` 分发，收 RESULT 行，调 npc 装订。
 - **生成 ⊥ 验证（不变量 1）**：coder（生成）与 review（验证）永不同源。coder 跑 MiMo 时，`npc review run` 必须仍走 codex/Claude——绝不把 review 路由到 MiMo。
 - **MiMo 只许执行（不变量 4）**：MiMo 仅用于 coder 层。你（主 session 决策）和 `/spine-analyze`（分析）、`npc review run`（验证）一律 premium 层（Claude/codex），绝不路由到 MiMo。
 - **你不读 prompt 模板 / review.json / summary.md 原文**。只读 npc 子命令返回的一行 JSON 的关键字段。需要细节时引用 npc 给的 `pointer` 路径，不要把原文拉进 context。
