@@ -22,6 +22,7 @@ import argparse
 import json
 import os
 import subprocess
+import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -122,9 +123,16 @@ def proj_key_for(repo_root: Path) -> str:
 
 
 def make_run_ts(now: datetime | None = None) -> str:
-    """生成 'YYYY-MM-DD-HHMM' 格式的 run timestamp（本地时区）。"""
+    """生成唯一 run timestamp。
+
+    格式：``YYYY-MM-DD-HHMM-<suffix>``，其中 suffix 为 UUID4 前 8 位十六进制，
+    保证同一分钟内并发调用永不冲突。前缀保留可读性与字典序排序性。
+    suffix 仅含 ``[0-9a-f]``，文件名安全。
+    """
     dt = now or datetime.now()
-    return dt.strftime("%Y-%m-%d-%H%M")
+    prefix = dt.strftime("%Y-%m-%d-%H%M")
+    suffix = uuid.uuid4().hex[:8]
+    return f"{prefix}-{suffix}"
 
 
 def task_log_dir_for(repo_root: Path, home: Path | None = None) -> Path:
