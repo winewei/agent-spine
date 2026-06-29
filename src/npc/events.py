@@ -253,6 +253,7 @@ def phase_rotate(args: argparse.Namespace) -> None:
         ):
             _telemetry.emit_phase_exit(
                 proj_key=p.proj_key,
+                canonical_proj_key=p.canonical_proj_key,
                 run_ts=p.run_ts,
                 change_seq=seq,
                 change_id=change_id,
@@ -374,6 +375,7 @@ def phase_exit(args: argparse.Namespace) -> None:
     if not (phase.startswith("review-r") or (phase == "archive" and status == "done")):
         _telemetry.emit_phase_exit(
             proj_key=p.proj_key,
+            canonical_proj_key=p.canonical_proj_key,
             run_ts=p.run_ts,
             change_seq=seq,
             change_id=captured["change_id"],

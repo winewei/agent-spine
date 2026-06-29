@@ -548,6 +548,7 @@ def cli_estimate_tokens(args: argparse.Namespace) -> None:
 def emit_phase_exit(
     *,
     proj_key: str,
+    canonical_proj_key: str | None = None,
     run_ts: str | None,
     change_seq: int | None,
     change_id: str | None,
@@ -568,6 +569,7 @@ def emit_phase_exit(
     record: dict[str, Any] = {
         "kind": "phase.exit",
         "proj_key": proj_key,
+        "canonical_proj_key": canonical_proj_key if canonical_proj_key is not None else proj_key,
         "run_ts": run_ts,
         "change_seq": change_seq,
         "change_id": change_id,
@@ -612,6 +614,7 @@ def emit_phase_exit(
 def emit_review_round(
     *,
     proj_key: str,
+    canonical_proj_key: str | None = None,
     run_ts: str | None,
     change_seq: int,
     change_id: str,
@@ -635,6 +638,7 @@ def emit_review_round(
     record: dict[str, Any] = {
         "kind": "review.round",
         "proj_key": proj_key,
+        "canonical_proj_key": canonical_proj_key if canonical_proj_key is not None else proj_key,
         "run_ts": run_ts,
         "change_seq": change_seq,
         "change_id": change_id,
@@ -663,6 +667,7 @@ def emit_review_round(
 def emit_archive_done(
     *,
     proj_key: str,
+    canonical_proj_key: str | None = None,
     run_ts: str | None,
     change_seq: int,
     change_id: str,
@@ -676,6 +681,7 @@ def emit_archive_done(
     record: dict[str, Any] = {
         "kind": "archive.done",
         "proj_key": proj_key,
+        "canonical_proj_key": canonical_proj_key if canonical_proj_key is not None else proj_key,
         "run_ts": run_ts,
         "change_seq": change_seq,
         "change_id": change_id,
@@ -696,6 +702,7 @@ def emit_archive_done(
 def emit_agent_spawn(
     *,
     proj_key: str,
+    canonical_proj_key: str | None = None,
     run_ts: str | None,
     change_seq: int | None,
     change_id: str,
@@ -710,6 +717,7 @@ def emit_agent_spawn(
     record: dict[str, Any] = {
         "kind": "agent.spawn",
         "proj_key": proj_key,
+        "canonical_proj_key": canonical_proj_key if canonical_proj_key is not None else proj_key,
         "run_ts": run_ts,
         "change_seq": change_seq,
         "change_id": change_id,

@@ -29,7 +29,11 @@
     },
     "proj_key": {
       "type": "string",
-      "description": "工程 mangle key（与 task_log 子目录同名）"
+      "description": "工程 mangle key（与 task_log 子目录同名）；worktree 模式下为 per-worktree 存储键"
+    },
+    "canonical_proj_key": {
+      "type": "string",
+      "description": "主 checkout 的 proj_key；worktree 模式下等于 run.json 的 canonical_proj_key，非 worktree 模式下等于 proj_key；用于跨 run 逻辑工程聚合"
     },
     "run_ts": {
       "type": ["string", "null"],

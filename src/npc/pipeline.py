@@ -270,6 +270,7 @@ def _do_phase_exit(
     if not (phase.startswith("review-r") or (phase == "archive" and status == "done")):
         _telemetry.emit_phase_exit(
             proj_key=p.proj_key,
+            canonical_proj_key=p.canonical_proj_key,
             run_ts=p.run_ts,
             change_seq=seq,
             change_id=captured["change_id"],
@@ -600,6 +601,7 @@ def run_review_round(
         )
         _telemetry.emit_review_round(
             proj_key=p.proj_key,
+            canonical_proj_key=p.canonical_proj_key,
             run_ts=p.run_ts,
             change_seq=seq,
             change_id=change_id,
@@ -640,6 +642,7 @@ def run_review_round(
         )
         _telemetry.emit_review_round(
             proj_key=p.proj_key,
+            canonical_proj_key=p.canonical_proj_key,
             run_ts=p.run_ts,
             change_seq=seq,
             change_id=change_id,
@@ -675,6 +678,7 @@ def run_review_round(
     )
     _telemetry.emit_review_round(
         proj_key=p.proj_key,
+        canonical_proj_key=p.canonical_proj_key,
         run_ts=p.run_ts,
         change_seq=seq,
         change_id=change_id,
@@ -875,6 +879,7 @@ def run_archive(
 
     _telemetry.emit_archive_done(
         proj_key=p.proj_key,
+        canonical_proj_key=p.canonical_proj_key,
         run_ts=p.run_ts,
         change_seq=seq,
         change_id=change_id,

@@ -289,6 +289,7 @@ def spawn_prompt(args: argparse.Namespace) -> None:
 
     _telemetry.emit_agent_spawn(
         proj_key=p.proj_key,
+        canonical_proj_key=p.canonical_proj_key,
         run_ts=p.run_ts,
         change_seq=seq,
         change_id=args.change_id,

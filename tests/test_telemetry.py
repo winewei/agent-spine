@@ -386,3 +386,170 @@ def test_events_phase_rotate_emits_telemetry(env_setup, capsys, make_args, isola
     assert len(records) == 1
     assert records[0]["phase"] == "implement"
     assert records[0]["status"] == "done"
+
+
+# ============================================================
+# canonical_proj_key：worktree 模式与非 worktree 模式
+# ============================================================
+
+
+def test_emit_phase_exit_worktree_canonical_proj_key(isolate_telemetry: Path):
+    """worktree 模式：记录应携带 canonical_proj_key = 主 checkout 的 proj_key。"""
+    ok = _telemetry.emit_phase_exit(
+        proj_key="-worktree-abc-my-proj",
+        canonical_proj_key="-main-my-proj",
+        run_ts="2026-06-01-1000",
+        change_seq=1,
+        change_id="add-foo",
+        phase="implement",
+        status="done",
+        duration_ms=1000,
+    )
+    # emit_phase_exit returns None but writes to events.ndjson
+    ep = _telemetry.events_path()
+    assert ep.is_file()
+    rec = json.loads(ep.read_text().splitlines()[-1])
+    assert rec["proj_key"] == "-worktree-abc-my-proj"
+    assert rec["canonical_proj_key"] == "-main-my-proj"
+    assert rec["canonical_proj_key"] != rec["proj_key"]
+
+
+def test_emit_phase_exit_non_worktree_fallback_to_proj_key(isolate_telemetry: Path):
+    """非 worktree 模式（canonical_proj_key=None）：记录的 canonical_proj_key 应等于 proj_key。"""
+    _telemetry.emit_phase_exit(
+        proj_key="-main-my-proj",
+        canonical_proj_key=None,
+        run_ts="2026-06-01-1000",
+        change_seq=1,
+        change_id="add-foo",
+        phase="implement",
+        status="done",
+        duration_ms=500,
+    )
+    ep = _telemetry.events_path()
+    assert ep.is_file()
+    rec = json.loads(ep.read_text().splitlines()[-1])
+    assert rec["proj_key"] == "-main-my-proj"
+    assert rec["canonical_proj_key"] == rec["proj_key"]
+
+
+def test_emit_phase_exit_no_canonical_arg_fallback(isolate_telemetry: Path):
+    """未传 canonical_proj_key（旧调用方兼容）：canonical_proj_key 等于 proj_key。"""
+    _telemetry.emit_phase_exit(
+        proj_key="-legacy-proj",
+        run_ts=None,
+        change_seq=None,
+        change_id="legacy",
+        phase="implement",
+        status="done",
+        duration_ms=None,
+    )
+    ep = _telemetry.events_path()
+    rec = json.loads(ep.read_text().splitlines()[-1])
+    assert rec["canonical_proj_key"] == "-legacy-proj"
+
+
+def test_emit_review_round_canonical_proj_key(isolate_telemetry: Path, tmp_path: Path):
+    """emit_review_round：worktree 模式 canonical_proj_key 正确写入。"""
+    base = tmp_path / "base"
+    base.mkdir()
+    _telemetry.emit_review_round(
+        proj_key="-worktree-abc",
+        canonical_proj_key="-main-abc",
+        run_ts="2026-06-01-1000",
+        change_seq=1,
+        change_id="add-bar",
+        round_n=0,
+        base=base,
+        ok=True,
+        engine="codex",
+        verdict="pass",
+        blocking_count=0,
+        blocking_categories=[],
+        duration_ms=5000,
+        retry_count=0,
+        outcome_reason=None,
+        state_json=None,
+        run_events=None,
+    )
+    ep = _telemetry.events_path()
+    rec = json.loads(ep.read_text().splitlines()[-1])
+    assert rec["canonical_proj_key"] == "-main-abc"
+    assert rec["proj_key"] == "-worktree-abc"
+
+
+def test_emit_agent_spawn_canonical_proj_key(isolate_telemetry: Path, tmp_path: Path):
+    """emit_agent_spawn：worktree 模式 canonical_proj_key 正确写入；非 worktree 回退。"""
+    prompt_file = tmp_path / "implement.prompt.md"
+    prompt_file.write_text("# prompt\n", encoding="utf-8")
+
+    # worktree 模式
+    _telemetry.emit_agent_spawn(
+        proj_key="-worktree-xyz",
+        canonical_proj_key="-main-xyz",
+        run_ts="2026-06-01-1000",
+        change_seq=1,
+        change_id="add-baz",
+        phase="implement",
+        round_n=None,
+        prompt_file=prompt_file,
+        state_json=None,
+    )
+    ep = _telemetry.events_path()
+    rec = json.loads(ep.read_text().splitlines()[-1])
+    assert rec["canonical_proj_key"] == "-main-xyz"
+
+    # 非 worktree 模式（canonical=None，回退）
+    _telemetry.emit_agent_spawn(
+        proj_key="-main-xyz",
+        canonical_proj_key=None,
+        run_ts="2026-06-01-1000",
+        change_seq=1,
+        change_id="add-baz",
+        phase="implement",
+        round_n=None,
+        prompt_file=prompt_file,
+        state_json=None,
+    )
+    rec2 = json.loads(ep.read_text().splitlines()[-1])
+    assert rec2["canonical_proj_key"] == "-main-xyz"
+    assert rec2["canonical_proj_key"] == rec2["proj_key"]
+
+
+def test_emit_phase_exit_canonical_proj_key_in_emitted_record(isolate_telemetry: Path):
+    """emit_phase_exit 写入的记录同时有 proj_key 和 canonical_proj_key 两个字段。
+
+    worktree 模式下两者不同；非 worktree 模式下 canonical == proj_key。
+    """
+    # worktree 模式：canonical != proj_key
+    _telemetry.emit_phase_exit(
+        proj_key="-worktree-abc-proj",
+        canonical_proj_key="-canonical-proj",
+        run_ts="2026-06-01-1000",
+        change_seq=1,
+        change_id="add-thing",
+        phase="fix-r0",
+        status="done",
+        duration_ms=2000,
+    )
+    ep = _telemetry.events_path()
+    rec = json.loads(ep.read_text().splitlines()[-1])
+    assert "proj_key" in rec
+    assert "canonical_proj_key" in rec
+    assert rec["proj_key"] == "-worktree-abc-proj"
+    assert rec["canonical_proj_key"] == "-canonical-proj"
+
+    # 非 worktree 模式：canonical == proj_key（通过 None 触发回退）
+    _telemetry.emit_phase_exit(
+        proj_key="-canonical-proj",
+        canonical_proj_key=None,
+        run_ts="2026-06-01-1001",
+        change_seq=2,
+        change_id="add-other",
+        phase="implement",
+        status="done",
+        duration_ms=1000,
+    )
+    rec2 = json.loads(ep.read_text().splitlines()[-1])
+    assert rec2["canonical_proj_key"] == "-canonical-proj"
+    assert rec2["canonical_proj_key"] == rec2["proj_key"]
