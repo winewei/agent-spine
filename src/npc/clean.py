@@ -30,9 +30,11 @@ from . import _io, paths as _paths, state as _state, git_ops as _git_ops, resume
 # 默认保留窗口（天）。
 DEFAULT_KEEP_DAYS = 14
 
-# run_ts 格式：YYYY-MM-DD-HHMM（与 paths.make_run_ts 一致）。
-# 安全护栏：只有匹配此格式的目录才会被 clean 当作 run 候选。
-RUN_TS_RE = re.compile(r"\d{4}-\d{2}-\d{2}-\d{4}")
+# run_ts 格式：YYYY-MM-DD-HHMM（旧格式）或 YYYY-MM-DD-HHMM-<suffix>（当前格式，
+# 与 paths.make_run_ts 一致，suffix 由 SS+PID+cnt 组成，仅含 [0-9a-f]）。
+# 安全护栏：只有匹配此格式的目录才会被 clean 当作 run 候选；
+# 不含连字符的外来目录（backup/、tmp-notes/、_telemetry/ 等）不会匹配。
+RUN_TS_RE = re.compile(r"\d{4}-\d{2}-\d{2}-\d{4}(-[0-9a-f]+)?")
 
 # 可清理的顶层 status 集合。in-progress 永不在此集合。
 _REMOVABLE_TOP_STATUS = frozenset({"completed", "completed-with-issues", "aborted"})
@@ -162,8 +164,8 @@ def scan_runs(task_log_dir: Path) -> list[dict]:
         if not entry.is_dir():
             continue
         run_ts = entry.name
-        # 安全：只把符合 run_ts 格式（YYYY-MM-DD-HHMM）的目录视为 run。
-        # 杜绝把 task_log 下的外来目录（backup/、tmp/、submodule…）误当孤儿 run 删掉。
+        # 安全：只把符合 run_ts 格式（YYYY-MM-DD-HHMM 或 YYYY-MM-DD-HHMM-<suffix>）
+        # 的目录视为 run，杜绝把外来目录（backup/、tmp/、submodule…）误当孤儿 run 删掉。
         if not RUN_TS_RE.fullmatch(run_ts):
             continue
         state_json = task_log_dir / f"{run_ts}-plan-state.json"

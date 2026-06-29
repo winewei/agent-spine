@@ -405,7 +405,8 @@ def _make_spine_worktree(canonical, worktree_path, run_ts):
 def _make_wt_task_log(home, wt_path, run_ts, status, *, age_days=60):
     """为 worktree 路径构造对应的 task_log_dir 并写 state。
 
-    同时创建匹配 RUN_TS_RE 格式的 run 目录和 state 文件，供 scan_runs 识别。
+    使用实际的 run_ts（含 suffix，如 YYYY-MM-DD-HHMM-<suffix>）创建 run 目录和
+    state 文件，scan_runs 现在能正确识别带 suffix 的格式。
     age_days 控制 run 目录及 state 文件的 mtime（默认 60 天前，足够旧）。
     对 in-progress 状态，age_days 不影响 find_latest_in_progress 的结果（它只读 status）。
     """
@@ -414,25 +415,18 @@ def _make_wt_task_log(home, wt_path, run_ts, status, *, age_days=60):
     wt_task_log = home / "task_log" / wt_proj_key
     wt_task_log.mkdir(parents=True, exist_ok=True)
 
-    # 写完整格式的 state 文件（run_ts 直接用，find_latest_in_progress 靠它）
+    # 直接用实际 run_ts 创建 run 目录 + state 文件（scan_runs 已支持 suffix 格式）
+    run_dir = wt_task_log / run_ts
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "run.events.jsonl").write_text("", encoding="utf-8")
     state = {"run_ts": run_ts, "status": status, "progress": []}
     state_file = wt_task_log / f"{run_ts}-plan-state.json"
     state_file.write_text(json.dumps(state), encoding="utf-8")
 
-    # 为 scan_runs 创建符合 RUN_TS_RE 格式（YYYY-MM-DD-HHMM）的 run 目录
-    # 截取 run_ts 的前 15 字符（YYYY-MM-DD-HHMM），若不匹配则用固定占位
-    canonical_ts = run_ts[:15] if len(run_ts) >= 15 and _clean.RUN_TS_RE.fullmatch(run_ts[:15]) else "2026-06-20-0800"
-    run_dir = wt_task_log / canonical_ts
-    run_dir.mkdir(parents=True, exist_ok=True)
-    (run_dir / "run.events.jsonl").write_text("", encoding="utf-8")
-    run_state_file = wt_task_log / f"{canonical_ts}-plan-state.json"
-    run_state = {"run_ts": canonical_ts, "status": status, "progress": []}
-    run_state_file.write_text(json.dumps(run_state), encoding="utf-8")
-
     # 设置 age（只对 non-in-progress，in-progress 保持最新 mtime）
     if status != "in-progress":
         _age(run_dir, age_days)
-        _age(run_state_file, age_days)
+        _age(state_file, age_days)
 
     return wt_task_log
 
@@ -697,6 +691,58 @@ class TestWorktreeStaleGate:
 
         orphan_paths = [o["path"] for o in orphans]
         assert str(wt_path) in orphan_paths
+
+    def test_suffixed_run_ts_stale_worktree_classified_orphan(self, tmp_path):
+        """scan_spine_worktrees 使用真实 suffix 格式的 run_ts 目录（无截断 shadow 目录）。
+
+        回归 F1：修复前 scan_runs 仅匹配 YYYY-MM-DD-HHMM（无 suffix），导致
+        make_run_ts() 产生的实际 suffix 格式目录被跳过，scan_runs 返回 []，
+        从而令保守逻辑跳过该 worktree，孤儿 worktree 永远不被删。
+        修复后 RUN_TS_RE 匹配 YYYY-MM-DD-HHMM(-[0-9a-f]+)?，scan_runs
+        能识别真实 suffix 格式目录，stale orphan 被正确归类为 orphan。
+        """
+        home = tmp_path / "home"
+        home.mkdir()
+        canonical, _ = _setup_canonical(tmp_path)
+
+        # 使用真实 make_run_ts 格式（含 suffix），无任何截断 shadow 目录
+        from npc import paths as _paths_mod
+        run_ts = _paths_mod.make_run_ts()
+        # make_run_ts 格式：YYYY-MM-DD-HHMM-<suffix>，总长度 > 15（前缀 15 字符 + dash + suffix）
+        assert len(run_ts) > 15 and run_ts[15] == "-", (
+            f"make_run_ts 应产生带 suffix 的格式（YYYY-MM-DD-HHMM-suffix），实际: {run_ts}"
+        )
+
+        wt_path = tmp_path / "wt_suffixed_stale"
+        _make_spine_worktree(canonical, wt_path, run_ts)
+
+        # 仅创建带 suffix 的 run 目录（不创建截断版），age_days=60 足够旧
+        wt_proj_key = _paths_mod.proj_key_for(wt_path)
+        wt_task_log = home / "task_log" / wt_proj_key
+        wt_task_log.mkdir(parents=True, exist_ok=True)
+
+        run_dir = wt_task_log / run_ts
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "run.events.jsonl").write_text("", encoding="utf-8")
+        state = {"run_ts": run_ts, "status": "completed", "progress": []}
+        state_file = wt_task_log / f"{run_ts}-plan-state.json"
+        state_file.write_text(json.dumps(state), encoding="utf-8")
+        _age(run_dir, 60)
+        _age(state_file, 60)
+
+        # 确认 task_log 下只有带 suffix 的目录（无截断 shadow）
+        dirs = [d.name for d in wt_task_log.iterdir() if d.is_dir()]
+        assert dirs == [run_ts], f"task_log 应只有 suffix 目录，实际: {dirs}"
+
+        now_ms = _clean._io.now_ms()
+        orphans, in_progress = _clean.scan_spine_worktrees(
+            canonical, home, keep_days=14, now_ms=now_ms
+        )
+
+        orphan_paths = [o["path"] for o in orphans]
+        assert str(wt_path) in orphan_paths, (
+            f"stale suffix-format worktree 应归为 orphan，实际 orphans: {orphan_paths}"
+        )
 
     def test_too_recent_worktree_not_deleted_with_yes(self, tmp_path, capsys, monkeypatch):
         """--yes 时太新的 worktree 不被删（staleness gate 在 run() 路径生效）。
