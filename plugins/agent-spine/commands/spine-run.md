@@ -61,16 +61,21 @@ command -v codex >/dev/null || echo "[warn] 缺 codex；若 .npc/config.toml 未
 
 ```bash
 INIT=$(npc init ${AUTO:+--auto})
-echo "$INIT" | jq -r '{run_ts, needs_resume, mode}'
+echo "$INIT" | jq -r '{run_ts, needs_resume, mode, worktree_root, spine_branch}'
+WORKTREE_ROOT=$(echo "$INIT" | jq -r '.worktree_root // empty')
 ```
 
-- `needs_resume == true`：这是一个中断的旧 run。
+**worktree 隔离**：若 `INIT` 含 `worktree_root`（默认行为），则**后续所有 `npc` 子命令与 `spine-coder` spawn 必须在 `worktree_root` 内执行**（以 `cwd=WORKTREE_ROOT` 调用，或在调用前 `cd "$WORKTREE_ROOT"`）。主 checkout 在整个 run 期间不受触动。若 `worktree_root` 为空（`--no-worktree` 模式），则就地在主 checkout 跑，行为不变。
+
+- `needs_resume == true`：这是一个中断的旧 run，且 init 返回了悬空的 `worktree_root`。
   ```bash
+  WORKTREE_ROOT=$(echo "$INIT" | jq -r '.worktree_root')
+  cd "$WORKTREE_ROOT"          # 进入悬空 worktree，不新建
   RESUME=$(npc resume detect)
   # 取 .next_seq / .next_phase / .next_change_id / .current_round
   ```
   从断点接着跑（跳过 Step 2 的建 plan，直接进 Step 3 的对应 seq/phase）。交互档先把断点摘要给用户确认再续。
-- 否则继续 Step 2。
+- 否则继续 Step 2（所有后续 npc 调用仍以 `cwd=WORKTREE_ROOT` 运行）。
 
 ---
 
@@ -188,9 +193,16 @@ ACTION=$(echo "$DEC" | jq -r '.action')   # continue-retry | skip | force-archiv
 ## Step 4 — 收尾
 
 ```bash
-npc state finalize        # 判定顶层 status（completed / completed-with-issues）
-npc summary render        # 写 run-summary.md
-npc index append          # 追加跨 run 索引
+FINAL=$(npc state finalize)   # 判定顶层 status（completed / completed-with-issues）
+npc summary render             # 写 run-summary.md
+npc index append               # 追加跨 run 索引
+```
+
+**读取合回结果**（worktree 模式）：
+```bash
+MERGED_BACK=$(echo "$FINAL" | jq -r '.merged_back // false')
+WORKTREE_REMOVED=$(echo "$FINAL" | jq -r '.worktree_removed // false')
+SPINE_BRANCH=$(echo "$FINAL" | jq -r '.spine_branch // empty')
 ```
 
 `finalize` 若因 `needs-user-decision` 返回 exit 1：先在 Step 3d 把所有悬而未决的 change 处理掉再重跑 finalize。
@@ -212,6 +224,11 @@ npc index append          # 追加跨 run 索引
 - ✓ change-b  archived @ <commit>  (review 0 轮)
 - ✗ change-c  skipped — <reason>
 
+### Worktree 合回
+- merged_back=true  → 已 fast-forward 合回 <base_branch>，worktree 已拆除
+- merged_back=false → <spine_branch> 保留，请手动 merge 回 <base_branch>（原因：base 已分叉）
+（--no-worktree 模式无此项）
+
 ### 轨迹与日志（供后续分析）
 - 状态：<state_json 路径>
 - 汇总：<run-summary.md 路径>
@@ -230,7 +247,9 @@ npc index append          # 追加跨 run 索引
 - **每个 npc 命令后检查 `.ok` 与 exit code**：exit 1 业务失败 / 2 用法错 / 3 环境错 / 4 依赖缺失。依赖缺失（4）立即停并提示安装。
 - **review-fix 循环必须有上限**（默认 20 轮）且尊重 `stale` 闸门——绝不无限打磨。
 - **auto 档绝不调用 AskUserQuestion**——范围、计划、执行决策一律用确定性默认或 `npc auto-decide` 自主解决；只有硬依赖缺失（exit 4）或缺人类凭据这类**客观阻塞**才停。交互档绝不在未确认时执行破坏性动作（archive / abort）。
+- **worktree 隔离**：`npc init` 返回 `worktree_root` 后，整个 run 期间所有 npc 子命令与 coder spawn 均在该 worktree 内执行。主 checkout 在 run 期间不受任何写操作影响。续跑必须 cd 进悬空 worktree，不新建。
+- **ff-only，不自作主张推远端**：finalize 仅在顶层 status=`completed` 且 fast-forward 干净时才合回 `base_branch`；合回失败（分叉）则保留 `spine_branch` 留人决策——不执行 `git push`、不强制 merge、不删分支。
 - **Claude Code 的工具权限提示（Write/Edit/Bash 授权弹窗）不归本 skill 管**——那是运行时 permission 层。要无人值守跑 auto，请在受信工程里用 acceptEdits / bypassPermissions 权限模式，或在 settings 里给本工程加 scoped allowlist（见 docs/usage.md）。
-- **续跑优先**：`npc init` 报 `needs_resume` 时永远先 `resume detect` 接断点，不要新建覆盖。
+- **续跑优先**：`npc init` 报 `needs_resume` 时永远先 `resume detect` 接断点，cd 进悬空 worktree，不要新建覆盖。
 - **change 粒度单一**：拆解目标时，一个 change 只做一件可独立交付的事；过大就再拆。
 - 全程用 **TodoWrite** 反映真实进度，让用户可实时观察这个长时 run。
