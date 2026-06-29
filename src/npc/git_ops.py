@@ -89,6 +89,112 @@ def list_worktrees(
     return _parse_worktree_porcelain(proc.stdout or "")
 
 
+def merge_ff_only(
+    canonical_root: Path,
+    base_branch: str,
+    spine_branch: str,
+    runner=subprocess.run,
+) -> tuple[bool, str]:
+    """从 canonical_root 在 base_branch 上执行 ``git merge --ff-only <spine_branch>``。
+
+    返回 ``(success, reason)``：
+    - ``(True, "")``：fast-forward 成功。
+    - ``(False, "<reason>")``：无法 ff（已分叉或其他错误），reason 为错误说明。
+
+    此函数在 base_branch 上执行合并，要求 canonical_root 当前已 checkout 到 base_branch。
+    若当前 HEAD 不是 base_branch，先切过去。
+    """
+    # 先切换到 base_branch
+    checkout_proc = runner(
+        ["git", "checkout", base_branch],
+        cwd=str(canonical_root),
+        capture_output=True,
+        text=True,
+        env=_git_env(),
+    )
+    if checkout_proc.returncode != 0:
+        reason = f"切换到 {base_branch} 失败: {(checkout_proc.stderr or '').strip()}"
+        return False, reason
+
+    # 执行 ff-only merge
+    merge_proc = runner(
+        ["git", "merge", "--ff-only", spine_branch],
+        cwd=str(canonical_root),
+        capture_output=True,
+        text=True,
+        env=_git_env(),
+    )
+    if merge_proc.returncode != 0:
+        stderr = (merge_proc.stderr or "").strip()
+        stdout = (merge_proc.stdout or "").strip()
+        reason = f"ff-only 合并失败（base 已分叉或其他错误）: {stderr or stdout}"
+        return False, reason
+    return True, ""
+
+
+def worktree_remove(
+    canonical_root: Path,
+    worktree_root: Path,
+    runner=subprocess.run,
+) -> tuple[bool, str]:
+    """从 canonical_root 移除 worktree：``git worktree remove <worktree_root>``。
+
+    幂等：worktree 已不存在时视为成功（返回 True）。
+    返回 ``(success, reason)``。
+    """
+    # 若路径已不存在，视为幂等成功
+    if not worktree_root.exists():
+        return True, ""
+
+    proc = runner(
+        ["git", "worktree", "remove", str(worktree_root)],
+        cwd=str(canonical_root),
+        capture_output=True,
+        text=True,
+        env=_git_env(),
+    )
+    if proc.returncode != 0:
+        reason = f"git worktree remove 失败 (rc={proc.returncode}): {(proc.stderr or '').strip()}"
+        return False, reason
+    return True, ""
+
+
+def branch_delete(
+    canonical_root: Path,
+    branch: str,
+    runner=subprocess.run,
+) -> tuple[bool, str]:
+    """从 canonical_root 安全删除本地分支：``git branch -d <branch>``。
+
+    幂等：分支已不存在时视为成功（返回 True）。
+    用 ``-d``（安全删），只有已合并才删得掉，双保险防止误删未合并提交。
+    返回 ``(success, reason)``。
+    """
+    # 先确认分支是否存在
+    check_proc = runner(
+        ["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"],
+        cwd=str(canonical_root),
+        capture_output=True,
+        text=True,
+        env=_git_env(),
+    )
+    if check_proc.returncode != 0:
+        # 分支已不存在，幂等成功
+        return True, ""
+
+    proc = runner(
+        ["git", "branch", "-d", branch],
+        cwd=str(canonical_root),
+        capture_output=True,
+        text=True,
+        env=_git_env(),
+    )
+    if proc.returncode != 0:
+        reason = f"git branch -d 失败 (rc={proc.returncode}): {(proc.stderr or '').strip()}"
+        return False, reason
+    return True, ""
+
+
 def _parse_worktree_porcelain(output: str) -> list[dict[str, str]]:
     """解析 ``git worktree list --porcelain`` 文本（纯函数）。
 

@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import _io, paths as _paths
+from . import git_ops as _git_ops
 
 
 SCHEMA_VERSION = 2
@@ -498,8 +499,16 @@ def set_progress(args: argparse.Namespace) -> None:
     _io.emit({"ok": True, "seq": args.seq, **updates})
 
 
-def finalize(args: argparse.Namespace) -> None:
-    """state finalize：判定顶层 status。"""
+def finalize(args: argparse.Namespace, runner=None) -> None:
+    """state finalize：判定顶层 status，worktree 模式下尝试 ff-only 合并回并拆树。
+
+    runner 参数仅供测试注入（默认 subprocess.run）。
+    """
+    import subprocess as _subprocess
+
+    if runner is None:
+        runner = _subprocess.run
+
     try:
         p = _paths.load_paths(args)
         state = read_state(p.state_json)
@@ -541,13 +550,67 @@ def finalize(args: argparse.Namespace) -> None:
     state["status"] = final
     write_state(p.state_json, p.state_md, state)
 
-    _io.emit(
-        {
-            "ok": True,
-            "final_status": final,
-            "archived": counts["archived"],
-            "failed": counts["failed"],
-            "skipped": counts["skipped"],
-            "total": counts["total"],
-        }
-    )
+    # ── worktree ff-merge + teardown ────────────────────────────────────
+    # 仅在 worktree 模式（spine_branch 非空）且 status==completed 时触发。
+    # --no-worktree run（无 spine_branch）直接跳过。
+    # completed-with-issues / needs-decision 走保留路径（已在上方 exit 或此处不是 completed）。
+    merge_result: dict = {}
+    if p.spine_branch and final == "completed":
+        canonical_root = p.canonical_repo_root
+        base_branch = p.base_branch
+        spine_branch = p.spine_branch
+        worktree_root = p.repo_root  # worktree 模式下 repo_root 即 worktree 路径
+
+        if canonical_root is None or base_branch is None:
+            # 防御：worktree 模式但缺字段（不应发生），保留并报告
+            merge_result = {
+                "merged_back": False,
+                "worktree_removed": False,
+                "spine_branch": spine_branch,
+                "base_branch": base_branch,
+                "reason": "canonical_repo_root 或 base_branch 缺失，跳过合并",
+            }
+        else:
+            ff_ok, ff_reason = _git_ops.merge_ff_only(
+                canonical_root, base_branch, spine_branch, runner
+            )
+            if ff_ok:
+                # FF 成功 → 拆树 + 删分支
+                wt_ok, wt_reason = _git_ops.worktree_remove(
+                    canonical_root, worktree_root, runner
+                )
+                br_ok, br_reason = _git_ops.branch_delete(
+                    canonical_root, spine_branch, runner
+                )
+                merge_result = {
+                    "merged_back": True,
+                    "worktree_removed": wt_ok,
+                    "spine_branch": spine_branch,
+                    "base_branch": base_branch,
+                }
+                if not wt_ok:
+                    merge_result["worktree_remove_reason"] = wt_reason
+                if not br_ok:
+                    merge_result["branch_delete_reason"] = br_reason
+            else:
+                # FF 失败 → 保留，报告原因
+                merge_result = {
+                    "merged_back": False,
+                    "worktree_removed": False,
+                    "spine_branch": spine_branch,
+                    "base_branch": base_branch,
+                    "reason": ff_reason,
+                }
+
+    payload: dict = {
+        "ok": True,
+        "final_status": final,
+        "archived": counts["archived"],
+        "failed": counts["failed"],
+        "skipped": counts["skipped"],
+        "total": counts["total"],
+    }
+    if merge_result:
+        payload.update(merge_result)
+
+    _io.emit(payload)
