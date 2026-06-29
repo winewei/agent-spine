@@ -209,6 +209,8 @@ def _remove_run(task_log_dir: Path, run_ts: str) -> list[str]:
 def scan_spine_worktrees(
     canonical_repo_root: Path,
     home: Path,
+    keep_days: int = DEFAULT_KEEP_DAYS,
+    now_ms: int | None = None,
     runner=None,
 ) -> tuple[list[dict], list[dict]]:
     """扫描 spine/* worktree，分类为孤儿（可清理）与 in-progress（跳过）。
@@ -216,12 +218,23 @@ def scan_spine_worktrees(
     参数：
         canonical_repo_root：主 checkout 的仓库根。
         home：Home 目录（用于推算 task_log_dir）。
+        keep_days：保留窗口天数（与 plan_cleanup 一致）；worktree 对应
+            task_log 的所有 run 都必须满足 "足够旧" 才将其归为 orphan。
+        now_ms：当前毫秒时间戳（None 时取 _io.now_ms()，便于测试注入）。
         runner：可注入的 subprocess.run 替代（用于测试）。
 
     返回：
         (orphans, in_progress_wts)
-        orphans: [{path, branch_name}] — 无 in-progress state，可清理。
+        orphans: [{path, branch_name}] — 无 in-progress state 且 task_log
+            run 均已过 keep_days 保留窗口，可清理。
         in_progress_wts: [{path, branch_name}] — 有 in-progress state，跳过。
+
+    保守原则：
+        · 无法推算 proj_key → 跳过（不删）。
+        · task_log 不存在或无任何 run → 跳过（不删）；缺少 age/status 数据
+          时同样保守保留，与 plan_cleanup 三条件判定一致。
+        · task_log 里仍有 too-recent / active / non-terminal 的 run →
+          归为 too-recent（不删），即使已无 in-progress state。
 
     branch_name 为裸分支名（如 "spine/2026-06-20-0800"），不含 "refs/heads/" 前缀。
     """
@@ -229,6 +242,9 @@ def scan_spine_worktrees(
 
     if runner is None:
         runner = subprocess.run
+
+    if now_ms is None:
+        now_ms = _io.now_ms()
 
     try:
         worktrees = _git_ops.list_worktrees(canonical_repo_root, runner=runner)
@@ -254,14 +270,30 @@ def scan_spine_worktrees(
             continue
         wt_task_log_dir = home / "task_log" / wt_proj_key
 
-        # 判断是否有 in-progress state
-        has_in_progress = _resume.find_latest_in_progress(wt_task_log_dir) is not None
-
         entry = {"path": str(wt_path), "branch_name": branch_name}
+
+        # 第一道门：有 in-progress state → 无论如何跳过。
+        has_in_progress = _resume.find_latest_in_progress(wt_task_log_dir) is not None
         if has_in_progress:
             in_progress_wts.append(entry)
-        else:
-            orphans.append(entry)
+            continue
+
+        # 第二道门：对应 task_log run 必须通过同等 keep_days/removable 检查。
+        # task_log 不存在或完全没有 run → 保守跳过（缺数据不删）。
+        runs = scan_runs(wt_task_log_dir)
+        if not runs:
+            # 无法确认 age/status → 保守保留
+            continue
+
+        active_ts = _paths.read_active(wt_task_log_dir)
+        plan = plan_cleanup(runs, active_ts, keep_days, now_ms)
+
+        # 只有 task_log 里至少有一条 removable run，才认为 worktree 足够旧可清理。
+        # 若全部 run 都在保留期内（too-recent / active / non-terminal），跳过。
+        if not plan["removable"]:
+            continue
+
+        orphans.append(entry)
 
     return orphans, in_progress_wts
 
@@ -335,7 +367,8 @@ def run(args: argparse.Namespace, runner=None) -> None:
 
     active_ts = _paths.read_active(task_log_dir)
     runs = scan_runs(task_log_dir)
-    plan = plan_cleanup(runs, active_ts, keep_days, _io.now_ms())
+    now_ms = _io.now_ms()
+    plan = plan_cleanup(runs, active_ts, keep_days, now_ms)
 
     removable = plan["removable"]
     kept_count = len(plan["kept"])
@@ -352,7 +385,7 @@ def run(args: argparse.Namespace, runner=None) -> None:
     if canonical_repo_root is not None:
         home = Path.home()
         orphan_worktrees, skipped_worktrees = scan_spine_worktrees(
-            canonical_repo_root, home, runner=runner
+            canonical_repo_root, home, keep_days=keep_days, now_ms=now_ms, runner=runner
         )
 
     if not yes:
