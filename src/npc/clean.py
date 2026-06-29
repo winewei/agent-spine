@@ -10,6 +10,9 @@
 
 in-progress 的 run 绝不删；active run 绝不删。
 
+额外：扫描 spine/* worktree，对无 in-progress state 的孤儿 worktree 执行
+git worktree remove + 删对应分支；有 in-progress state 的跳过。
+
 CLI handler：run
 纯函数：plan_cleanup（不碰文件系统，便于单测）
 """
@@ -21,7 +24,7 @@ import re
 import shutil
 from pathlib import Path
 
-from . import _io, paths as _paths, state as _state
+from . import _io, paths as _paths, state as _state, git_ops as _git_ops, resume as _resume
 
 
 # 默认保留窗口（天）。
@@ -200,14 +203,116 @@ def _remove_run(task_log_dir: Path, run_ts: str) -> list[str]:
     return removed
 
 
+# ----------------------------- worktree 清理 -----------------------------
+
+
+def scan_spine_worktrees(
+    canonical_repo_root: Path,
+    home: Path,
+    runner=None,
+) -> tuple[list[dict], list[dict]]:
+    """扫描 spine/* worktree，分类为孤儿（可清理）与 in-progress（跳过）。
+
+    参数：
+        canonical_repo_root：主 checkout 的仓库根。
+        home：Home 目录（用于推算 task_log_dir）。
+        runner：可注入的 subprocess.run 替代（用于测试）。
+
+    返回：
+        (orphans, in_progress_wts)
+        orphans: [{path, branch_name}] — 无 in-progress state，可清理。
+        in_progress_wts: [{path, branch_name}] — 有 in-progress state，跳过。
+
+    branch_name 为裸分支名（如 "spine/2026-06-20-0800"），不含 "refs/heads/" 前缀。
+    """
+    import subprocess
+
+    if runner is None:
+        runner = subprocess.run
+
+    try:
+        worktrees = _git_ops.list_worktrees(canonical_repo_root, runner=runner)
+    except _git_ops.WorktreeError:
+        return [], []
+
+    orphans: list[dict] = []
+    in_progress_wts: list[dict] = []
+
+    for wt in worktrees:
+        branch_ref = wt.get("branch", "")
+        # 只处理 refs/heads/spine/* 分支
+        if not branch_ref.startswith("refs/heads/spine/"):
+            continue
+        branch_name = branch_ref[len("refs/heads/"):]  # e.g. "spine/2026-06-20-0800"
+        wt_path = Path(wt["path"])
+
+        # 推算该 worktree 对应的 task_log_dir
+        try:
+            wt_proj_key = _paths.proj_key_for(wt_path)
+        except _paths.PathsError:
+            # 无法推算 proj_key → 保守跳过，不删
+            continue
+        wt_task_log_dir = home / "task_log" / wt_proj_key
+
+        # 判断是否有 in-progress state
+        has_in_progress = _resume.find_latest_in_progress(wt_task_log_dir) is not None
+
+        entry = {"path": str(wt_path), "branch_name": branch_name}
+        if has_in_progress:
+            in_progress_wts.append(entry)
+        else:
+            orphans.append(entry)
+
+    return orphans, in_progress_wts
+
+
+def _remove_spine_worktree(
+    canonical_repo_root: Path,
+    wt_path: Path,
+    branch_name: str,
+    runner=None,
+) -> list[str]:
+    """移除单个孤儿 spine worktree：git worktree remove + git branch -d。
+
+    返回实际操作摘要字符串列表；每步独立容错，失败只 warn 不中止。
+    """
+    import subprocess
+
+    if runner is None:
+        runner = subprocess.run
+
+    actions: list[str] = []
+
+    wt_ok, wt_reason = _git_ops.worktree_remove(canonical_repo_root, wt_path, runner=runner)
+    if wt_ok:
+        actions.append(f"worktree_remove:{wt_path}")
+    else:
+        _io.warn(f"git worktree remove 失败（{wt_path}）：{wt_reason}")
+
+    br_ok, br_reason = _git_ops.branch_delete(canonical_repo_root, branch_name, runner=runner)
+    if br_ok:
+        actions.append(f"branch_delete:{branch_name}")
+    else:
+        _io.warn(f"git branch -d 失败（{branch_name}）：{br_reason}")
+
+    return actions
+
+
 # ----------------------------- CLI handler -----------------------------
 
 
-def run(args: argparse.Namespace) -> None:
+def run(args: argparse.Namespace, runner=None) -> None:
     """clean：扫描所有 run，计算可清理集；默认 dry-run，--yes 才真删。
+
+    同时扫描 spine/* worktree：无 in-progress state 的孤儿 worktree 一并清理。
 
     退出码 0；非 git 仓库 / 定位失败 → exit 3（env_missing）。
     """
+    import subprocess as _subprocess
+
+    if runner is None:
+        runner = _subprocess.run
+
     try:
         task_log_dir = _resolve_task_log_dir(args)
     except _paths.PathsError as e:
@@ -235,8 +340,23 @@ def run(args: argparse.Namespace) -> None:
     removable = plan["removable"]
     kept_count = len(plan["kept"])
 
+    # 扫描孤儿 spine worktree（需要 canonical_repo_root）
+    orphan_worktrees: list[dict] = []
+    skipped_worktrees: list[dict] = []
+    canonical_repo_root: Path | None = None
+    try:
+        canonical_repo_root = _paths.detect_repo_root()
+    except _paths.PathsError:
+        pass  # 非 git 环境：跳过 worktree 清理，不报错
+
+    if canonical_repo_root is not None:
+        home = Path.home()
+        orphan_worktrees, skipped_worktrees = scan_spine_worktrees(
+            canonical_repo_root, home, runner=runner
+        )
+
     if not yes:
-        # dry-run：绝不删任何东西。freed_estimate 给出将清理的 run 数量。
+        # dry-run：绝不删任何东西。
         _io.emit(
             {
                 "ok": True,
@@ -244,14 +364,29 @@ def run(args: argparse.Namespace) -> None:
                 "removable": [r["run_ts"] for r in removable],
                 "kept_count": kept_count,
                 "freed_estimate": len(removable),
+                "orphan_worktrees": [w["path"] for w in orphan_worktrees],
+                "skipped_worktrees": [w["path"] for w in skipped_worktrees],
             }
         )
         return
 
-    # --yes：真删。
+    # --yes：真删 task_log runs。
     removed: list[str] = []
     for r in removable:
         removed.extend(_remove_run(task_log_dir, r["run_ts"]))
+
+    # --yes：清理孤儿 worktree。
+    worktree_actions: list[str] = []
+    if canonical_repo_root is not None:
+        for wt in orphan_worktrees:
+            worktree_actions.extend(
+                _remove_spine_worktree(
+                    canonical_repo_root,
+                    Path(wt["path"]),
+                    wt["branch_name"],
+                    runner=runner,
+                )
+            )
 
     _io.emit(
         {
@@ -259,5 +394,7 @@ def run(args: argparse.Namespace) -> None:
             "dry_run": False,
             "removed": removed,
             "kept_count": kept_count,
+            "worktree_actions": worktree_actions,
+            "skipped_worktrees": [w["path"] for w in skipped_worktrees],
         }
     )
