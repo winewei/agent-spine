@@ -434,6 +434,59 @@ def _build_parser() -> argparse.ArgumentParser:
     p_clean.add_argument("--keep-days", dest="keep_days", type=int, default=14)
     p_clean.set_defaults(handler=_make_handler("clean", "run"), _cmd_path="clean")
 
+    # ===== task / watch =====
+    p_task = sub.add_parser("task", help="后台任务观测契约（start/update/heartbeat/finish）")
+    sub_task = p_task.add_subparsers(dest="task_cmd", required=True)
+
+    def add_task_common(p: argparse.ArgumentParser) -> None:
+        p.add_argument("--phase", default=None, help="当前 phase，如 implement/test/review")
+        p.add_argument("--message", default=None, help="短状态摘要")
+        p.add_argument("--progress-current", dest="progress_current", type=int, default=None)
+        p.add_argument("--progress-total", dest="progress_total", type=int, default=None)
+        p.add_argument("--progress-unit", dest="progress_unit", default=None)
+        p.add_argument("--log", default=None, help="任务日志指针")
+        p.add_argument("--summary", default=None, help="任务 summary 指针")
+        p.add_argument("--transcript", default=None, help="Claude transcript/subagent 指针")
+
+    p_task_start = sub_task.add_parser("start", help="登记一个可被 watch 观测的任务")
+    p_task_start.add_argument("--id", required=True, help="任务 id（文件名安全）")
+    p_task_start.add_argument("--description", required=True)
+    p_task_start.add_argument("--source", default="manual", help="npc/claude-subagent/bash/manual 等")
+    p_task_start.add_argument("--session-id", dest="session_id", default=None)
+    p_task_start.add_argument("--stale-seconds", dest="stale_seconds", type=int, default=900)
+    p_task_start.add_argument("--replace", action="store_true", help="覆盖同 id 旧任务")
+    add_task_common(p_task_start)
+    p_task_start.set_defaults(handler=_make_handler("task", "start"), _cmd_path="task start")
+
+    p_task_update = sub_task.add_parser("update", help="更新任务 phase/message/progress")
+    p_task_update.add_argument("--id", required=True)
+    p_task_update.add_argument("--status", choices=["running", "waiting"], default=None)
+    add_task_common(p_task_update)
+    p_task_update.set_defaults(handler=_make_handler("task", "update"), _cmd_path="task update")
+
+    p_task_hb = sub_task.add_parser("heartbeat", help="刷新任务心跳")
+    p_task_hb.add_argument("--id", required=True)
+    p_task_hb.add_argument("--status", choices=["running", "waiting"], default=None)
+    add_task_common(p_task_hb)
+    p_task_hb.set_defaults(handler=_make_handler("task", "heartbeat"), _cmd_path="task heartbeat")
+
+    p_task_finish = sub_task.add_parser("finish", help="标记任务为终态")
+    p_task_finish.add_argument("--id", required=True)
+    p_task_finish.add_argument("--status", choices=["done", "failed", "cancelled"], default="done")
+    p_task_finish.add_argument("--phase", default=None)
+    p_task_finish.add_argument("--message", default=None)
+    p_task_finish.add_argument("--summary", default=None)
+    p_task_finish.add_argument("--result", default=None)
+    p_task_finish.set_defaults(handler=_make_handler("task", "finish"), _cmd_path="task finish")
+
+    p_watch = sub.add_parser("watch", help="只读观测 active run 与 watchable tasks")
+    p_watch.add_argument("--all", action="store_true", help="扫描所有 task_log 项目的 active run")
+    p_watch.add_argument("--project", default=None, help="指定项目/worktree 路径")
+    p_watch.add_argument("--once", action="store_true", help="输出一次 JSON 快照后退出")
+    p_watch.add_argument("--interval", type=float, default=2.0, help="TUI 刷新间隔秒数")
+    p_watch.add_argument("--stale-seconds", dest="stale_seconds", type=int, default=None)
+    p_watch.set_defaults(handler=_make_handler("watch", "run"), _cmd_path="watch")
+
     # ===== agent =====
     p_agent = sub.add_parser(
         "agent", help="Sub-agent prompt 渲染与 spawn 引导语生成（v1.0+）"

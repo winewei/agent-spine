@@ -206,6 +206,16 @@ Fix 阶段额外做的事：自动从 `$BASE/round-(N-1).review.json` 抽 blocki
 
 埋点已嵌入 `events.phase_exit` / `events.phase_rotate` / `pipeline._do_phase_exit` / `pipeline.run_review_round` / `pipeline.run_archive` / `agent.spawn_prompt`，全部 best-effort——失败 swallow，主流程零影响。主 session 永远只读 `aggregates/*.json` 与 `hotspots` 输出，不读 events.ndjson 原文。
 
+### Watchable Tasks（本机后台任务观测）
+
+| 命令 | 职责 |
+|---|---|
+| `npc task start --id ID --description TEXT [...]` | 在当前 run 的 `<run_dir>/tasks/` 登记一个可观测任务，记录 worktree/branch/head 与 heartbeat 检查契约 |
+| `npc task update --id ID [...]` | 更新 phase/message/progress/pointer |
+| `npc task heartbeat --id ID [...]` | 刷新任务心跳，供 watch 判活 |
+| `npc task finish --id ID [--status done\|failed\|cancelled]` | 标记任务终态 |
+| `npc watch [--once] [--all] [--project PATH]` | 只读扫描 active run 的 state + tasks；`--once` 输出 JSON，默认循环刷新终端视图 |
+
 完整契约（参数、stdout JSON schema、exit code）见 [docs/cli.md](docs/cli.md)。
 
 ---
@@ -352,6 +362,9 @@ npc index append
         ├── run.json                       # 该 run 的派生路径快照
         ├── run.events.jsonl               # run 级聚合事件流
         ├── run-summary.md                 # run 结束最终汇总
+        ├── tasks/                         # watchable task 主动上报契约
+        │   ├── implement-001.json         # 当前任务快照（heartbeat/status/pointer/worktree）
+        │   └── implement-001.events.jsonl # 追加式任务事件历史
         ├── 001-add-foo/
         │   ├── change.md
         │   ├── events.jsonl

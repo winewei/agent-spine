@@ -933,6 +933,90 @@ npc telemetry hotspots [--top N=5] [--since DUR]
 
 ---
 
+## 9b. Watchable Tasks / Watch
+
+`npc task ...` 为本机后台任务提供主动上报契约。它只写当前 run 的
+`<run_dir>/tasks/`，不改 `plan-state.json` 状态机；`npc watch` 只读这些文件和
+active run 的 state。
+
+文件布局：
+
+```text
+<run_dir>/tasks/
+├── <task_id>.json          # 当前任务快照（权威）
+└── <task_id>.events.jsonl  # 追加式任务事件历史
+```
+
+`task_id` 必须匹配 `[A-Za-z0-9][A-Za-z0-9_.-]{0,127}`，用于防止路径穿越。
+任务快照会记录 `proj_key/run_ts/session_id`、`worktree{repo_root,worktree_root,git_common_dir,branch,head}`、
+`check{type:"heartbeat",stale_seconds}`、`pointer{state_json,run_events,...}`。
+
+### `npc task start`
+
+```bash
+npc task start --id implement-001 --description "Implement add-foo" \
+  [--source npc|claude-subagent|bash|manual] [--phase PHASE] [--message TEXT] \
+  [--stale-seconds 900] [--progress-current N --progress-total N --progress-unit UNIT] \
+  [--log PATH] [--summary PATH] [--transcript PATH] [--session-id SID] [--replace]
+```
+
+登记一个可观测任务。stdout：
+
+```json
+{"ok":true,"task_id":"implement-001","status":"running","task_json":".../tasks/implement-001.json","events":".../tasks/implement-001.events.jsonl"}
+```
+
+exit：`0` 成功；`1` 同 id 已存在；`2` task id 非法；`3` 未定位当前 run。
+
+### `npc task update`
+
+```bash
+npc task update --id implement-001 [--status running|waiting] [--phase PHASE] \
+  [--message TEXT] [--progress-current N --progress-total N --progress-unit UNIT] \
+  [--log PATH] [--summary PATH] [--transcript PATH]
+```
+
+更新任务快照并追加 `task.updated` 事件。
+
+### `npc task heartbeat`
+
+```bash
+npc task heartbeat --id implement-001 [--status running|waiting] [--phase PHASE] [--message TEXT]
+```
+
+刷新 `last_heartbeat_at` 并追加 `task.heartbeat` 事件。`watch` 用
+`last_heartbeat_at + stale_seconds` 派生 `observed_status=stale`。
+
+### `npc task finish`
+
+```bash
+npc task finish --id implement-001 [--status done|failed|cancelled] \
+  [--phase PHASE] [--message TEXT] [--summary PATH] [--result TEXT]
+```
+
+标记终态并追加 `task.finished` 事件。
+
+### `npc watch`
+
+```bash
+npc watch [--once] [--all] [--project PATH] [--interval 2] [--stale-seconds N]
+```
+
+- 默认：观测当前 cwd 所属项目的 active run。
+- `--once`：输出一次单行 JSON 快照后退出，适合脚本/测试。
+- 无 `--once`：循环刷新终端视图。
+- `--all`：只扫描 `~/task_log/*/active.json` 指向的 active run，不扫全部历史。
+- `--project PATH`：按指定 worktree/project 的 active run 观测。
+- 如需指定历史 run，使用全局参数：`npc --task-log-dir PATH --run-ts TS watch --once`。
+
+stdout（`--once`）：
+
+```json
+{"ok":true,"schema_version":1,"generated_at":"...","scope":"project","runs":[{"proj_key":"...","run_ts":"...","state":{...},"tasks":[{"task_id":"implement-001","observed_status":"running","heartbeat_age_seconds":2}]}]}
+```
+
+---
+
 ## 10. 出错语义示例
 
 所有命令失败时：
