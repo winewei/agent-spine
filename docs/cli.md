@@ -1,4 +1,4 @@
-# npc CLI 契约 v1.2
+# npc CLI 契约 v1.4
 
 本文件定义 `npc` 命令行工具的稳定对外接口。所有命令默认：
 
@@ -907,6 +907,70 @@ npc telemetry hotspots [--top N=5] [--since DUR]
 
 ---
 
+## 8c. 并行编排辅助（1.4+，从 /new-plan-changes-v3 skill 脚本下沉）
+
+v3 波次并行编排原先自带四个 skill 脚本（waves.py / detect_plan_only.py / verify_manifest.py / notify.py）。1.4 起全部下沉为 npc 子命令，纳入契约与测试管理；skill 侧零脚本。
+
+### `npc plan waves [--input FILE]`
+
+并行波次**候选**划分：Kahn 拓扑分层 + 层内文件交集贪心着色。输入（stdin 或 `--input`）一个 JSON 对象：
+
+```json
+{
+  "nodes": ["add-a", "add-b"],
+  "edges": [["add-a", "add-b"]],
+  "files": {"add-a": ["src/x.py"]},
+  "tie_break": {"add-a": [0, 12]}
+}
+```
+
+`edges` 的 `[A,B]` 表示 A 先于 B；`files` 缺省视为空集（不冲突）；`tie_break` 为 `[tier, scope]` 稳定排序键，缺省排最后。
+
+**stdout**：
+
+```json
+{"waves": [["add-a"], ["add-b"]], "layers": [...], "split_reasons": [{"layer": 0, "members": [...], "sub_waves": [...], "serialized_pairs": [["a","b"]], "shared_files": ["src/x.py"]}], "cycle": []}
+```
+
+`cycle` 非空表示 DAG 有环，已强制释放所列节点破环。输出是**候选**——语义耦合仍须架构师 sub-agent 裁定。
+
+**exit**：`0` 成功；`2` 输入不合法（非 JSON / 缺 nodes / 文件不可读）。
+
+---
+
+### `npc verify manifest --result '<RESULT 行>' [--manifest PATH]`
+
+并行 implementer（worktree 内 sub-agent）产出核验：plan-only 判定 + manifest 文件核对，一次完成。
+
+RESULT 行两种格式均接受：
+
+- npc 契约：`RESULT: commit=<hash> tasks=.. tests=.. summary=.. notes=..`（manifest 路径来自 implementer 单独输出的 `MANIFEST:` 行，经 `--manifest` 传入）
+- legacy JSON（architect-swarm）：`RESULT: {"status":.., "files_written":N, "manifest":".."}`
+
+manifest JSON 的 `files_written` 条目可为纯路径字符串或 `{"path":..,"sha256":..}` 对象；给了 sha256 就核对。
+
+**stdout**：
+
+```json
+{"ok": true, "verdict": "code", "reason": null, "commit": "abc123", "files": {"ok": true, "reason": null, "present": 3, "missing": [], "sha_mismatch": [], "total": 3}}
+```
+
+verdict 语义：`plan_only`（无 RESULT 行 / commit=- / 自报 plan-only / manifest 缺失或为空——没有可核对的真实产出）；`error`（自报 error）；`code`（有 commit 有产出；此时若文件丢失或 sha 不符，verdict 保持 code 但 `ok:false`，reason=`files_missing|sha_mismatch`）。
+
+**exit**：`0` verdict=code 且 manifest 全部核对通过；`1` 其余；`2` 用法错。
+
+---
+
+### `npc notify --event KIND [--url URL] [--format raw|slack|feishu] [--kv k=v ...] [--text ...]`
+
+best-effort webhook 推送。URL 解析顺序：`--url` > `$NPC_WEBHOOK` > `$NPC_V3_WEBHOOK`（兼容旧名）；都为空则静默 no-op（通知未启用）。
+
+**stdout**：`{"ok": true, "event": "...", "url_set": true, "delivered": true}`
+
+**exit**：**总是 `0`**。webhook 超时/拒连/4xx 只写 stderr 警告 + `delivered:false`，绝不打断 run。
+
+---
+
 ## 9. 收尾
 
 ### `npc summary render`
@@ -1108,7 +1172,13 @@ npc index append
 
 ## 12. 版本
 
-当前契约版本：`v1.3`。
+当前契约版本：`v1.4`。
+
+新增命令（v1.4，v3 skill 脚本下沉，详见 §8c）：
+
+- **`npc plan waves`**：并行波次候选划分（Kahn 拓扑分层 + 文件交集着色），原 v3 skill 的 `waves.py`。
+- **`npc verify manifest`**：implementer 产出核验（RESULT 行双格式 plan-only 判定 + manifest 文件存在性/sha256 核对），合并原 `detect_plan_only.py` + `verify_manifest.py`。
+- **`npc notify`**：best-effort webhook 推送（总是 exit 0），原 `notify.py`；URL 支持 `$NPC_WEBHOOK` / `$NPC_V3_WEBHOOK`。
 
 新增命令（v1.3，基石加固，全部经独立 review + 充分测试）：
 
@@ -1122,6 +1192,7 @@ npc index append
 
 | 版本 | 关键变化 |
 |---|---|
+| **1.4** | 新增 `plan waves` / `verify manifest` / `notify`：/new-plan-changes-v3 的全部 skill 脚本下沉为契约化子命令，skill 侧零脚本 |
 | **1.3** | 新增 `doctor` / `verify tests` / `verify routing` / `implement run` / `fix run`；`init --auto` 自动授权 `.claude/settings.json`；config 增 `[coder]`/`[verify]`。把成本路由、独立验证、复跑测试、auto 授权焊进确定性核心 |
 | **1.2** | 新增 `telemetry` 子命令族（emit/tail/agg/hotspots/estimate-tokens）+ events/pipeline/agent 自动 emit 钩子；`~/task_log/_telemetry/events.ndjson` 派生指标流落盘，主 session 仍零接触 |
 | 1.1 | 文档与版本对齐（初始 release 即包含 1.0 全部能力） |

@@ -4,14 +4,13 @@
 
 ---
 
-## 层 1：装 `npc` CLI（机器级，所有 Claude Code session 共享）
+## 层 1：装 `npc` 命令（机器级，所有 Claude Code session 共享）
 
-`npc` 内置在本仓库（`src/npc`），直接从仓库根安装；同一套 npc 亦作独立仓库 [cmzz/npc](https://github.com/cmzz/npc) 发布供其它项目复用：
+`npc` 是从当前 agent-spine 仓库安装出来的 CLI 命令，代码在 `src/npc`。直接从仓库根安装：
 
 ```bash
-uv tool install --force --from . npc              # 从仓库根（内置 src/npc）装 CLI
-npc --version          # 应输出 npc 1.3.0
-# 或从独立仓库装：uv tool install --from git+https://github.com/cmzz/npc.git npc
+uv tool install --force --from . npc              # 从当前仓库根安装 src/npc 为 npc 命令
+npc --version          # 应输出 npc 1.4.0
 ```
 
 首次在某工程内 `npc init` 时会自举 `~/task_log/.new-plan-review-schema.json` 与 `~/.local/bin/portable-timeout`。
@@ -30,7 +29,7 @@ npc --version          # 应输出 npc 1.3.0
 
 装完得到三个能力：`/spine-run`、`/spine-analyze`、`spine-coder`（subagent）。
 
-> CLI 与 plugin 版本应保持一致；升级 CLI（`uv tool upgrade agent-spine`）后建议同步 `/plugin update agent-spine@agent-spine`。
+> CLI 与 plugin 版本应保持一致；升级 CLI（`uv tool upgrade npc`）后建议同步 `/plugin update agent-spine@agent-spine`。
 
 ---
 

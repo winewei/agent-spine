@@ -2,13 +2,13 @@
 
 > 人驾驭的自主 harness（跑在 Claude Code 进程内）——从 spec 到结果交付。
 >
-> 主 session 调度、spine-coder 执行、确定性动作委托给内置的 `npc` 执行层（`src/npc`）。
+> 主 session 调度、spine-coder 执行、确定性动作委托给安装后的 `npc` 命令（代码在 `src/npc`）。
 
-本仓库是 **harness 的上层**（plugin + skill + 宪法），并**内置完整的确定性执行层 `npc`**（`src/npc`）。同一套 `npc` 工具也以**独立仓库 [cmzz/npc](https://github.com/cmzz/npc)** 发布，供 aidevos 等其它项目复用。
+本仓库是 **harness 的上层**（plugin + skill + 宪法），并包含完整的确定性执行层代码（`src/npc`）。在仓库根执行 `uv tool install --from . npc` 后，本机得到的 `npc` 命令就是这个执行层。
 
 - **智能层**：[`/spine-run`](plugins/agent-spine/commands/spine-run.md) 编排 plan→implement→review→fix→archive；[`/spine-analyze`](plugins/agent-spine/commands/spine-analyze.md) 自迭代。
 - **执行层**：[`spine-coder`](plugins/agent-spine/agents/spine-coder.md) subagent。
-- **底座**：内置 `npc` CLI（`src/npc`）。
+- **底座**：安装后的 `npc` 命令（代码在 `src/npc`）。
 - **宪法**：[docs/principles.md](docs/principles.md) 4 条不变量。
 
 ---
@@ -16,15 +16,15 @@
 ## 安装
 
 ```bash
-git clone https://github.com/cmzz/agent-spine.git
+git clone https://github.com/winewei/agent-spine.git
 cd agent-spine
 
-# 1) 装 npc CLI（内置 src/npc，从仓库根安装）
+# 1) 装 npc 命令（从当前仓库根安装 src/npc）
 uv tool install --force --from . npc
-npc --version          # npc 1.3.0
+npc --version          # npc 1.4.0
 
 # 2) 装 harness plugin（Claude Code 内）
-#   /plugin marketplace add <本仓库路径或 cmzz/agent-spine>
+#   /plugin marketplace add <本仓库路径或 winewei/agent-spine>
 #   /plugin install agent-spine@agent-spine
 ```
 
@@ -42,13 +42,13 @@ uv tool install --force --from . npc && claude plugin marketplace add "$(pwd)" &
 
 ```text
 # 在 Claude Code 中执行：
-/plugin marketplace add <本仓库绝对路径>   # 或 cmzz/agent-spine
+/plugin marketplace add <本仓库绝对路径>   # 或 winewei/agent-spine
 /plugin install agent-spine@agent-spine
 ```
 
 装完得到 `/spine-run`、`/spine-analyze`、`spine-coder`（**重启 Claude Code 后生效**）。Plugin 升级 `/plugin update agent-spine@agent-spine`。
 
-> npc CLI（内置 `src/npc`）与 plugin 相互独立：CLI 机器级装一次，plugin 用户级装一次。`npc` 的命令速查/契约见 [docs/cli.md](docs/cli.md)；npc 亦作独立仓库 [cmzz/npc](https://github.com/cmzz/npc) 发布供其它项目复用。
+> `npc` 命令与 plugin 相互独立：CLI 机器级装一次，plugin 用户级装一次。`npc` 的命令速查/契约见 [docs/cli.md](docs/cli.md)。
 
 ### 系统依赖
 

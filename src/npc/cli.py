@@ -366,6 +366,18 @@ def _build_parser() -> argparse.ArgumentParser:
     p_verify_routing.set_defaults(
         handler=_make_handler("verify", "run_routing"), _cmd_path="verify routing"
     )
+    p_verify_manifest = sub_verify.add_parser(
+        "manifest", help="核验并行 implementer 产出：RESULT 行 plan-only 判定 + manifest 文件存在性/sha 核对"
+    )
+    p_verify_manifest.add_argument(
+        "--result", required=True, help="implementer 的 RESULT 行原文（npc key=value 或 legacy JSON）"
+    )
+    p_verify_manifest.add_argument(
+        "--manifest", default=None, help="MANIFEST 行给出的 manifest JSON 路径"
+    )
+    p_verify_manifest.set_defaults(
+        handler=_make_handler("verify", "run_manifest"), _cmd_path="verify manifest"
+    )
 
     # ===== doctor =====
     p_doctor = sub.add_parser("doctor", help="环境前置体检（git/openspec/codex/claude/mimo.env/...）")
@@ -392,6 +404,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p_plan_new.add_argument("--schema", default=None)
     p_plan_new.add_argument("--openspec-bin", dest="openspec_bin", default=None)
     p_plan_new.set_defaults(handler=_make_handler("plan", "cli_new_change"), _cmd_path="plan new-change")
+    p_plan_waves = sub_plan.add_parser(
+        "waves", help="并行波次候选划分：Kahn 拓扑分层 + 层内文件交集着色（stdin/--input JSON）"
+    )
+    p_plan_waves.add_argument("--input", default=None, help="JSON 输入文件（省略则读 stdin）")
+    p_plan_waves.set_defaults(handler=_make_handler("waves", "run"), _cmd_path="plan waves")
 
     # ===== git =====
     p_git = sub.add_parser("git", help="SDD git 卫生（分支/脏树/commit）")
@@ -433,6 +450,16 @@ def _build_parser() -> argparse.ArgumentParser:
     p_clean.add_argument("--yes", action="store_true", help="真删（默认 dry-run）")
     p_clean.add_argument("--keep-days", dest="keep_days", type=int, default=14)
     p_clean.set_defaults(handler=_make_handler("clean", "run"), _cmd_path="clean")
+
+    # ===== notify =====
+    p_notify = sub.add_parser("notify", help="best-effort webhook 推送（永不打断 run，总是 exit 0）")
+    p_notify.add_argument("--event", required=True, help="事件类型，如 implement-done / wave-done / run-finalized")
+    p_notify.add_argument("--url", default="", help="webhook URL；缺省依次读 $NPC_WEBHOOK / $NPC_V3_WEBHOOK")
+    p_notify.add_argument("--format", choices=["raw", "slack", "feishu"], default="raw")
+    p_notify.add_argument("--kv", action="append", default=[], help="key=value 结构化字段，可重复")
+    p_notify.add_argument("--text", default="", help="人读摘要；省略则由 event+kv 派生")
+    p_notify.add_argument("--timeout", type=float, default=5.0)
+    p_notify.set_defaults(handler=_make_handler("notify", "run"), _cmd_path="notify")
 
     # ===== task / watch =====
     p_task = sub.add_parser("task", help="后台任务观测契约（start/update/heartbeat/finish）")

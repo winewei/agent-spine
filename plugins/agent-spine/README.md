@@ -1,6 +1,6 @@
 # agent-spine plugin
 
-本地自主 **harness**，跑在 Claude Code 进程内——无服务、无容器、无常驻进程。把"长时运行 + 自主决策 + 反复 review 打磨"的编排做成纯 markdown skill，确定性动作全部委托给 [`npc` CLI](https://github.com/winewei/agent-spine)。
+本地自主 **harness**，跑在 Claude Code 进程内——无服务、无容器、无常驻进程。把"长时运行 + 自主决策 + 反复 review 打磨"的编排做成纯 markdown skill，确定性动作全部委托给安装后的 `npc` 命令。
 
 ## 三层职责
 
@@ -20,8 +20,8 @@
 
 ## 前置依赖
 
-- **`npc` CLI**（必需，内置 `src/npc`；亦作独立仓库 [cmzz/npc](https://github.com/cmzz/npc) 发布供复用）：
-  在 agent-spine 仓库根 `uv tool install --force --from . npc`
+- **`npc` 命令**（必需，代码在 `src/npc`）：
+  在 agent-spine 仓库根执行 `uv tool install --force --from . npc`
 - **`git`**、**`openspec`**（archive + 目标拆解需要）
 - **`codex`**（默认 review 引擎；可经 `.npc/config.toml` 切 `claude` 引擎）
 
