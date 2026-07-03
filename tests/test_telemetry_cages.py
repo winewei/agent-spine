@@ -70,6 +70,8 @@ def test_cage_stats_triggered_and_untriggered_and_no_data(isolate_telemetry: Pat
 
     # routing-violation no_data（事件种类未接线）
     assert "routing-violation" in stats["no_data"]
+    # verify-tests-rerun 已接线至 phase.exit + outcome_reason=="rerun-tests-failed"；
+    # 此处事件流里有 auto_decide.decision 但没有 phase.exit → no_data（kind 从未出现）
     assert "verify-tests-rerun" in stats["no_data"]
 
     # untriggered 和 no_data 互斥
@@ -360,4 +362,105 @@ def test_runs_observed_windowed_vs_historical(isolate_telemetry: Path):
     # 窗口内只有 2 个 run
     assert stats["runs_observed"] == 2, (
         f"runs_observed 应为窗口内 run 数（2），实际得到 {stats['runs_observed']}"
+    )
+
+
+# ============================================================
+# F1 回归（round-2）：verify-tests-rerun 映射到 phase.exit + outcome_reason
+# ============================================================
+
+
+def _make_phase_exit_event(
+    outcome_reason: str | None,
+    run_ts: str,
+    ts: str,
+    phase: str = "implement",
+    status: str = "failed",
+) -> dict:
+    ev: dict = {
+        "kind": "phase.exit",
+        "phase": phase,
+        "status": status,
+        "run_ts": run_ts,
+        "proj_key": "proj/demo",
+        "ts": ts,
+    }
+    if outcome_reason is not None:
+        ev["outcome_reason"] = outcome_reason
+    return ev
+
+
+def test_verify_tests_rerun_counted_when_phase_exit_rerun_failed(isolate_telemetry: Path):
+    """phase.exit + outcome_reason=rerun-tests-failed → verify-tests-rerun count=1，不在 no_data / untriggered。
+
+    回归测试：F1 修复前 verify-tests-rerun 始终 count=0 且在 no_data。
+    修复后：有真实 phase.exit/rerun-tests-failed 事件时应被计入。
+    """
+    _telemetry.emit_event(
+        _make_phase_exit_event("rerun-tests-failed", "run-A", _recent_ts(1))
+    )
+
+    all_evts = list(_telemetry.iter_events())
+    stats = _telemetry.cage_stats(all_evts, since_dt=None)
+
+    assert stats["cages"]["verify-tests-rerun"] == 1, (
+        f"verify-tests-rerun 应计 1，实际 {stats['cages']['verify-tests-rerun']}"
+    )
+    assert "verify-tests-rerun" not in stats["no_data"], (
+        "verify-tests-rerun 不应在 no_data（phase.exit 事件已出现在流中）"
+    )
+    assert "verify-tests-rerun" not in stats["untriggered"], (
+        "verify-tests-rerun 不应在 untriggered（count=1 > 0）"
+    )
+
+
+def test_verify_tests_rerun_untriggered_when_phase_exit_exists_but_no_rerun_failed(
+    isolate_telemetry: Path,
+):
+    """phase.exit 出现但无 outcome_reason=rerun-tests-failed → verify-tests-rerun 在 untriggered，不在 no_data。"""
+    _telemetry.emit_event(
+        _make_phase_exit_event("commit-not-found", "run-B", _recent_ts(1))
+    )
+
+    all_evts = list(_telemetry.iter_events())
+    stats = _telemetry.cage_stats(all_evts, since_dt=None)
+
+    assert stats["cages"]["verify-tests-rerun"] == 0
+    assert "verify-tests-rerun" not in stats["no_data"], (
+        "phase.exit 已出现 → verify-tests-rerun 不应在 no_data"
+    )
+    assert "verify-tests-rerun" in stats["untriggered"], (
+        "count=0 且 kind 已出现 → verify-tests-rerun 应在 untriggered"
+    )
+
+
+def test_verify_tests_rerun_counts_multiple_events(isolate_telemetry: Path):
+    """多条 phase.exit/rerun-tests-failed 事件（来自 implement 和 fix-rN）都计入 verify-tests-rerun。"""
+    for i, phase in enumerate(("implement", "fix-r1", "fix-r2")):
+        _telemetry.emit_event(
+            _make_phase_exit_event("rerun-tests-failed", f"run-{i}", _recent_ts(i + 1), phase=phase)
+        )
+    # 一条不相关的 phase.exit 不应计入
+    _telemetry.emit_event(
+        _make_phase_exit_event("codex-failed", "run-X", _recent_ts(1))
+    )
+
+    all_evts = list(_telemetry.iter_events())
+    stats = _telemetry.cage_stats(all_evts, since_dt=None)
+
+    assert stats["cages"]["verify-tests-rerun"] == 3, (
+        f"三条 rerun-tests-failed 事件应计 3，实际 {stats['cages']['verify-tests-rerun']}"
+    )
+
+
+def test_verify_tests_rerun_no_data_when_no_phase_exit_events(isolate_telemetry: Path):
+    """事件流中无任何 phase.exit 事件时，verify-tests-rerun 归 no_data（无法区分 0 触发）。"""
+    # 只写 auto_decide.decision 事件，无 phase.exit
+    _telemetry.emit_event(_make_auto_decide_event("stale", "run-0", _recent_ts(1)))
+
+    all_evts = list(_telemetry.iter_events())
+    stats = _telemetry.cage_stats(all_evts, since_dt=None)
+
+    assert "verify-tests-rerun" in stats["no_data"], (
+        "无 phase.exit 事件 → verify-tests-rerun 应在 no_data"
     )

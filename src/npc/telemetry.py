@@ -406,6 +406,8 @@ def _top_n_dict(d: dict, n: int) -> list[tuple[str, int]]:
 # 硬轨定义：cage_name → (event_kind, trigger_field_value | None)
 # - trigger_field_value=None 表示整条 event 即是该笼子（无需 trigger 字段过滤）
 # - trigger_field_value=<str> 表示在 event_kind 事件中，"trigger" 字段等于该值
+# - filter_field / filter_value：可选任意字段过滤（优先于 trigger 检查）
+#   当 filter_field 存在时，计数条件为 ev.get(filter_field) == filter_value
 #
 # has_data_source=True：该笼子的 telemetry event 已接线，可区分 0 触发 vs 未接线
 # has_data_source=False：相关 event 尚未 emit，归入 no_data 而不是 untriggered
@@ -421,9 +423,12 @@ _CAGE_DEFS: list[dict] = [
     {"name": "summary-missing",       "kind": "auto_decide.decision", "trigger": "summary-missing",          "has_data": True},
     {"name": "commit-not-found",      "kind": "auto_decide.decision", "trigger": "commit-not-found",         "has_data": True},
     {"name": "archive-failed",        "kind": "auto_decide.decision", "trigger": "archive-failed",           "has_data": True},
+    # verify-tests-rerun：映射到 phase.exit + outcome_reason=="rerun-tests-failed"（已接线）
+    # pipeline._do_phase_exit 在 implement / fix-rN 阶段 tests rerun 失败时会 emit 此事件
+    {"name": "verify-tests-rerun",    "kind": "phase.exit", "trigger": None,
+     "filter_field": "outcome_reason", "filter_value": "rerun-tests-failed",          "has_data": True},
     # 以下笼子的 telemetry event 尚未接线（no_data）
     {"name": "routing-violation",     "kind": "cage.routing_violation", "trigger": None,                    "has_data": False},
-    {"name": "verify-tests-rerun",    "kind": "cage.verify_tests",      "trigger": None,                    "has_data": False},
     # timeout-budget / record-timeout 笼子（事件尚未接线，归 no_data）
     # proposal 明确列出 "agent timeout-budget/record-timeout" 作为统计维度
     {"name": "timeout-budget",        "kind": "agent.timeout_budget",   "trigger": None,                    "has_data": False},
@@ -481,6 +486,8 @@ def cage_stats(
         kind = cage["kind"]
         trigger = cage["trigger"]
         has_data = cage["has_data"]
+        filter_field: str | None = cage.get("filter_field")
+        filter_value: str | None = cage.get("filter_value")
 
         if not has_data:
             # 该笼子事件未接线，直接归 no_data
@@ -499,8 +506,13 @@ def cage_stats(
         for ev in windowed:
             if ev.get("kind") != kind:
                 continue
-            if trigger is not None and ev.get("trigger") != trigger:
-                continue
+            if filter_field is not None:
+                # 优先使用任意字段过滤（支持 outcome_reason 等非 trigger 字段）
+                if ev.get(filter_field) != filter_value:
+                    continue
+            elif trigger is not None:
+                if ev.get("trigger") != trigger:
+                    continue
             count += 1
 
         cage_counts[name] = count
