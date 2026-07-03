@@ -120,7 +120,7 @@ def test_while_condition_guarded_by_ok_check():
     text = _load_spine_run_md()
 
     # 找到 while 循环入口
-    while_pos = text.find("while [ \"$(echo \"$R\" | jq -r '.blocking')")
+    while_pos = text.find("while [ \"$(printf '%s' \"$R\" | jq -r '.blocking')")
     assert while_pos != -1, "spine-run.md 中找不到 while [ .blocking 条件"
 
     # while 循环前 500 字符内必须有 .ok 检查（由 round0 guard 提供）

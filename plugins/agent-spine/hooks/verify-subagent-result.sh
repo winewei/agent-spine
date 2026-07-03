@@ -22,7 +22,7 @@ INPUT="$(cat)"
 # Fall back to checking transcript path or last message pattern.
 AGENT_TYPE=""
 if command -v jq >/dev/null 2>&1; then
-    AGENT_TYPE="$(echo "$INPUT" | jq -r '.agent_type // ""' 2>/dev/null || true)"
+    AGENT_TYPE="$(printf '%s' "$INPUT" | jq -r '.agent_type // ""' 2>/dev/null || true)"
 else
     # No jq: use python3 fallback
     AGENT_TYPE="$(echo "$INPUT" | python3 -c "
@@ -42,7 +42,7 @@ if [ -z "$AGENT_TYPE" ] || [ "$AGENT_TYPE" = "null" ]; then
     # Try to read last_assistant_message to decide
     LAST_MSG=""
     if command -v jq >/dev/null 2>&1; then
-        LAST_MSG="$(echo "$INPUT" | jq -r '.last_assistant_message // ""' 2>/dev/null || true)"
+        LAST_MSG="$(printf '%s' "$INPUT" | jq -r '.last_assistant_message // ""' 2>/dev/null || true)"
     else
         LAST_MSG="$(echo "$INPUT" | python3 -c "
 import sys, json
@@ -70,7 +70,7 @@ fi
 # ── 3. Extract last assistant message ───────────────────────────────────────
 LAST_MSG=""
 if command -v jq >/dev/null 2>&1; then
-    LAST_MSG="$(echo "$INPUT" | jq -r '.last_assistant_message // ""' 2>/dev/null || true)"
+    LAST_MSG="$(printf '%s' "$INPUT" | jq -r '.last_assistant_message // ""' 2>/dev/null || true)"
 else
     LAST_MSG="$(echo "$INPUT" | python3 -c "
 import sys, json
@@ -202,7 +202,7 @@ if [ "$COMMIT_VAL" != "-" ]; then
     # Verify sha exists in current repo
     CWD_VAL=""
     if command -v jq >/dev/null 2>&1; then
-        CWD_VAL="$(echo "$INPUT" | jq -r '.cwd // ""' 2>/dev/null || true)"
+        CWD_VAL="$(printf '%s' "$INPUT" | jq -r '.cwd // ""' 2>/dev/null || true)"
     else
         CWD_VAL="$(echo "$INPUT" | python3 -c "
 import sys, json

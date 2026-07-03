@@ -448,7 +448,7 @@ class TestFixExhaustedControlFlow:
         """
         init_pos = spine_run_text.find("FIX_EXHAUSTED=false")
         loop_pos = spine_run_text.find(
-            'while [ "$(echo "$R" | jq -r \'.blocking\')" -gt 0 ]'
+            'while [ "$(printf \'%s\' "$R" | jq -r \'.blocking\')" -gt 0 ]'
         )
         assert init_pos != -1, "FIX_EXHAUSTED=false initialization missing"
         assert loop_pos != -1, "review-fix while loop not found"
@@ -650,7 +650,7 @@ class TestSpineRunErrorHandlingGuard:
         确保不存在在验证前先提取 TIMEOUT_SEC 的旧代码残留。
         """
         validation_guard = 'type == "number" and . > 0'
-        timeout_extraction = "TIMEOUT_SEC=$(echo \"$BUDGET\" | jq -r '.timeout_sec')"
+        timeout_extraction = "TIMEOUT_SEC=$(printf '%s' \"$BUDGET\" | jq -r '.timeout_sec')"
         assert timeout_extraction in spine_run_text, (
             "TIMEOUT_SEC extraction line missing from spine-run.md"
         )

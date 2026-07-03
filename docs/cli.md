@@ -561,7 +561,7 @@ Recommendation: 添加 len(username) > 256 的判定...
 
 ```bash
 SPAWN=$(npc agent spawn-prompt --phase implement --change-id add-foo)
-PROMPT_TEXT=$(echo "$SPAWN" | jq -r '.prompt')
+PROMPT_TEXT=$(printf '%s' "$SPAWN" | jq -r '.prompt')
 # 主 session 直接调用 Agent 工具：
 # Agent(subagent_type="senior-code-developer", description="Implement add-foo", prompt=$PROMPT_TEXT)
 ```
@@ -957,7 +957,7 @@ $ echo $?
 ```bash
 # 1. 初始化（落 run.json + active.json；不再 eval shell exports）
 INIT=$(npc init ${AUTO:+--auto} ${FRESH:+--fresh})
-NEEDS_RESUME=$(echo "$INIT" | jq -r '.needs_resume')
+NEEDS_RESUME=$(printf '%s' "$INIT" | jq -r '.needs_resume')
 
 # 2. 判定续跑
 if [ "$NEEDS_RESUME" = "true" ]; then
@@ -978,26 +978,26 @@ for SEQ in 1 2 3; do
   #   - npc 生成 ~150 tokens 引导语，主 session 拿到后调 Agent 工具
   npc agent prompt render --phase implement --change-id "$CID"
   SPAWN=$(npc agent spawn-prompt --phase implement --change-id "$CID")
-  PROMPT_TEXT=$(echo "$SPAWN" | jq -r '.prompt')
+  PROMPT_TEXT=$(printf '%s' "$SPAWN" | jq -r '.prompt')
   # 主 session: Agent(subagent_type="senior-code-developer", prompt=$PROMPT_TEXT)
   # sub-agent 返回 RESULT 行后：
   IMPL=$(npc implement record --seq $SEQ --result "$RESULT_LINE")
-  [ "$(echo "$IMPL" | jq -r '.ok')" = "true" ] || continue
+  [ "$(printf '%s' "$IMPL" | jq -r '.ok')" = "true" ] || continue
 
   # 4.2 Review-Fix Loop — review run 一行；fix prompt 同样下沉
   R=$(npc review run --seq $SEQ --round 0)
   N=0
-  while [ "$(echo "$R" | jq -r '.blocking')" -gt 0 ] \
-     && [ "$(echo "$R" | jq -r '.stale')" = "false" ] \
+  while [ "$(printf '%s' "$R" | jq -r '.blocking')" -gt 0 ] \
+     && [ "$(printf '%s' "$R" | jq -r '.stale')" = "false" ] \
      && [ $N -lt 20 ]; do
     N=$((N+1))
     # 主 session 不再自己拼 fix prompt——npc 自动注入 findings + 修复历史
     npc agent prompt render --phase fix --change-id "$CID" --round $N
     SPAWN=$(npc agent spawn-prompt --phase fix --change-id "$CID" --round $N)
-    PROMPT_TEXT=$(echo "$SPAWN" | jq -r '.prompt')
+    PROMPT_TEXT=$(printf '%s' "$SPAWN" | jq -r '.prompt')
     # 主 session: Agent(subagent_type="senior-code-developer", prompt=$PROMPT_TEXT)
     FIX=$(npc fix record --seq $SEQ --round $N --result "$FIX_RESULT_LINE")
-    [ "$(echo "$FIX" | jq -r '.ok')" = "true" ] || break
+    [ "$(printf '%s' "$FIX" | jq -r '.ok')" = "true" ] || break
     R=$(npc review run --seq $SEQ --round $N)
   done
 
