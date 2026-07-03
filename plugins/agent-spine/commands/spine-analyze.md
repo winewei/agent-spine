@@ -18,6 +18,7 @@ tags: [telemetry, self-iteration, meta]
 ```bash
 npc telemetry hotspots --top 5 --since 30d
 npc telemetry agg --since 30d        # 三维度聚合：by-phase / by-change / by-week
+npc telemetry cages --since 90d      # 硬轨触发次数：untriggered=0 触发，no_data=未接线
 ```
 
 可选：对某个反复出问题的 phase，用 `npc telemetry tail --kind review.round --last 20` 看少量样本（仍是派生 record，非原文）。
@@ -32,6 +33,7 @@ npc telemetry agg --since 30d        # 三维度聚合：by-phase / by-change / 
 - **token 浪费**：`est_input/output_tokens_sum` 异常高的 phase → prompt 模板可能冗余。
 - **重试热点**：`retry_count_sum` 高 → codex/引擎稳定性或 focus prompt 歧义。
 - **失败 reason 分布**：`reasons` 里 top 的 outcome_reason → 流程性缺陷。
+- **未触发笼子**（减法信号）：`cages` 输出中 `untriggered` 列表——有数据源且观察窗口内 0 次触发；若 `runs_observed` 已达阈值，视为**候选删除项**。`no_data` 表示事件尚未接线，不可误判为可删。
 
 ### 3. 写优化建议
 
@@ -40,6 +42,12 @@ npc telemetry agg --since 30d        # 三维度聚合：by-phase / by-change / 
 - **诊断**：为什么会这样（指向 npc 模块 / skill 步骤 / prompt 模板的具体位置）。
 - **建议**：改什么、预期收益。**只描述，不动手改。**
 - **验证方式**：改完后看哪个指标下降算成功。
+
+**减法建议格式**（适用于 untriggered 笼子）：
+- **观察**：`<cage-name>` 在近 `<N>d` 内（`runs_observed=<R>`）触发 0 次。
+- **诊断**：该硬轨逻辑仍在代码中但从未被触及，可能是冗余守卫或业务场景已绕开。
+- **建议**：删除 / 软化该笼子的触发条件（具体指向代码位置）。**只描述，不动手删。**
+- **验证方式**：删后 `npc telemetry cages` 中该笼子移出列表，相关逻辑无回归。
 
 ---
 
@@ -50,6 +58,7 @@ npc telemetry agg --since 30d        # 三维度聚合：by-phase / by-change / 
 
 **考察事件**：N 条
 **Top hotspot**：<phase> (score=<x>, failure_rate=<y>, p50=<z>ms)
+**未触发笼子**：<cage1>, <cage2>（runs_observed=<R>，候选删除）| 无
 
 ### 3 条建议（详见 docs/optimization-proposals/<date>.md）
 1. <一句话> — 预期：<指标>↓

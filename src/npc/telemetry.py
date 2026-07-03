@@ -400,6 +400,116 @@ def _top_n_dict(d: dict, n: int) -> list[tuple[str, int]]:
 
 
 # ============================================================
+# 硬轨（cage）触发统计
+# ============================================================
+
+# 硬轨定义：cage_name → (event_kind, trigger_field_value | None)
+# - trigger_field_value=None 表示整条 event 即是该笼子（无需 trigger 字段过滤）
+# - trigger_field_value=<str> 表示在 event_kind 事件中，"trigger" 字段等于该值
+#
+# has_data_source=True：该笼子的 telemetry event 已接线，可区分 0 触发 vs 未接线
+# has_data_source=False：相关 event 尚未 emit，归入 no_data 而不是 untriggered
+
+_CAGE_DEFS: list[dict] = [
+    # auto_decide.decision 系列（已接线）
+    {"name": "stale",                 "kind": "auto_decide.decision", "trigger": "stale",                    "has_data": True},
+    {"name": "max-rounds",            "kind": "auto_decide.decision", "trigger": "max-rounds",               "has_data": True},
+    {"name": "agent-timeout-exhausted","kind": "auto_decide.decision", "trigger": "agent-timeout-exhausted", "has_data": True},
+    {"name": "codex-failed",          "kind": "auto_decide.decision", "trigger": "codex-failed",             "has_data": True},
+    {"name": "implementer-failed",    "kind": "auto_decide.decision", "trigger": "implementer-failed",       "has_data": True},
+    {"name": "fixer-failed",          "kind": "auto_decide.decision", "trigger": "fixer-failed",             "has_data": True},
+    {"name": "summary-missing",       "kind": "auto_decide.decision", "trigger": "summary-missing",          "has_data": True},
+    {"name": "commit-not-found",      "kind": "auto_decide.decision", "trigger": "commit-not-found",         "has_data": True},
+    {"name": "archive-failed",        "kind": "auto_decide.decision", "trigger": "archive-failed",           "has_data": True},
+    # 以下笼子的 telemetry event 尚未接线（no_data）
+    {"name": "routing-violation",     "kind": "cage.routing_violation", "trigger": None,                    "has_data": False},
+    {"name": "verify-tests-rerun",    "kind": "cage.verify_tests",      "trigger": None,                    "has_data": False},
+]
+
+# 默认观察窗口足够的最少 run 数阈值（untriggered 才有意义被列为删除候选）
+CAGE_MIN_RUNS_THRESHOLD = 5
+
+
+def cage_stats(
+    events: Iterable[dict],
+    since_dt: "datetime | None" = None,
+) -> dict:
+    """统计各硬轨跨 run 触发次数。
+
+    返回结构::
+
+        {
+          "cages": {"stale": 12, "max-rounds": 0, ...},
+          "untriggered": ["max-rounds", ...],   # 有数据源且 count=0
+          "no_data": ["routing-violation", ...], # 事件从未 emit
+          "runs_observed": 42,
+        }
+
+    ``untriggered`` 与 ``no_data`` 互斥：
+    - ``no_data``：该笼子的事件种类在整个事件流中从未出现（无论时间窗口）
+    - ``untriggered``：事件种类存在，但该笼子在观察窗口内计数为 0
+    """
+    # 收集所有事件（先确定 run 数，再按时间窗口过滤 cage 计数）
+    all_events: list[dict] = list(events)
+
+    # 统计观察到的唯一 run（以 run_ts 去重；无 run_ts 时回退到 proj_key）
+    run_ids: set[str] = set()
+    for ev in all_events:
+        rt = ev.get("run_ts") or ev.get("proj_key") or ""
+        if rt:
+            run_ids.add(rt)
+    runs_observed = len(run_ids)
+
+    # 时间窗口过滤后的事件
+    windowed = [ev for ev in all_events if _within_since(ev.get("ts", ""), since_dt)]
+
+    # 统计在整个事件流（不受时间窗口限制）中出现过的 kind 集合，用于判断 no_data
+    all_kinds: set[str] = {ev.get("kind", "") for ev in all_events}
+
+    cage_counts: dict[str, int] = {}
+    untriggered: list[str] = []
+    no_data: list[str] = []
+
+    for cage in _CAGE_DEFS:
+        name = cage["name"]
+        kind = cage["kind"]
+        trigger = cage["trigger"]
+        has_data = cage["has_data"]
+
+        if not has_data:
+            # 该笼子事件未接线，直接归 no_data
+            cage_counts[name] = 0
+            no_data.append(name)
+            continue
+
+        # 判断 no_data：若整个事件流（无论时间窗口）中从未出现该 kind → no_data
+        if kind not in all_kinds:
+            cage_counts[name] = 0
+            no_data.append(name)
+            continue
+
+        # 在时间窗口内计数
+        count = 0
+        for ev in windowed:
+            if ev.get("kind") != kind:
+                continue
+            if trigger is not None and ev.get("trigger") != trigger:
+                continue
+            count += 1
+
+        cage_counts[name] = count
+        if count == 0:
+            untriggered.append(name)
+
+    return {
+        "cages": cage_counts,
+        "untriggered": untriggered,
+        "no_data": no_data,
+        "runs_observed": runs_observed,
+    }
+
+
+# ============================================================
 # CLI handlers
 # ============================================================
 
@@ -562,6 +672,43 @@ def cli_estimate_tokens(args: argparse.Namespace) -> None:
             "bytes": size,
             "est_tokens": tokens,
             "method": f"bytes_div_{TOKEN_BYTES_PER}",
+        }
+    )
+
+
+def cli_cages(args: argparse.Namespace) -> None:
+    """``npc telemetry cages [--since DUR] [--min-runs N]``。
+
+    统计各硬轨（cage）跨 run 触发次数，输出单行 JSON。
+    ``untriggered`` 列出有数据源但 0 次触发的笼子（删除候选信号）。
+    ``no_data`` 列出事件从未 emit 的笼子（尚未接线，不可误判为可删）。
+    """
+    try:
+        since_dt = _parse_since(args.since)
+    except ValueError as e:
+        _io.emit_error("invalid_since", str(e), exit_code=2)
+        return
+
+    all_evts = list(iter_events())
+    stats = cage_stats(all_evts, since_dt=since_dt)
+
+    min_runs = args.min_runs if hasattr(args, "min_runs") and args.min_runs is not None else CAGE_MIN_RUNS_THRESHOLD
+    deletion_candidates = (
+        stats["untriggered"]
+        if stats["runs_observed"] >= min_runs
+        else []
+    )
+
+    _io.emit(
+        {
+            "ok": True,
+            "since": args.since,
+            "runs_observed": stats["runs_observed"],
+            "min_runs_threshold": min_runs,
+            "cages": stats["cages"],
+            "untriggered": stats["untriggered"],
+            "no_data": stats["no_data"],
+            "deletion_candidates": deletion_candidates,
         }
     )
 

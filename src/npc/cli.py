@@ -656,6 +656,23 @@ def _build_parser() -> argparse.ArgumentParser:
         _cmd_path="telemetry estimate-tokens",
     )
 
+    p_tel_cages = sub_tel.add_parser(
+        "cages",
+        help="统计各硬轨跨 run 触发次数；untriggered=0 触发（删除候选），no_data=事件未接线",
+    )
+    p_tel_cages.add_argument(
+        "--since", default=None,
+        help="只统计该窗口内的触发计数，如 90d / 30d / ISO 8601",
+    )
+    p_tel_cages.add_argument(
+        "--min-runs", dest="min_runs", type=int, default=None,
+        help="runs_observed 达到该阈值才列出 deletion_candidates（默认 5）",
+    )
+    p_tel_cages.set_defaults(
+        handler=_make_handler("telemetry", "cli_cages"),
+        _cmd_path="telemetry cages",
+    )
+
     return parser
 
 
