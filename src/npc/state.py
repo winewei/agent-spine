@@ -16,7 +16,7 @@ import subprocess
 from pathlib import Path
 from typing import Any, Callable
 
-from . import _io, paths as _paths
+from . import _io, paths as _paths, telemetry as _telemetry
 from . import git_ops as _git_ops
 
 
@@ -540,6 +540,26 @@ def finalize(args: argparse.Namespace, runner=None) -> None:
     elif counts["archived"] + counts["failed"] + counts["skipped"] == counts["total"]:
         final = "completed-with-issues"
     else:
+        # ── telemetry：incomplete 路径也 emit，便于统计悬挂率 ───────────────
+        try:
+            _telemetry.emit_event(
+                {
+                    "kind": "run.finalize",
+                    "proj_key": p.proj_key,
+                    "canonical_proj_key": p.canonical_proj_key or p.proj_key,
+                    "run_ts": p.run_ts,
+                    "status": "incomplete",
+                    "merged_back": False,
+                    "worktree_removed": False,
+                    "spine_branch": p.spine_branch,
+                    "archived_count": counts["archived"],
+                    "failed_count": counts["failed"],
+                    "skipped_count": counts["skipped"],
+                    "total_count": counts["total"],
+                }
+            )
+        except Exception:
+            pass
         _io.emit_error(
             "incomplete",
             f"仍有 {counts['total'] - counts['archived'] - counts['failed'] - counts['skipped']} 个 change 处于非终态",
@@ -601,6 +621,27 @@ def finalize(args: argparse.Namespace, runner=None) -> None:
                     "base_branch": base_branch,
                     "reason": ff_reason,
                 }
+
+    # ── telemetry：成功路径 emit run.finalize ────────────────────────────
+    try:
+        _telemetry.emit_event(
+            {
+                "kind": "run.finalize",
+                "proj_key": p.proj_key,
+                "canonical_proj_key": p.canonical_proj_key or p.proj_key,
+                "run_ts": p.run_ts,
+                "status": final,
+                "merged_back": merge_result.get("merged_back", False),
+                "worktree_removed": merge_result.get("worktree_removed", False),
+                "spine_branch": p.spine_branch,
+                "archived_count": counts["archived"],
+                "failed_count": counts["failed"],
+                "skipped_count": counts["skipped"],
+                "total_count": counts["total"],
+            }
+        )
+    except Exception:
+        pass
 
     payload: dict = {
         "ok": True,

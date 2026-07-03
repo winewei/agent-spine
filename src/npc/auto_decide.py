@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import argparse
 
-from . import _io, paths as _paths, state as _state
+from . import _io, paths as _paths, state as _state, telemetry as _telemetry
 
 
 VALID_TRIGGERS = {
@@ -262,4 +262,25 @@ def cli(args: argparse.Namespace) -> None:
         decision["applied"] = False
 
     decision["ok"] = True
+
+    # ── telemetry：best-effort，失败不影响主流程 ──────────────────────────
+    try:
+        _telemetry.emit_event(
+            {
+                "kind": "auto_decide.decision",
+                "proj_key": p.proj_key,
+                "canonical_proj_key": p.canonical_proj_key or p.proj_key,
+                "run_ts": p.run_ts,
+                "change_seq": seq,
+                "change_id": decision.get("change_id"),
+                "trigger": trigger,
+                "action": decision.get("action"),
+                "reason": decision.get("reason"),
+                "seq": seq,
+                "applied": decision.get("applied", False),
+            }
+        )
+    except Exception:
+        pass
+
     _io.emit(decision)
