@@ -266,3 +266,115 @@ class TestSpineRunSkillContract:
     def test_spine_run_decision_table_contains_timeout_trigger(self, spine_run_text):
         """3d 决策点的 trigger 表必须包含 agent-timeout-exhausted 行。"""
         assert "agent-timeout-exhausted" in spine_run_text
+
+    def test_spine_run_fix_phase_inner_retry_loop(self, spine_run_text):
+        """spine-run.md fix 分支必须用内层循环在同一 FIX_PHASE 内重试，
+        不能在一次超时后 continue 外层循环（否则 N 递增导致 phase 散落）。
+        检测标志：内层 while true 与 break 2 必须共存（用于同 phase 重试）。"""
+        assert "while true" in spine_run_text, "inner retry loop (while true) missing in fix branch"
+        assert "break 2" in spine_run_text, "break 2 (exit both loops on exhausted) missing"
+
+
+# ============================================================
+# 3.5  fix-r1 连续超时 5 次应在同一 phase 累积到 exhausted
+# ============================================================
+
+
+class TestFixPhaseConsecutiveTimeoutExhaustion:
+    """验证 fix-rN phase 连续超时时，timeout_retries 在同一 phase 累积到 exhausted。
+
+    这是 F1 finding 的核心回归测试：旧代码因 continue 外层循环导致
+    N 递增、超时分散到 fix-r1/fix-r2/... 各 phase，每个 phase 只到 retries=1，
+    永远无法触发 exhausted。修复后 timeout_retries 必须在 fix-r1 内从 0 累积到 5。
+    """
+
+    def test_fix_r1_consecutive_timeouts_reach_exhausted(self, env_setup, capsys, make_args):
+        """连续对 fix-r1 record-timeout 5 次 → exhausted=True（同 phase 累积）。"""
+        _bootstrap(env_setup, capsys, make_args, "cid-fix-exhaust")
+
+        for i in range(1, 6):
+            _agent.record_timeout(
+                _mk(env_setup, make_args, seq=1, phase="fix-r1", base=None, mult=None, max_sec=None)
+            )
+            payload = _read_emit(capsys)
+            assert payload["retries"] == i, f"expected retries={i}, got {payload['retries']}"
+
+        assert payload["exhausted"] is True, "fix-r1 should be exhausted after 5 consecutive timeouts"
+
+        # 确认 budget 查询也返回 exhausted
+        _agent.timeout_budget(
+            _mk(env_setup, make_args, seq=1, phase="fix-r1", base=None, mult=None, max_sec=None)
+        )
+        budget = _read_emit(capsys)
+        assert budget["exhausted"] is True
+
+    def test_fix_r1_exhausted_triggers_auto_decide_skip(self, env_setup, capsys, make_args):
+        """fix-r1 exhausted → auto-decide --trigger agent-timeout-exhausted → action=skip。
+
+        这验证了完整的修复路径：同一 phase 累积 5 次超时 → exhausted → skip，
+        而非旧代码的跨 phase 散落导致预算永远难以耗尽。
+        """
+        _bootstrap(env_setup, capsys, make_args, "cid-fix-skip")
+
+        # 累积 5 次超时（模拟内层循环在 fix-r1 重试 5 次）
+        for _ in range(5):
+            _agent.record_timeout(
+                _mk(env_setup, make_args, seq=1, phase="fix-r1", base=None, mult=None, max_sec=None)
+            )
+            capsys.readouterr()
+
+        # exhausted → auto-decide
+        _auto_decide.cli(
+            _mk(env_setup, make_args, seq=1, trigger="agent-timeout-exhausted", apply=True)
+        )
+        decision = _read_emit(capsys)
+        assert decision["action"] == "skip"
+        assert decision["set_status"] == "skipped-auto"
+
+        # state 中应记录 skipped-auto
+        s = json.loads(env_setup.state_json.read_text())
+        assert s["progress"][0]["status"] == "skipped-auto"
+        assert s["progress"][0].get("last_trigger") == "agent-timeout-exhausted"
+
+    def test_fix_phases_remain_independent_across_rounds(self, env_setup, capsys, make_args):
+        """不同 fix round 的 phase（fix-r1, fix-r2）保持独立计数器。
+
+        旧代码的问题是超时会散落到不同 phase，新代码修复后每个 phase 内部
+        独立累积，不同 round 间不应相互干扰。
+        """
+        _bootstrap(env_setup, capsys, make_args, "cid-fix-independent")
+
+        # fix-r1 超时 3 次（未到 exhausted）
+        for _ in range(3):
+            _agent.record_timeout(
+                _mk(env_setup, make_args, seq=1, phase="fix-r1", base=None, mult=None, max_sec=None)
+            )
+            capsys.readouterr()
+
+        # fix-r2 应独立，retries=0
+        _agent.timeout_budget(
+            _mk(env_setup, make_args, seq=1, phase="fix-r2", base=None, mult=None, max_sec=None)
+        )
+        budget_r2 = _read_emit(capsys)
+        assert budget_r2["retries"] == 0, "fix-r2 should not be affected by fix-r1 timeouts"
+        assert budget_r2["exhausted"] is False
+
+        # fix-r1 尚未 exhausted（3 < 5）
+        _agent.timeout_budget(
+            _mk(env_setup, make_args, seq=1, phase="fix-r1", base=None, mult=None, max_sec=None)
+        )
+        budget_r1 = _read_emit(capsys)
+        assert budget_r1["retries"] == 3
+        assert budget_r1["exhausted"] is False
+
+    def test_fix_r1_not_exhausted_at_retries_4(self, env_setup, capsys, make_args):
+        """fix-r1 超时 4 次（阈值-1）→ 未 exhausted，仍应继续重派同一 phase。"""
+        _bootstrap(env_setup, capsys, make_args, "cid-fix-boundary")
+        _set_retries(env_setup, 1, "fix-r1", 4)
+
+        _agent.timeout_budget(
+            _mk(env_setup, make_args, seq=1, phase="fix-r1", base=None, mult=None, max_sec=None)
+        )
+        payload = _read_emit(capsys)
+        assert payload["retries"] == 4
+        assert payload["exhausted"] is False, "at retries=4 fix-r1 should NOT be exhausted yet"

@@ -180,27 +180,36 @@ while [ "$(echo "$R" | jq -r '.blocking')" -gt 0 ] \
     # in-session（claude 后端默认）：spawn 前取超时预算（必须）
     SPAWN_PROMPT=$(echo "$FIX" | jq -r '.spawn_prompt')
     FIX_PHASE="fix-r${N}"
-    BUDGET=$(npc agent timeout-budget --seq $SEQ --phase $FIX_PHASE)
-    TIMEOUT_SEC=$(echo "$BUDGET" | jq -r '.timeout_sec')
-    if [ "$(echo "$BUDGET" | jq -r '.exhausted')" = "true" ]; then
-      # 预算耗尽，不再 spawn，转决策点
-      DEC=$(npc auto-decide --trigger agent-timeout-exhausted --seq $SEQ --apply)
-      ACTION=$(echo "$DEC" | jq -r '.action')
-      break
-    fi
-    RESULT_LINE=$(Agent subagent_type=spine-coder prompt="$SPAWN_PROMPT" timeout=$TIMEOUT_SEC)
-    if [ $? -ne 0 ] || [ -z "$RESULT_LINE" ]; then
-      # 超时：记账后决定是否继续
-      RT=$(npc agent record-timeout --seq $SEQ --phase $FIX_PHASE)
-      if [ "$(echo "$RT" | jq -r '.exhausted')" = "true" ]; then
+    # 内层循环：在同一 phase 内重试，直到成功或 exhausted
+    # 保证 timeout_retries 在同一 phase 累积，不因 N 递增而散落到不同计数器
+    FIX_DONE=false
+    while true; do
+      BUDGET=$(npc agent timeout-budget --seq $SEQ --phase $FIX_PHASE)
+      TIMEOUT_SEC=$(echo "$BUDGET" | jq -r '.timeout_sec')
+      if [ "$(echo "$BUDGET" | jq -r '.exhausted')" = "true" ]; then
+        # 预算耗尽，不再 spawn，转决策点
         DEC=$(npc auto-decide --trigger agent-timeout-exhausted --seq $SEQ --apply)
         ACTION=$(echo "$DEC" | jq -r '.action')
-        break
+        break 2  # 同时跳出内层循环和外层 while
       fi
-      # 未耗尽 → 跳过本轮记录，重新 review（不算作 fix 完成，继续循环）
-      continue
-    fi
-    npc fix record --seq $SEQ --round $N --result "$RESULT_LINE"
+      RESULT_LINE=$(Agent subagent_type=spine-coder prompt="$SPAWN_PROMPT" timeout=$TIMEOUT_SEC)
+      if [ $? -ne 0 ] || [ -z "$RESULT_LINE" ]; then
+        # 超时：记账后在同一 phase 重试（timeout_retries 累积到 exhausted）
+        RT=$(npc agent record-timeout --seq $SEQ --phase $FIX_PHASE)
+        if [ "$(echo "$RT" | jq -r '.exhausted')" = "true" ]; then
+          DEC=$(npc auto-decide --trigger agent-timeout-exhausted --seq $SEQ --apply)
+          ACTION=$(echo "$DEC" | jq -r '.action')
+          break 2  # 同时跳出内层循环和外层 while
+        fi
+        # 未耗尽 → 在同一 FIX_PHASE 内重派，不推进 N
+        continue
+      fi
+      # spawn 成功：记录结果，退出内层循环
+      npc fix record --seq $SEQ --round $N --result "$RESULT_LINE"
+      FIX_DONE=true
+      break
+    done
+    [ "$FIX_DONE" = "true" ] || continue  # 若内层因 break 2 退出则 continue 无效（已 break 外层）
   fi
   # headless（mimo/显式）：npc 内部已 record，无需额外步骤
 
