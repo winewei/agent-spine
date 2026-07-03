@@ -92,31 +92,92 @@ if [ -z "$RESULT_LINE" ]; then
     exit 2
 fi
 
-# ── 5. Validate RESULT key set ──────────────────────────────────────────────
+# ── 5. Validate RESULT key set (schema-variant aware) ───────────────────────
 # Accepted schema variants:
-#   implement success: commit= tasks= tests= summary= notes=
-#   fix success:       commit= fixed= tests= summary= categories_scanned= regressions_added= notes=
-#   failure:           commit=- tasks= tests=fail summary= notes=
+#   implement success: commit=<sha> tasks=<n> tests=pass summary=<path> notes=<...>
+#   fix success:       commit=<sha> fixed=<n> tests=pass summary=<path>
+#                        categories_scanned=<csv> regressions_added=<csv|-> notes=<...>
+#   failure (any):     commit=- tasks=<n> tests=fail summary=<path|-> notes=<...>
 #
-# Minimum required keys for any valid RESULT line:
-REQUIRED_KEYS="commit= tests= notes="
+# Detection logic:
+#   1. commit=- AND tests=fail  → failure schema
+#   2. fixed= present           → fix success schema
+#   3. otherwise                → implement success schema
 
+_has_key() {
+    echo "$RESULT_LINE" | grep -qE "(^|[[:space:]])${1}"
+}
+
+# Extract commit= and tests= values for schema detection
+COMMIT_RAW="$(echo "$RESULT_LINE" | grep -oE 'commit=[^[:space:]]+' | head -1 | sed 's/commit=//' || true)"
+TESTS_RAW="$(echo "$RESULT_LINE" | grep -oE 'tests=[^[:space:]]+' | head -1 | sed 's/tests=//' || true)"
+
+# Determine which schema variant this RESULT claims to be
+SCHEMA_VARIANT=""
+if [ "$COMMIT_RAW" = "-" ] && [ "$TESTS_RAW" = "fail" ]; then
+    SCHEMA_VARIANT="failure"
+elif _has_key "fixed="; then
+    SCHEMA_VARIANT="fix"
+else
+    SCHEMA_VARIANT="implement"
+fi
+
+# Define required keys per variant and validate
 missing_keys=""
-for key in commit= tests= notes=; do
-    if ! echo "$RESULT_LINE" | grep -qE "(^|[[:space:]])${key}"; then
-        missing_keys="${missing_keys} ${key}"
-    fi
-done
+case "$SCHEMA_VARIANT" in
+    implement)
+        # implement success: commit= tasks= tests= summary= notes=
+        for key in commit= tasks= tests= summary= notes=; do
+            if ! _has_key "${key}"; then
+                missing_keys="${missing_keys} ${key}"
+            fi
+        done
+        # tests= must be "pass" for implement success
+        if [ "$TESTS_RAW" != "pass" ] && [ -n "$TESTS_RAW" ]; then
+            echo "ERROR: implement RESULT schema requires tests=pass, got tests=${TESTS_RAW}" >&2
+            echo "RESULT line: $RESULT_LINE" >&2
+            exit 2
+        fi
+        ;;
+    fix)
+        # fix success: commit= fixed= tests= summary= categories_scanned= regressions_added= notes=
+        for key in commit= fixed= tests= summary= categories_scanned= regressions_added= notes=; do
+            if ! _has_key "${key}"; then
+                missing_keys="${missing_keys} ${key}"
+            fi
+        done
+        # tests= must be "pass" for fix success
+        if [ "$TESTS_RAW" != "pass" ] && [ -n "$TESTS_RAW" ]; then
+            echo "ERROR: fix RESULT schema requires tests=pass, got tests=${TESTS_RAW}" >&2
+            echo "RESULT line: $RESULT_LINE" >&2
+            exit 2
+        fi
+        ;;
+    failure)
+        # failure: commit=- tasks= tests=fail summary= notes=
+        for key in commit= tasks= tests= summary= notes=; do
+            if ! _has_key "${key}"; then
+                missing_keys="${missing_keys} ${key}"
+            fi
+        done
+        # commit must be "-" in failure schema
+        if [ "$COMMIT_RAW" != "-" ]; then
+            echo "ERROR: failure RESULT schema requires commit=-, got commit=${COMMIT_RAW}" >&2
+            echo "RESULT line: $RESULT_LINE" >&2
+            exit 2
+        fi
+        ;;
+esac
 
 if [ -n "$missing_keys" ]; then
-    echo "ERROR: RESULT 行缺少必需 key:${missing_keys}" >&2
+    echo "ERROR: RESULT 行 (schema=${SCHEMA_VARIANT}) 缺少必需 key:${missing_keys}" >&2
     echo "RESULT line: $RESULT_LINE" >&2
     exit 2
 fi
 
 # ── 6. Validate commit sha if non-"-" ───────────────────────────────────────
-# Extract commit= value
-COMMIT_VAL="$(echo "$RESULT_LINE" | grep -oE 'commit=[^[:space:]]+' | head -1 | sed 's/commit=//' || true)"
+# COMMIT_RAW was extracted in step 5 for schema detection; reuse it here.
+COMMIT_VAL="$COMMIT_RAW"
 
 if [ -z "$COMMIT_VAL" ]; then
     echo "ERROR: RESULT 行中 commit= 值为空" >&2

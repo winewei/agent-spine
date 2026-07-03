@@ -259,3 +259,179 @@ def test_stdout_clean_on_failure(fake_repo: Path) -> None:
         json.loads(out)
     # Diagnostics must go to stderr
     assert proc.stderr.strip() != ""
+
+
+# ── Schema variant validation: implement schema ───────────────────────────────
+
+def test_implement_missing_summary_blocked(fake_repo: Path) -> None:
+    """Regression F1: implement RESULT missing summary= → exit 2."""
+    sha = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=str(fake_repo), text=True
+    ).strip()
+    # omit summary=
+    result_line = f"RESULT: commit={sha} tasks=3 tests=pass notes=-"
+    payload = _spine_payload(f"Done.\n{result_line}", cwd=str(fake_repo))
+
+    proc = _run_hook(payload)
+    assert proc.returncode == 2, f"Expected exit 2 (missing summary=)\nstderr: {proc.stderr}"
+    assert "summary=" in proc.stderr
+
+
+def test_implement_missing_tasks_blocked(fake_repo: Path) -> None:
+    """Regression F1: implement RESULT missing tasks= → exit 2."""
+    sha = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=str(fake_repo), text=True
+    ).strip()
+    # omit tasks=
+    result_line = f"RESULT: commit={sha} tests=pass summary=/tmp/s.md notes=-"
+    payload = _spine_payload(f"Done.\n{result_line}", cwd=str(fake_repo))
+
+    proc = _run_hook(payload)
+    assert proc.returncode == 2, f"Expected exit 2 (missing tasks=)\nstderr: {proc.stderr}"
+    assert "tasks=" in proc.stderr
+
+
+def test_implement_tests_fail_blocked(fake_repo: Path) -> None:
+    """Regression F1: implement RESULT with tests=fail is an invalid combination → exit 2."""
+    sha = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=str(fake_repo), text=True
+    ).strip()
+    # implement schema requires tests=pass; tests=fail without fixed= is invalid
+    result_line = f"RESULT: commit={sha} tasks=3 tests=fail summary=/tmp/s.md notes=oops"
+    payload = _spine_payload(f"Done.\n{result_line}", cwd=str(fake_repo))
+
+    proc = _run_hook(payload)
+    assert proc.returncode == 2, f"Expected exit 2 (implement with tests=fail)\nstderr: {proc.stderr}"
+
+
+# ── Schema variant validation: fix schema ─────────────────────────────────────
+
+def test_fix_missing_summary_blocked(fake_repo: Path) -> None:
+    """Regression F1: fix RESULT missing summary= → exit 2."""
+    sha = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=str(fake_repo), text=True
+    ).strip()
+    # omit summary=
+    result_line = (
+        f"RESULT: commit={sha} fixed=2 tests=pass"
+        f" categories_scanned=validation regressions_added=- notes=-"
+    )
+    payload = _spine_payload(f"Fix done.\n{result_line}", cwd=str(fake_repo))
+
+    proc = _run_hook(payload)
+    assert proc.returncode == 2, f"Expected exit 2 (fix missing summary=)\nstderr: {proc.stderr}"
+    assert "summary=" in proc.stderr
+
+
+def test_fix_missing_fixed_blocked(fake_repo: Path) -> None:
+    """Regression F1: fix RESULT missing fixed= → exit 2."""
+    sha = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=str(fake_repo), text=True
+    ).strip()
+    # omit fixed= — this could be misclassified as implement and still fail
+    result_line = (
+        f"RESULT: commit={sha} tests=pass summary=/tmp/s.md"
+        f" categories_scanned=validation regressions_added=- notes=-"
+    )
+    # We inject categories_scanned= to force fix schema detection via fixed=
+    # but without fixed= it falls to implement schema, which is also invalid (missing tasks=)
+    payload = _spine_payload(f"Fix done.\n{result_line}", cwd=str(fake_repo))
+
+    proc = _run_hook(payload)
+    assert proc.returncode == 2, f"Expected exit 2 (fix missing fixed=)\nstderr: {proc.stderr}"
+
+
+def test_fix_missing_categories_scanned_blocked(fake_repo: Path) -> None:
+    """Regression F1: fix RESULT missing categories_scanned= → exit 2."""
+    sha = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=str(fake_repo), text=True
+    ).strip()
+    # omit categories_scanned=
+    result_line = (
+        f"RESULT: commit={sha} fixed=2 tests=pass"
+        f" summary=/tmp/s.md regressions_added=- notes=-"
+    )
+    payload = _spine_payload(f"Fix done.\n{result_line}", cwd=str(fake_repo))
+
+    proc = _run_hook(payload)
+    assert proc.returncode == 2, f"Expected exit 2 (fix missing categories_scanned=)\nstderr: {proc.stderr}"
+    assert "categories_scanned=" in proc.stderr
+
+
+def test_fix_missing_regressions_added_blocked(fake_repo: Path) -> None:
+    """Regression F1: fix RESULT missing regressions_added= → exit 2."""
+    sha = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=str(fake_repo), text=True
+    ).strip()
+    # omit regressions_added=
+    result_line = (
+        f"RESULT: commit={sha} fixed=2 tests=pass"
+        f" summary=/tmp/s.md categories_scanned=validation notes=-"
+    )
+    payload = _spine_payload(f"Fix done.\n{result_line}", cwd=str(fake_repo))
+
+    proc = _run_hook(payload)
+    assert proc.returncode == 2, f"Expected exit 2 (fix missing regressions_added=)\nstderr: {proc.stderr}"
+    assert "regressions_added=" in proc.stderr
+
+
+def test_fix_valid_full_schema_passes(fake_repo: Path) -> None:
+    """Regression F1: fix RESULT with all required keys passes."""
+    sha = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=str(fake_repo), text=True
+    ).strip()
+    result_line = (
+        f"RESULT: commit={sha} fixed=3 tests=pass summary=/tmp/s.md"
+        f" categories_scanned=validation,concurrency regressions_added=test_a,test_b notes=-"
+    )
+    payload = _spine_payload(f"Fix done.\n{result_line}", cwd=str(fake_repo))
+
+    proc = _run_hook(payload)
+    assert proc.returncode == 0, f"Expected exit 0 (valid fix schema)\nstderr: {proc.stderr}"
+
+
+# ── Schema variant validation: failure schema ─────────────────────────────────
+
+def test_failure_schema_missing_summary_blocked(fake_repo: Path) -> None:
+    """Regression F1: failure RESULT missing summary= → exit 2.
+
+    Previously `commit=- tests=fail notes=oops` would exit 0 despite missing
+    tasks= and summary=. This test confirms the blocking is now enforced.
+    """
+    # The exact malformed case called out in the finding
+    result_line = "RESULT: commit=- tests=fail notes=oops"
+    payload = _spine_payload(f"Failed.\n{result_line}", cwd=str(fake_repo))
+
+    proc = _run_hook(payload)
+    assert proc.returncode == 2, (
+        f"Expected exit 2 (failure schema missing tasks= and summary=)\nstderr: {proc.stderr}"
+    )
+    assert "tasks=" in proc.stderr or "summary=" in proc.stderr
+
+
+def test_failure_schema_missing_tasks_blocked(fake_repo: Path) -> None:
+    """Regression F1: failure RESULT missing tasks= → exit 2."""
+    result_line = "RESULT: commit=- tests=fail summary=/tmp/s.md notes=build failed"
+    payload = _spine_payload(f"Failed.\n{result_line}", cwd=str(fake_repo))
+
+    proc = _run_hook(payload)
+    assert proc.returncode == 2, f"Expected exit 2 (failure missing tasks=)\nstderr: {proc.stderr}"
+    assert "tasks=" in proc.stderr
+
+
+def test_failure_schema_full_passes(fake_repo: Path) -> None:
+    """Regression F1: properly formed failure RESULT passes."""
+    result_line = "RESULT: commit=- tasks=2 tests=fail summary=/tmp/s.md notes=build error"
+    payload = _spine_payload(f"Failed.\n{result_line}", cwd=str(fake_repo))
+
+    proc = _run_hook(payload)
+    assert proc.returncode == 0, f"Expected exit 0 (valid failure schema)\nstderr: {proc.stderr}"
+
+
+def test_failure_schema_summary_dash_passes(fake_repo: Path) -> None:
+    """Regression F1: failure RESULT with summary=- is valid (summary may not exist)."""
+    result_line = "RESULT: commit=- tasks=0 tests=fail summary=- notes=crashed before commit"
+    payload = _spine_payload(f"Failed.\n{result_line}", cwd=str(fake_repo))
+
+    proc = _run_hook(payload)
+    assert proc.returncode == 0, f"Expected exit 0 (failure with summary=-)\nstderr: {proc.stderr}"
