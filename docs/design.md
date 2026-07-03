@@ -225,8 +225,8 @@ v2 工具不重复造这些基础设施，复用 v1 已存在的硬约束。
 |---|---|
 | `npc review run --seq N --round M` | focus render → codex exec（重试 1 次） → review parse → update-trend → phase exit（一次 IO） |
 | `npc archive run --seq N` | precheck → openspec validate → openspec archive → git commit → phase exit + state set-progress |
-| `npc implement record --seq N --result "..."` | 解析 RESULT 行 + summary/commit 校验 + phase exit + state set-progress |
-| `npc fix record --seq N --round M --result "..."` | 同上，针对 fix 阶段 |
+| `npc implement record --seq N --result "..."` | 解析 RESULT 行 + summary/commit 校验 + phase exit + state set-progress；**`.ok=false` 或 `.status=needs-user-decision` 时主循环必须立即转 3d 决策点，不继续 review** |
+| `npc fix record --seq N --round M --result "..."` | 同上，针对 fix 阶段；**`.ok=false` 或 `.status=needs-user-decision` 时主循环立即转 3d（trigger=fixer-failed），不发起下一轮 review** |
 
 **关键设计**：
 

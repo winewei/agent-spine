@@ -164,7 +164,15 @@ IMPL=$(npc implement run --seq $SEQ)
       fi
     else
       # 抽末尾 RESULT: 行，装订：
-      npc implement record --seq $SEQ --result "$RESULT_LINE"
+      REC=$(npc implement record --seq $SEQ --result "$RESULT_LINE")
+      # 必须检查 record 返回值——这是 coder 成败的唯一真相（不变量 2）：
+      if [ "$(echo "$REC" | jq -r '.ok')" != "true" ] \
+         || [ "$(echo "$REC" | jq -r '.status // empty')" = "needs-user-decision" ]; then
+        # record 失败或状态为 needs-user-decision → 立即进 3d，不继续 review
+        DEC=$(npc auto-decide --trigger implementer-failed --seq $SEQ --apply)
+        ACTION=$(echo "$DEC" | jq -r '.action')
+        # 按 ACTION 执行（同 3d）
+      fi
     fi
   fi
   ```
@@ -174,6 +182,8 @@ IMPL=$(npc implement run --seq $SEQ)
   ```bash
   # IMPL.ok=true 即代表 coder 已跑完并 record，直接进 review
   ```
+
+> **注意（deferred=true 时）**：`npc implement run` 返回的 `.ok=true` 仅代表 prompt 渲染成功，**不代表 coder 执行成功**。coder 成败的唯一真相是 `npc implement record` 的返回值（`.ok` 与 `.status`）。`IMPL.ok` 用于检查 run 命令自身是否失败，不得当作 coder 执行成功的依据。
 
 ### 3b. Review-Fix 循环（反复打磨，直到干净或卡死）
 
@@ -243,8 +253,17 @@ while [ "$(echo "$R" | jq -r '.blocking')" -gt 0 ] \
         # 未耗尽 → 在同一 FIX_PHASE 内重派，不推进 N
         continue
       fi
-      # spawn 成功：记录结果，退出内层循环
-      npc fix record --seq $SEQ --round $N --result "$RESULT_LINE"
+      # spawn 成功：记录结果，检查 record 返回值，退出内层循环
+      FREC=$(npc fix record --seq $SEQ --round $N --result "$RESULT_LINE")
+      # 必须检查 record 返回值——record 失败绝不继续进入下一轮 review（不变量 2）：
+      if [ "$(echo "$FREC" | jq -r '.ok')" != "true" ] \
+         || [ "$(echo "$FREC" | jq -r '.status // empty')" = "needs-user-decision" ]; then
+        # record 失败或状态为 needs-user-decision → 立即进 3d，不继续 review
+        DEC=$(npc auto-decide --trigger fixer-failed --seq $SEQ --apply)
+        ACTION=$(echo "$DEC" | jq -r '.action')
+        FIX_EXHAUSTED=true
+        break 2
+      fi
       FIX_DONE=true
       break
     done
@@ -378,6 +397,7 @@ SPINE_BRANCH=$(echo "$FINAL" | jq -r '.spine_branch // empty')
 ## Guardrails（硬约束）
 
 - **你不写业务代码**。所有实现/修复一律交给 coder：claude 后端默认经 in-session subagent（`deferred=true`）执行，mimo 后端经 headless 子进程执行。你只触发 `npc implement/fix run`，按 `deferred` 分发，收 RESULT 行，调 npc 装订。
+- **record 返回值是 coder 成败的唯一真相**：`npc implement record` / `npc fix record` 返回 `.ok=false` 或 `.status=needs-user-decision` 时，**绝不继续 review/archive**，必须立即进入 3d 决策点（trigger=`implementer-failed` 或 `fixer-failed`）。deferred=true 时 `npc implement/fix run` 的 `.ok` 仅代表 prompt 渲染成功，**不得**当作 coder 执行成功的依据。
 - **生成 ⊥ 验证（不变量 1）**：coder（生成）与 review（验证）永不同源。coder 跑 MiMo 时，`npc review run` 必须仍走 codex/Claude——绝不把 review 路由到 MiMo。
 - **MiMo 只许执行（不变量 4）**：MiMo 仅用于 coder 层。你（主 session 决策）和 `/spine-analyze`（分析）、`npc review run`（验证）一律 premium 层（Claude/codex），绝不路由到 MiMo。
 - **你不读 prompt 模板 / review.json / summary.md 原文**。只读 npc 子命令返回的一行 JSON 的关键字段。需要细节时引用 npc 给的 `pointer` 路径，不要把原文拉进 context。
