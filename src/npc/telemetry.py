@@ -425,8 +425,13 @@ _CAGE_DEFS: list[dict] = [
     {"name": "archive-failed",        "kind": "auto_decide.decision", "trigger": "archive-failed",           "has_data": True},
     # verify-tests-rerun：映射到 phase.exit + outcome_reason=="rerun-tests-failed"（已接线）
     # pipeline._do_phase_exit 在 implement / fix-rN 阶段 tests rerun 失败时会 emit 此事件
+    # retained=True 理由：守"coder 声称 tests pass、rerun 打脸"的真实故障类；成本≈0（仅在真失败时 fire）；
+    # 90d/11run 零触发恰说明上游健康，不是冗余证据。删它是拿近乎免费的保险换整洁度，不划算。
+    # 本标注为人在回路裁决产物（reduce-review-fix-cost D5），非自动判定。
     {"name": "verify-tests-rerun",    "kind": "phase.exit", "trigger": None,
-     "filter_field": "outcome_reason", "filter_value": "rerun-tests-failed",          "has_data": True},
+     "filter_field": "outcome_reason", "filter_value": "rerun-tests-failed",          "has_data": True,
+     "retained": True,
+     "retained_reason": "守 coder 谎报 tests pass 的真实故障类；成本≈0，仅真失败时 fire"},
     # 以下笼子的 telemetry event 尚未接线（no_data）
     {"name": "routing-violation",     "kind": "cage.routing_violation", "trigger": None,                    "has_data": False},
     # timeout-budget / record-timeout 笼子（事件尚未接线，归 no_data）
@@ -711,8 +716,14 @@ def cli_cages(args: argparse.Namespace) -> None:
     stats = cage_stats(all_evts, since_dt=since_dt)
 
     min_runs = args.min_runs if hasattr(args, "min_runs") and args.min_runs is not None else CAGE_MIN_RUNS_THRESHOLD
+
+    # 计算 retained 笼子集合（人在回路裁决保留，不参与删除候选计算）
+    retained_names: set[str] = {
+        cage["name"] for cage in _CAGE_DEFS if cage.get("retained")
+    }
+
     deletion_candidates = (
-        stats["untriggered"]
+        [name for name in stats["untriggered"] if name not in retained_names]
         if stats["runs_observed"] >= min_runs
         else []
     )
@@ -727,6 +738,7 @@ def cli_cages(args: argparse.Namespace) -> None:
             "untriggered": stats["untriggered"],
             "no_data": stats["no_data"],
             "deletion_candidates": deletion_candidates,
+            "retained": sorted(retained_names),
         }
     )
 

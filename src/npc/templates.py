@@ -19,7 +19,43 @@ v1.0.0 把模板下沉到 CLI 包资源：
 from __future__ import annotations
 
 
-TEMPLATE_VERSION = "1.0.0"
+TEMPLATE_VERSION = "1.1.0"
+
+# ============================================================
+# 静态通用自检类目清单（单一事实源）
+# implement/fix prompt 均引用此常量，类目层级与 review focus 同名但不含 per-change 文本。
+# 硬边界：此清单 MUST NOT 包含当次 change 的 review focus 渲染文本、上轮 findings 原文、
+# 或 reviewer 的评分 rubric 细则——守核心不变量 1「生成 ⊥ 验证」。
+# ============================================================
+
+SELFCHECK_CATEGORIES: tuple[str, ...] = (
+    "validation",
+    "partial-failure",
+    "locking",
+    "test-coverage",
+    "edge-case",
+    "telemetry",
+    "concurrency",
+)
+
+# Markdown 段落形式，直接嵌入 implement/fix prompt
+SELFCHECK_RUBRIC_MD: str = """## 提交前自检（静态通用类目，与当次 review 判据无关）
+
+在 commit 之前，逐条自查以下类目，确认未遗漏：
+
+| 类目 | 自查要点 |
+|------|---------|
+| validation | 所有外部入参 / 边界值是否已校验；非法输入是否快速失败并给出明确错误 |
+| partial-failure | 批量操作 / 多步事务是否处理了部分成功场景；失败时是否留痕、可重试 |
+| locking | 临界区是否加锁；锁是否会在异常路径下正确释放（死锁 / 泄漏） |
+| test-coverage | 新增代码路径是否有对应测试；关键分支（error path / empty / boundary）是否覆盖 |
+| edge-case | 空集合、零值、极大值、并发首次初始化等边界条件是否处理 |
+| telemetry | 关键事件 / 错误路径是否有 emit；metrics 标签是否正确 |
+| concurrency | 共享状态是否线程安全；是否存在竞态或无限重试风险 |
+
+> 注意：本清单为**通用**提醒，与 reviewer 对本 change 的具体判据**无关**。
+> coder 侧仅见类目层级；reviewer 侧使用当次 change 的具体评审标准——二者不共享。
+"""
 
 
 def render_implementer(
@@ -54,6 +90,7 @@ def render_implementer(
 - 通过项目验收测试（参考 CLAUDE.md / project.md 的测试命令）
 - 提交：`git commit -m "<type>(<scope>): <简要描述>"`，正文说明 change-id；**不要 archive**
 
+{SELFCHECK_RUBRIC_MD}
 ## 双产物契约（缺一视为失败）
 
 (1) 用 Write 工具创建摘要到 `{summary_path}`（≤ 80 行）：
@@ -164,6 +201,7 @@ def render_fixer(
 - 只修 blocking + in_scope=true；不做额外重构
 - 提交 `git commit -m "fix({change_id}): review round {round_n} — <摘要>"`，每轮 fix 独立 commit
 
+{SELFCHECK_RUBRIC_MD}
 ## 双产物契约
 
 (1) 用 Write 工具创建修复摘要到 `{summary_path}`（≤ 120 行）：

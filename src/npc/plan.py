@@ -940,6 +940,211 @@ def cli_propagate_dep_failed(args: argparse.Namespace) -> None:
 
 
 # ============================================================
+# 子命令 5：npc plan complexity（前置软性复杂度门）
+# ============================================================
+
+
+def _count_top_level_modules(paths: set[str]) -> int:
+    """从路径集合计算跨领域广度（顶层模块/目录数）。
+
+    仅计算含 ``/`` 的路径的首段目录（如 ``src/npc/agent.py`` → ``src``）。
+    同一首段只计一次。单文件路径（无 ``/``）不计入广度（归入当前目录）。
+    """
+    top_dirs: set[str] = set()
+    for p in paths:
+        # 去除 glob 通配符中的 * 部分，仅取实际目录前缀
+        clean = p.split("*")[0] if "*" in p else p
+        parts = clean.split("/")
+        if len(parts) > 1 and parts[0]:
+            top_dirs.add(parts[0])
+    return len(top_dirs)
+
+
+def _count_concrete_files(paths: set[str]) -> int:
+    """计算路径集合中非 glob 路径（具体文件）的数量。"""
+    return sum(1 for p in paths if "*" not in p)
+
+
+def compute_complexity(
+    change_id: str,
+    change_dir: Path,
+) -> dict:
+    """计算单个 change 的复杂度信号。
+
+    返回::
+
+        {
+          "change_id": str,
+          "breadth": int,          # 跨领域广度（顶层模块数）
+          "files": int,            # 具体文件数（非 glob）
+          "paths": list[str],      # 提取到的路径列表
+        }
+    """
+    paths = _extract_paths_for_change(change_dir)
+    breadth = _count_top_level_modules(paths)
+    files = _count_concrete_files(paths)
+    return {
+        "change_id": change_id,
+        "breadth": breadth,
+        "files": files,
+        "paths": sorted(paths),
+    }
+
+
+def run_complexity_check(args: argparse.Namespace) -> None:
+    """``npc plan complexity``：前置软性复杂度门。
+
+    对 ``--change`` 指定的 change（或 ``--plan-order`` 的全部 change）
+    计算跨领域广度，超阈值时输出结构化 warning；**不阻断 run、不自动拆分**。
+
+    当建议为 ``large`` 时，将 ``large=true`` 标记写入 change 对应的 plan-state progress 条目
+    （需要 active STATE_JSON）。state 更新失败为 warning 级别，不影响返回码。
+
+    退出码：
+    - 0：检查完成（无论是否触发告警，均为 0，软门不阻断）
+    - 2：缺必需参数
+    - 3：repo 定位失败
+    """
+    # 1. 获取 change 列表
+    change_raw = getattr(args, "change", None)
+    plan_order_raw = getattr(args, "plan_order", None)
+
+    if change_raw:
+        changes = [change_raw]
+    elif plan_order_raw:
+        try:
+            changes = json.loads(plan_order_raw)
+            if not isinstance(changes, list) or not all(isinstance(x, str) for x in changes):
+                raise ValueError("plan_order 必须是字符串数组")
+        except (json.JSONDecodeError, ValueError) as e:
+            _io.emit_error("invalid_plan_order", f"--plan-order 解析失败：{e}", exit_code=2)
+            return
+    else:
+        _io.emit_error("invalid_args", "必须提供 --change 或 --plan-order", exit_code=2)
+        return
+
+    # 2. 定位 repo_root
+    try:
+        repo_root = _resolve_repo_root(args)
+    except _paths.PathsError as e:
+        _io.emit_error("env_missing", f"未能定位 repo_root：{e}", exit_code=3)
+        return
+
+    changes_root = repo_root / "openspec" / "changes"
+
+    # 3. 加载配置
+    config_path = getattr(args, "config", None)
+    try:
+        cfg = _config.load_config(
+            repo_root,
+            override_path=Path(config_path) if config_path else None,
+        )
+    except _config.ConfigError as e:
+        _io.emit_error("config_error", str(e), exit_code=1)
+        return
+
+    breadth_threshold = cfg.review.complexity_breadth_threshold
+    files_threshold = cfg.review.complexity_files_threshold
+    max_rounds_large = cfg.review.max_rounds_large
+
+    # 4. 尝试加载 state（用于写 large 标记；失败不致命）
+    state_obj = None
+    state_json_path = None
+    state_md_path = None
+    try:
+        p = _paths.load_paths(args)
+        state_json_path = p.state_json
+        state_md_path = p.state_md
+        from .state import read_state
+        state_obj = read_state(p.state_json)
+    except Exception:
+        pass  # state 不可用时跳过 large 标记
+
+    # 5. 计算每个 change 的复杂度
+    warnings: list[dict] = []
+    results: list[dict] = []
+
+    for cid in changes:
+        change_dir = changes_root / cid
+        if not change_dir.is_dir():
+            # 尝试 archive 子目录
+            for arc_candidate in (changes_root / "archive").glob(f"*-{cid}"):
+                if arc_candidate.is_dir():
+                    change_dir = arc_candidate
+                    break
+
+        if not change_dir.is_dir():
+            results.append({"change_id": cid, "skipped": True, "reason": "change_dir_not_found"})
+            continue
+
+        complexity = compute_complexity(cid, change_dir)
+        breadth = complexity["breadth"]
+        files = complexity["files"]
+
+        triggered = breadth >= breadth_threshold or files >= files_threshold
+        suggestion: str | None = None
+
+        if triggered:
+            # 广度超阈值 → 建议 split；仅文件数超阈值（广度未超）→ 建议 large
+            if breadth >= breadth_threshold:
+                suggestion = "split"
+            else:
+                suggestion = "large"
+
+            warn_entry = {
+                "change_id": cid,
+                "breadth": breadth,
+                "files": files,
+                "suggestion": suggestion,
+                "breadth_threshold": breadth_threshold,
+                "files_threshold": files_threshold,
+            }
+            warnings.append(warn_entry)
+
+            # 若建议 large，写 plan-state large 标记
+            if suggestion == "large" and state_obj is not None and state_json_path and state_md_path:
+                try:
+                    from .state import update_state
+
+                    def _mark_large(state: dict) -> None:
+                        progress = state.get("progress") or []
+                        plan_order = state.get("plan_order") or []
+                        for idx, pid in enumerate(plan_order):
+                            if pid == cid and idx < len(progress):
+                                progress[idx]["large"] = True
+                                progress[idx]["max_rounds_large"] = max_rounds_large
+                                break
+
+                    update_state(state_json_path, state_md_path, _mark_large)
+                except Exception:
+                    pass  # state 写失败是 warning 级别，不影响主流程
+
+        result_entry = {
+            "change_id": cid,
+            "breadth": breadth,
+            "files": files,
+            "triggered": triggered,
+            "suggestion": suggestion,
+        }
+        results.append(result_entry)
+
+    _io.emit({
+        "ok": True,
+        "breadth_threshold": breadth_threshold,
+        "files_threshold": files_threshold,
+        "max_rounds_large": max_rounds_large,
+        "results": results,
+        "warnings": warnings,
+        "warning_count": len(warnings),
+    })
+
+
+def cli_complexity(args: argparse.Namespace) -> None:
+    """``npc plan complexity`` handler。"""
+    run_complexity_check(args)
+
+
+# ============================================================
 # CLI handler 入口
 # ============================================================
 

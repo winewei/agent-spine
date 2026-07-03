@@ -57,11 +57,30 @@ class ReviewEngineConfig:
     claude_bin: str | None = None
     claude_model: str | None = None
     claude_extra_args: tuple[str, ...] = ()
+    # 复杂度门阈值（plan 前置软门，不阻断 run）
+    # complexity_breadth_threshold：跨领域广度阈值（顶层模块数），默认 3
+    complexity_breadth_threshold: int = 3
+    # complexity_files_threshold：辅助文件数阈值，默认 10
+    complexity_files_threshold: int = 10
+    # max_rounds_large：large change 的 review-fix 循环上限（普通 change 由调用方自行设默认值）
+    max_rounds_large: int = 30
 
     def __post_init__(self) -> None:
         if self.engine not in SUPPORTED_ENGINES:
             raise ConfigError(
                 f"未知 review engine：{self.engine!r}（仅支持 {'/'.join(SUPPORTED_ENGINES)}）"
+            )
+        if not isinstance(self.complexity_breadth_threshold, int) or self.complexity_breadth_threshold < 1:
+            raise ConfigError(
+                f"[review].complexity_breadth_threshold 必须是整数 ≥1，得到：{self.complexity_breadth_threshold!r}"
+            )
+        if not isinstance(self.complexity_files_threshold, int) or self.complexity_files_threshold < 1:
+            raise ConfigError(
+                f"[review].complexity_files_threshold 必须是整数 ≥1，得到：{self.complexity_files_threshold!r}"
+            )
+        if not isinstance(self.max_rounds_large, int) or self.max_rounds_large < 1:
+            raise ConfigError(
+                f"[review].max_rounds_large 必须是整数 ≥1，得到：{self.max_rounds_large!r}"
             )
 
 
@@ -310,6 +329,17 @@ def _build(data: dict, source: str) -> Config:
     if not isinstance(sched_me_raw, int):
         raise ConfigError(f"[scheduler].max_evictions 必须是整数（{source}）")
 
+    # 复杂度门阈值与 large 预算
+    complexity_breadth_raw = review_raw.get("complexity_breadth_threshold", 3)
+    complexity_files_raw = review_raw.get("complexity_files_threshold", 10)
+    max_rounds_large_raw = review_raw.get("max_rounds_large", 30)
+    if not isinstance(complexity_breadth_raw, int):
+        raise ConfigError(f"[review].complexity_breadth_threshold 必须是整数（{source}）")
+    if not isinstance(complexity_files_raw, int):
+        raise ConfigError(f"[review].complexity_files_threshold 必须是整数（{source}）")
+    if not isinstance(max_rounds_large_raw, int):
+        raise ConfigError(f"[review].max_rounds_large 必须是整数（{source}）")
+
     return Config(
         review=ReviewEngineConfig(
             engine=engine,
@@ -317,6 +347,9 @@ def _build(data: dict, source: str) -> Config:
             claude_bin=_opt_str(claude_raw.get("bin"), "review.claude.bin", source),
             claude_model=_opt_str(claude_raw.get("model"), "review.claude.model", source),
             claude_extra_args=tuple(extra_args_raw),
+            complexity_breadth_threshold=complexity_breadth_raw,
+            complexity_files_threshold=complexity_files_raw,
+            max_rounds_large=max_rounds_large_raw,
         ),
         coder=CoderConfig(
             backend=backend,

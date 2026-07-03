@@ -454,6 +454,22 @@ def _build_parser() -> argparse.ArgumentParser:
         _cmd_path="plan propagate-dep-failed",
     )
 
+    p_plan_cplx = sub_plan.add_parser(
+        "complexity",
+        help="前置软性复杂度门：计算跨领域广度，超阈值输出 warning（不阻断 run）",
+    )
+    _g_cplx = p_plan_cplx.add_mutually_exclusive_group(required=True)
+    _g_cplx.add_argument("--change", default=None, help="单个 change-id")
+    _g_cplx.add_argument(
+        "--plan-order", default=None, dest="plan_order",
+        help='JSON 数组字符串，如 \'["a","b","c"]\'',
+    )
+    p_plan_cplx.add_argument("--config", default=None, help="显式 TOML 配置路径")
+    p_plan_cplx.set_defaults(
+        handler=_make_handler("plan", "cli_complexity"),
+        _cmd_path="plan complexity",
+    )
+
     # ===== git =====
     p_git = sub.add_parser("git", help="SDD git 卫生（分支/脏树/commit）")
     sub_git = p_git.add_subparsers(dest="git_cmd", required=True)
