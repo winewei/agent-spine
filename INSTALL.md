@@ -2,7 +2,7 @@
 
 本指南给 **执行安装的 agent（如 Claude Code）** 用。下面是一句话安装 + 每步验证 + 失败处置，便于 agent 自检与排错。
 
-> spine agent = 安装后的 `npc` 命令（确定性执行层，代码在 `src/npc`）+ harness plugin（`/spine-run`、`/spine-analyze`、`spine-coder`）。
+> spine agent = 安装后的 `npc` 命令（确定性执行层，代码在 `src/npc`）+ harness plugin（`/spine-run`、`/spine-analyze`、`spine-coder`、`/new-plan-changes-v2`、`new-plan-changes-v3`（skill，自动触发））。
 
 ## 一句话安装
 
@@ -12,7 +12,7 @@
 uv tool install --force --from . npc && claude plugin marketplace add "$(pwd)" && claude plugin install agent-spine@agent-spine --scope user
 ```
 
-装完 **重启 Claude Code** 加载 `/spine-run`、`/spine-analyze`、`spine-coder`，再 `npc doctor` 体检。
+装完 **重启 Claude Code** 加载 `/spine-run`、`/spine-analyze`、`spine-coder`、`/new-plan-changes-v2`、`new-plan-changes-v3`（skill，自动触发），再 `npc doctor` 体检。
 无 `claude` CLI 时只跑前半句装 npc，plugin 改在 Claude Code 内 `/plugin` 手动装。若要逐步执行 / 排错，按下面来。
 
 ---
@@ -45,7 +45,7 @@ claude plugin marketplace add "$(pwd)"
 claude plugin install agent-spine@agent-spine --scope user
 claude plugin list | grep agent-spine
 ```
-- **装完必须重启 Claude Code** 才加载 `/spine-run`、`/spine-analyze`、`spine-coder`。
+- **装完必须重启 Claude Code** 才加载 `/spine-run`、`/spine-analyze`、`spine-coder`、`/new-plan-changes-v2`、`new-plan-changes-v3`（skill，自动触发）。
 - 已装过 → `claude plugin update agent-spine@agent-spine`。
 
 ### 4. 环境体检
@@ -61,6 +61,7 @@ npc doctor
 重启 Claude Code 后，在一个 **git + openspec** 工程内：
 ```text
 /spine-run <一句话目标 或 已有 change 名>   [--auto]
+/new-plan-changes-v2                        # 批量推进所有活跃 openspec changes（串行）
 ```
 
 ## 成本路由（可选，默认 claude）

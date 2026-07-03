@@ -27,9 +27,9 @@ npc --version          # 应输出 npc 1.4.0
 /plugin install agent-spine@agent-spine
 ```
 
-装完得到三个能力：`/spine-run`、`/spine-analyze`、`spine-coder`（subagent）。
+装完得到五个能力：`/spine-run`、`/spine-analyze`、`/new-plan-changes-v2`（串行推进全部 active changes）、`new-plan-changes-v3`（skill，波次并行版）、`spine-coder`（subagent）。
 
-> CLI 与 plugin 版本应保持一致；升级 CLI（`uv tool upgrade npc`）后建议同步 `/plugin update agent-spine@agent-spine`。
+> CLI 与 plugin 版本应保持一致；升级 CLI（在仓库根重跑 `uv tool install --force --from . npc`）后建议同步 `/plugin update agent-spine@agent-spine`。
 
 ---
 
