@@ -281,6 +281,14 @@ def scan_spine_worktrees(
             in_progress_wts.append(entry)
             continue
 
+        # orphan 骨架检测：骨架已被 init 标记为 status=orphan（worktree 缺失/残破）。
+        # orphan 状态意味着 init 已确认该 worktree 无法复用，直接列为孤儿回收。
+        # 不需要 active-run 检查——orphan 标记本身就是"worktree 已确认可回收"的语义。
+        orphan_skeleton_file = _resume.find_latest_orphan_skeleton(wt_task_log_dir)
+        if orphan_skeleton_file is not None:
+            orphans.append(entry)
+            continue
+
         # initializing 孤儿检测：有 initializing 骨架但 worktree 不属于 active run
         # → 列为孤儿（可安全回收）。
         # 与普通孤儿区别：不要求 task_log run 足够旧——initializing 本身表示

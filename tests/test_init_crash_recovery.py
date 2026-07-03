@@ -784,3 +784,181 @@ class TestFindLatestInitializing:
         f2.write_text(json.dumps({"status": "initializing", "run_ts": "2026-07-01-1001-b"}))
         result = _resume.find_latest_initializing(tld)
         assert result == f2  # 最新的
+
+
+# ============================================================
+# Fix Round 2: orphan-status skeleton → clean end-to-end
+# ============================================================
+
+
+class TestCleanOrphanSkeletonEndToEnd:
+    """真实回归（partial-failure 类）：init 将 worktree 缺失骨架标记为 orphan 后，
+    clean 能发现并回收该 spine worktree 元数据和分支。
+
+    覆盖 F1 根因：Round 1 fix 写 status=orphan，但 clean 只检测 status=initializing，
+    导致 orphan 标记后的骨架从清理路径中消失。
+    """
+
+    def test_orphan_skeleton_listed_by_clean_dry_run(self, tmp_path):
+        """clean dry-run 能发现 status=orphan 的骨架并列出对应 worktree 为孤儿。"""
+        home = tmp_path / "home"
+        home.mkdir()
+        canonical = _setup_canonical(tmp_path)
+
+        run_ts = "2026-07-02-1000-orphskel"
+        spine_branch = f"spine/{run_ts}"
+        wt_path = tmp_path / "wt_orphan"
+        _make_spine_worktree(canonical, wt_path, run_ts)
+
+        # 模拟 init Round-1 fix: 骨架已被标记为 orphan（worktree 曾经被 init 确认缺失）
+        wt_proj_key = _paths.proj_key_for(wt_path)
+        wt_task_log = home / "task_log" / wt_proj_key
+        wt_task_log.mkdir(parents=True, exist_ok=True)
+        skeleton_path = wt_task_log / f"{run_ts}-plan-state.json"
+        skeleton_path.write_text(json.dumps({
+            "schema_version": 2,
+            "run_ts": run_ts,
+            "status": "orphan",  # ← Round-1 fix 写的 status
+            "worktree_root": str(wt_path),
+            "spine_branch": spine_branch,
+        }), encoding="utf-8")
+
+        # 无 active run（find_latest_in_progress 返回 None）
+        orphans, in_progress = _clean.scan_spine_worktrees(canonical, home)
+
+        orphan_paths = {o["path"] for o in orphans}
+        assert str(wt_path) in orphan_paths, (
+            "status=orphan 的骨架对应 worktree 应被 clean 列为孤儿"
+        )
+        ip_paths = {w["path"] for w in in_progress}
+        assert str(wt_path) not in ip_paths
+
+    def test_orphan_skeleton_removed_by_clean_yes(self, tmp_path, capsys, monkeypatch):
+        """clean --yes 能回收 status=orphan 骨架对应的 git worktree 元数据和 spine 分支。"""
+        home = tmp_path / "home"
+        home.mkdir()
+        canonical = _setup_canonical(tmp_path)
+
+        run_ts = "2026-07-02-1100-orphyes"
+        spine_branch = f"spine/{run_ts}"
+        wt_path = tmp_path / "wt_orphan_yes"
+        _make_spine_worktree(canonical, wt_path, run_ts)
+
+        wt_proj_key = _paths.proj_key_for(wt_path)
+        wt_task_log = home / "task_log" / wt_proj_key
+        wt_task_log.mkdir(parents=True, exist_ok=True)
+        skeleton_path = wt_task_log / f"{run_ts}-plan-state.json"
+        skeleton_path.write_text(json.dumps({
+            "schema_version": 2,
+            "run_ts": run_ts,
+            "status": "orphan",
+            "worktree_root": str(wt_path),
+            "spine_branch": spine_branch,
+        }), encoding="utf-8")
+
+        tld = home / "task_log" / _paths.proj_key_for(canonical)
+        tld.mkdir(parents=True, exist_ok=True)
+
+        monkeypatch.setattr(_clean._paths, "detect_repo_root", lambda start=None: canonical)
+        monkeypatch.setattr(_clean.Path, "home", staticmethod(lambda: home))
+
+        _clean.run(argparse.Namespace(
+            task_log_dir=str(tld), yes=True, keep_days=14,
+        ))
+        payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+
+        assert payload["ok"] is True
+        assert payload["dry_run"] is False
+
+        # spine 分支应已删除
+        check = subprocess.run(
+            ["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{spine_branch}"],
+            cwd=canonical, capture_output=True, text=True,
+        )
+        assert check.returncode != 0, f"branch {spine_branch} 应已被 clean --yes 删除"
+
+        # worktree_actions 有记录
+        actions = payload.get("worktree_actions", [])
+        assert any("worktree_remove" in a or "branch_delete" in a for a in actions), (
+            "clean --yes 应记录 worktree_remove 或 branch_delete 动作"
+        )
+
+    def test_init_marks_orphan_then_clean_discovers_it(self, crash_env):
+        """全链路回归：init 将缺失 worktree 的骨架标记为 orphan → clean 能发现它。
+
+        这是 F1 finding 要求的真实端到端路径测试：
+        1. 旧 initializing 骨架对应 worktree 缺失 → 调用标记 helper 写 orphan
+        2. clean scan_spine_worktrees 能发现该 orphan 骨架的 worktree（元数据仍在时）
+
+        注意：此测试直接调用 _mark_initializing_skeleton_orphan helper（Round-1 fix 的核心），
+        而非通过 _init.run()（后者会触发 session.detect_session 导致路径过长 OSError）。
+        这样做同样覆盖被修复的代码路径：helper 写 orphan → clean 读 orphan → 列为孤儿。
+        """
+        canonical, home = crash_env
+
+        old_run_ts = "2026-07-01-0900-precrash"
+        old_spine_branch = f"spine/{old_run_ts}"
+        old_wt_path = canonical.parent / "wt_precrash"
+
+        # 建 git worktree（模拟 worktree add 完成，但目录随后被删除）
+        _make_spine_worktree(canonical, old_wt_path, old_run_ts)
+
+        # 写 initializing 骨架（worktree add 完成但 init-run 从未开始）
+        old_wt_proj_key = _paths.proj_key_for(old_wt_path)
+        old_task_log = home / "task_log" / old_wt_proj_key
+        old_task_log.mkdir(parents=True, exist_ok=True)
+        old_skeleton_path = old_task_log / f"{old_run_ts}-plan-state.json"
+        old_skeleton_path.write_text(json.dumps({
+            "schema_version": 2,
+            "run_ts": old_run_ts,
+            "status": "initializing",
+            "worktree_root": str(old_wt_path),
+            "spine_branch": old_spine_branch,
+            "base_branch": "main",
+            "plan_order": [],
+            "progress": [],
+        }), encoding="utf-8")
+
+        # 模拟目录被删除（git worktree 元数据仍在）
+        import shutil
+        shutil.rmtree(old_wt_path, ignore_errors=True)
+
+        # Step 1: init 的 _mark_initializing_skeleton_orphan helper 将骨架标记为 orphan
+        # （这是 Round-1 fix 调用的实际代码路径）
+        _init._mark_initializing_skeleton_orphan(old_skeleton_path)
+
+        orphan_data = json.loads(old_skeleton_path.read_text(encoding="utf-8"))
+        assert orphan_data["status"] == "orphan", (
+            "_mark_initializing_skeleton_orphan 应将骨架 status 改为 orphan"
+        )
+
+        # Step 2: clean scan_spine_worktrees 使用 mock runner 模拟 git 仍能列出该 worktree
+        # （git worktree 元数据仍在，只是目录不存在）
+        def mock_runner(cmd, cwd=None, capture_output=False, text=False, env=None, **kwargs):
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = ""
+            result.stderr = ""
+
+            if "worktree" in cmd and "list" in cmd:
+                # old worktree 在 git list 中（元数据仍在）但目录不存在
+                result.stdout = (
+                    f"worktree {old_wt_path}\n"
+                    "HEAD abc123\n"
+                    f"branch refs/heads/{old_spine_branch}\n"
+                    "\n"
+                )
+            elif "worktree" in cmd and "remove" in cmd:
+                pass  # 幂等
+            elif "branch" in cmd and "-d" in cmd:
+                pass  # 幂等
+            return result
+
+        orphans, in_progress = _clean.scan_spine_worktrees(
+            canonical, home, runner=mock_runner
+        )
+
+        orphan_paths = {o["path"] for o in orphans}
+        assert str(old_wt_path) in orphan_paths, (
+            "init 标记为 orphan 后，clean scan_spine_worktrees 应能发现该 worktree"
+        )
