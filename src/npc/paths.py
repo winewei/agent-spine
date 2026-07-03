@@ -67,6 +67,9 @@ class Paths:
     canonical_proj_key: str | None = None
     base_branch: str | None = None
     spine_branch: str | None = None
+    # 运行模式（"auto" | "interactive"），由 npc init 落盘到 run.json，
+    # record 阶段用于 _should_rerun_tests 缺省值判断。
+    mode: str = "interactive"
 
     def to_env(self) -> dict[str, str]:
         """投影为环境变量字典（仅供 ``--shell-exports`` 兼容路径使用）。"""
@@ -110,6 +113,8 @@ class Paths:
             d["base_branch"] = self.base_branch
         if self.spine_branch is not None:
             d["spine_branch"] = self.spine_branch
+        # mode 永远写入（缺失时 read_run_json 降级为 "interactive"）
+        d["mode"] = self.mode
         return d
 
 
@@ -304,6 +309,10 @@ def read_run_json(run_json_path: Path) -> Paths:
     canonical_proj_key_raw = data.get("canonical_proj_key")
     base_branch_raw = data.get("base_branch")
     spine_branch_raw = data.get("spine_branch")
+    # mode：旧 run.json 无此字段时降级为 "interactive"（向后兼容）
+    mode_raw = data.get("mode", "interactive")
+    if mode_raw not in ("auto", "interactive"):
+        mode_raw = "interactive"
     return Paths(
         repo_root=Path(data["repo_root"]),
         proj_key=data["proj_key"],
@@ -319,6 +328,7 @@ def read_run_json(run_json_path: Path) -> Paths:
         canonical_proj_key=canonical_proj_key_raw if canonical_proj_key_raw else None,
         base_branch=base_branch_raw if base_branch_raw else None,
         spine_branch=spine_branch_raw if spine_branch_raw else None,
+        mode=mode_raw,
     )
 
 

@@ -13,6 +13,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from npc import pipeline as _pipeline
+from npc import paths as _paths
 from npc import state as _state
 from npc import verify as _verify
 from npc import config as _config
@@ -1217,3 +1218,116 @@ def test_record_fix_rerun_fail_overrides_self_report(
 
     s = json.loads(p.state_json.read_text())
     assert s["progress"][0]["status"] == "needs-user-decision"
+
+
+# ============================================================
+# F1 回归：p.mode="auto" 时（NPC_MODE 未设置）应触发复跑
+# ============================================================
+
+
+def test_should_rerun_tests_mode_auto_in_paths_no_env(monkeypatch):
+    """_should_rerun_tests：p.mode=auto 且 NPC_MODE 未设置 → 触发复跑。
+
+    回归：auto 档默认编排路径不导出 NPC_MODE 环境变量（--shell-exports deprecated），
+    须从 p.mode（run.json 持久化）读取 mode 决定缺省值。
+    """
+    # 确保 NPC_MODE 不在环境中
+    monkeypatch.delenv("NPC_MODE", raising=False)
+
+    cfg = _config.Config(verify=_config.VerifyConfig(rerun_tests=None))  # 缺省
+
+    # 构造 mode=auto 的 Paths（仅 mode 字段有意义，其余字段置 dummy）
+    import dataclasses
+    dummy_path = Path("/tmp/dummy")
+    p_auto = _paths.Paths(
+        repo_root=dummy_path,
+        proj_key="dummy",
+        task_log_dir=dummy_path,
+        run_ts="2026-01-01-0000-00000",
+        run_dir=dummy_path,
+        state_json=dummy_path / "state.json",
+        state_md=dummy_path / "state.md",
+        index_file=dummy_path / "index.jsonl",
+        schema_path=dummy_path / "schema.json",
+        run_events=dummy_path / "events.jsonl",
+        mode="auto",
+    )
+    p_interactive = dataclasses.replace(p_auto, mode="interactive")
+
+    # auto 档：NPC_MODE 未设置，p.mode=auto → 应复跑
+    assert _pipeline._should_rerun_tests(cfg, p_auto) is True
+
+    # interactive 档：NPC_MODE 未设置，p.mode=interactive → 不复跑
+    assert _pipeline._should_rerun_tests(cfg, p_interactive) is False
+
+    # p=None 时（旧调用路径）→ 不复跑
+    assert _pipeline._should_rerun_tests(cfg, None) is False
+
+
+def test_should_rerun_tests_env_overrides_paths_mode(monkeypatch):
+    """NPC_MODE 环境变量优先于 p.mode（兼容旧 --shell-exports 路径）。"""
+    # NPC_MODE=auto 但 p.mode=interactive → 应复跑（env 优先）
+    monkeypatch.setenv("NPC_MODE", "auto")
+    cfg = _config.Config(verify=_config.VerifyConfig(rerun_tests=None))
+
+    import dataclasses
+    dummy_path = Path("/tmp/dummy")
+    p_interactive = _paths.Paths(
+        repo_root=dummy_path,
+        proj_key="dummy",
+        task_log_dir=dummy_path,
+        run_ts="2026-01-01-0000-00000",
+        run_dir=dummy_path,
+        state_json=dummy_path / "state.json",
+        state_md=dummy_path / "state.md",
+        index_file=dummy_path / "index.jsonl",
+        schema_path=dummy_path / "schema.json",
+        run_events=dummy_path / "events.jsonl",
+        mode="interactive",
+    )
+    assert _pipeline._should_rerun_tests(cfg, p_interactive) is True
+
+    # NPC_MODE=interactive 但 p.mode=auto → 不复跑（env 优先）
+    monkeypatch.setenv("NPC_MODE", "interactive")
+    p_auto = dataclasses.replace(p_interactive, mode="auto")
+    assert _pipeline._should_rerun_tests(cfg, p_auto) is False
+
+
+def test_record_implement_auto_mode_rerun_via_paths(
+    env_setup, make_args, capsys, fake_repo: Path, monkeypatch
+):
+    """F1 回归：record_implement 在 NPC_MODE 未设置、p.mode=auto 时触发真实复跑。
+
+    模拟 npc init --auto 的默认编排路径（不设 NPC_MODE）。
+    """
+    monkeypatch.delenv("NPC_MODE", raising=False)
+
+    _bootstrap_run(env_setup, make_args, capsys, "add-foo")
+    p = env_setup
+    # 注入 p.mode=auto（模拟 run.json 里写了 mode=auto）
+    import dataclasses
+    p_auto = dataclasses.replace(p, mode="auto")
+    p_with_repo = dataclasses.replace(p_auto, repo_root=fake_repo)
+    commit, summary = _make_commit_and_summary(fake_repo, p)
+
+    rerun_called = {"n": 0}
+
+    def fake_rerun(repo_root, cfg, runner=None):
+        rerun_called["n"] += 1
+        return {"no_command": False, "passed": True, "cmd": "pytest", "tail": "1 passed"}
+
+    monkeypatch.setattr(_verify, "run_tests_result", fake_rerun)
+    monkeypatch.setattr(
+        _pipeline, "load_config",
+        lambda repo_root, **kw: _config.Config(
+            verify=_config.VerifyConfig(rerun_tests=None)  # 显式缺省 → 由 p.mode 决定
+        ),
+    )
+
+    result_line = f"RESULT: commit={commit} tasks=3 tests=pass summary={summary} notes=ok"
+    result = _pipeline.record_implement(p_with_repo, 1, result_line)
+
+    # p.mode=auto 应触发复跑
+    assert rerun_called["n"] == 1, "auto 档缺省时应触发真实复跑"
+    assert result["ok"] is True
+    assert result["tests_verified"] is True

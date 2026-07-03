@@ -45,17 +45,25 @@ from .engines import (
 from .trend import STALE_THRESHOLD
 
 
-def _should_rerun_tests(cfg: Config) -> bool:
+def _should_rerun_tests(cfg: Config, p: _paths.Paths | None = None) -> bool:
     """判断 record 阶段是否应对 coder 自报 tests=pass 做真实复跑。
 
     优先级：
     1. ``cfg.verify.rerun_tests`` 显式配置 → 直接用。
-    2. 否则：``NPC_MODE=auto`` 时默认开启，其余模式默认关闭。
+    2. ``NPC_MODE`` 环境变量 → 兼容 --shell-exports 旧路径。
+    3. ``p.mode``（从 run.json 持久化读取）→ npc init --auto 的默认编排路径，
+       不经 --shell-exports 导出环境变量，通过 run.json 传递 mode。
+    4. 三者均缺省 → False（interactive 默认不复跑）。
     """
     explicit = cfg.verify.rerun_tests
     if explicit is not None:
         return explicit
-    return os.environ.get("NPC_MODE", "interactive") == "auto"
+    env_mode = os.environ.get("NPC_MODE")
+    if env_mode is not None:
+        return env_mode == "auto"
+    if p is not None:
+        return p.mode == "auto"
+    return False
 
 
 def _iso_to_ms(iso_str: str | None) -> int | None:
@@ -1196,7 +1204,7 @@ def record_implement(
         cfg = load_config(p.repo_root)
     except ConfigError:
         cfg = Config()
-    if _should_rerun_tests(cfg):
+    if _should_rerun_tests(cfg, p):
         rerun = _verify.run_tests_result(p.repo_root, cfg)
         if rerun.get("no_command"):
             tests_verified = None  # 探测不到命令：降级，不阻塞
@@ -1343,7 +1351,7 @@ def record_fix(
         cfg = load_config(p.repo_root)
     except ConfigError:
         cfg = Config()
-    if _should_rerun_tests(cfg):
+    if _should_rerun_tests(cfg, p):
         rerun = _verify.run_tests_result(p.repo_root, cfg)
         if rerun.get("no_command"):
             tests_verified = None  # 探测不到命令：降级，不阻塞

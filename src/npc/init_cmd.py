@@ -253,8 +253,8 @@ def run(args: argparse.Namespace, runner=subprocess.run) -> None:
             p = _paths.compute_paths(repo_root, home=home)
 
     # 如有 worktree 回指字段，构造带回指的 Paths
+    from dataclasses import replace as _dc_replace
     if not no_worktree and worktree_root is not None:
-        from dataclasses import replace as _dc_replace
         p = _dc_replace(
             p,
             canonical_repo_root=canonical_repo_root,
@@ -262,6 +262,10 @@ def run(args: argparse.Namespace, runner=subprocess.run) -> None:
             base_branch=base_branch,
             spine_branch=spine_branch,
         )
+
+    # 5b. 把 mode 落入 Paths（run.json 持久化后 record 阶段可读，无需 NPC_MODE env）
+    _init_mode = "auto" if args.auto else "interactive"
+    p = _dc_replace(p, mode=_init_mode)
 
     # 6. 确保目录
     _paths.ensure_dirs(p)
@@ -291,7 +295,7 @@ def run(args: argparse.Namespace, runner=subprocess.run) -> None:
     if pt_created:
         _io.info(f"已写入 portable-timeout wrapper：{pt_path}")
 
-    mode = "auto" if args.auto else "interactive"
+    mode = _init_mode  # 已在步骤 5b 计算并落入 run.json
 
     # 10b. auto 授权：仅 --auto 时把项目授权写到主 checkout（live session 真正读取
     #      settings 的位置），而非 worktree（其 settings.json 不被 cwd 会话加载）。
