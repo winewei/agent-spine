@@ -80,6 +80,31 @@ def test_split_empty_fileset_never_conflicts():
     assert ["a", "c"] in subs or any("c" in s and "a" in s for s in subs)
 
 
+def test_split_dir_entry_conflicts_with_contained_file():
+    # LLM 抽取的目录级保守标识必须命中其下具体文件
+    subs, conflicts = _waves.split_by_files(
+        ["a", "b"], {"a": ["app/services/"], "b": ["app/services/foo.py"]}, {}
+    )
+    assert subs == [["a"], ["b"]]
+    assert conflicts == [["a", "b"]]
+
+
+def test_split_sibling_files_still_parallel():
+    subs, _ = _waves.split_by_files(
+        ["a", "b"], {"a": ["app/services/foo.py"], "b": ["app/services/bar.py"]}, {}
+    )
+    assert subs == [["a", "b"]]
+
+
+def test_split_path_normalization_matches():
+    # "./src/x.py" 与 "src/x.py" 是同一路径
+    subs, conflicts = _waves.split_by_files(
+        ["a", "b"], {"a": ["./src/x.py"], "b": ["src/x.py"]}, {}
+    )
+    assert subs == [["a"], ["b"]]
+    assert conflicts == [["a", "b"]]
+
+
 # ============================================================
 # compute（端到端纯函数）
 # ============================================================
@@ -112,6 +137,29 @@ def test_compute_missing_nodes_raises():
         _waves.compute({"edges": []})
     with pytest.raises(ValueError):
         _waves.compute({"nodes": []})
+
+
+def test_compute_duplicate_nodes_raises():
+    with pytest.raises(ValueError, match="duplicate"):
+        _waves.compute({"nodes": ["a", "b", "a"]})
+
+
+def test_compute_non_string_nodes_raises():
+    with pytest.raises(ValueError):
+        _waves.compute({"nodes": ["a", 1]})
+    with pytest.raises(ValueError):
+        _waves.compute({"nodes": ["a", ""]})
+
+
+def test_compute_shared_files_dir_overlap():
+    out = _waves.compute(
+        {"nodes": ["a", "b"], "files": {"a": ["app/services/"], "b": ["app/services/foo.py"]}}
+    )
+    assert out["waves"] == [["a"], ["b"]]
+    assert out["split_reasons"][0]["shared_files"] == [
+        "app/services/",
+        "app/services/foo.py",
+    ]
 
 
 # ============================================================
@@ -153,3 +201,11 @@ def test_run_missing_nodes_exit_2(monkeypatch, capsys):
     with pytest.raises(SystemExit) as ei:
         _run(monkeypatch, capsys, stdin_text="{}")
     assert ei.value.code == 2
+
+
+def test_run_duplicate_nodes_exit_2(monkeypatch, capsys):
+    with pytest.raises(SystemExit) as ei:
+        _run(monkeypatch, capsys, stdin_text=json.dumps({"nodes": ["a", "a"]}))
+    assert ei.value.code == 2
+    out = json.loads(capsys.readouterr().out)
+    assert out["error"] == "invalid_input"

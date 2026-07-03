@@ -4,9 +4,11 @@
 
 1. Kahn 拓扑分层：依赖 DAG（边 A→B 表示 A 必须先于 B 完成）逐层剥离
    in-degree=0 的节点；遇环时强制释放 tie-break 序最小的节点并记录破环点。
-2. 层内文件着色：同一子波次内任意两个 change 的 affected-code 文件集不相交
-   （贪心图着色）。文件不相交的子波次才能安全地并行 worktree implement +
-   串行 cherry-pick 整合。
+2. 层内文件着色：同一子波次内任意两个 change 的 affected-code 路径集无重叠
+   （贪心图着色）。重叠按**路径前缀**判定而非字符串相等——files 由 LLM 从
+   proposal 抽取，常含目录级保守标识（如 ``app/services/``），目录级条目
+   必须与其下所有具体文件视为冲突。路径无重叠的子波次才能安全地并行
+   worktree implement + 串行 cherry-pick 整合。
 
 本命令输出的是**候选**划分——语义层耦合（共享状态/时序/不变量）机械层看不到，
 最终波次必须经架构师 sub-agent 裁定（见 /new-plan-changes-v3 §4.9）。
@@ -80,16 +82,35 @@ def topological_layers(
     return layers, cycle_broken
 
 
+def _parts(path) -> tuple:
+    """路径归一化为组件元组；空段与 ``.`` 段剔除，尾部 ``/`` 自然消失。"""
+    return tuple(seg for seg in str(path).strip().split("/") if seg not in ("", "."))
+
+
+def _overlaps(a: tuple, b: tuple) -> bool:
+    """路径重叠：归一化后相等，或一方是另一方的组件前缀（目录覆盖其下文件）。"""
+    if not a or not b:
+        return False
+    k = min(len(a), len(b))
+    return a[:k] == b[:k]
+
+
+def _conflict(fa: set, fb: set) -> bool:
+    return any(_overlaps(a, b) for a in fa for b in fb)
+
+
 def split_by_files(
     layer: list[str], files: dict, tie_break: dict
 ) -> tuple[list[list[str]], list[list[str]]]:
-    """层内贪心着色：两 change 的文件集相交即冲突，须落到不同子波次。
+    """层内贪心着色：两 change 的路径集存在重叠即冲突，须落到不同子波次。
 
+    重叠按 ``_overlaps`` 的前缀语义判定：files 是 LLM 抽取的影响集，
+    目录级条目（``app/services/``）是保守冲突标识，必须命中其下具体文件。
     确定性：按 tie_break 序处理节点，分配到首个无冲突的颜色。
     返回 (sub_waves, conflict_pairs)。
     """
     ordered = sorted(layer, key=lambda n: _key(n, tie_break))
-    fileset = {n: set(files.get(n, []) or []) for n in ordered}
+    fileset = {n: {_parts(f) for f in (files.get(n) or []) if _parts(f)} for n in ordered}
     colors: list[list[str]] = []
     color_files: list[set] = []
     conflicts: list[list[str]] = []
@@ -98,11 +119,11 @@ def split_by_files(
         fn = fileset[n]
         assigned = None
         for i, used in enumerate(color_files):
-            if fn.isdisjoint(used):
+            if not _conflict(fn, used):
                 assigned = i
                 break
             for m in colors[i]:
-                if not fileset[m].isdisjoint(fn):
+                if _conflict(fileset[m], fn):
                     conflicts.append(sorted([m, n]))
         if assigned is None:
             colors.append([])
@@ -129,6 +150,11 @@ def compute(data: dict) -> dict:
     nodes = data.get("nodes")
     if not isinstance(nodes, list) or not nodes:
         raise ValueError("missing or empty 'nodes'")
+    if not all(isinstance(n, str) and n for n in nodes):
+        raise ValueError("'nodes' entries must be non-empty strings")
+    dupes = sorted({n for n in nodes if nodes.count(n) > 1})
+    if dupes:
+        raise ValueError(f"duplicate nodes: {dupes}")
     edges = data.get("edges") or []
     files = data.get("files") or {}
     tie_break = data.get("tie_break") or {}
@@ -141,15 +167,16 @@ def compute(data: dict) -> dict:
         sub_waves, conflicts = split_by_files(layer, files, tie_break)
         waves.extend(sub_waves)
         if len(sub_waves) > 1:
-            shared = sorted(
-                {
-                    f
-                    for pair in conflicts
-                    for n in pair
-                    for f in (files.get(n) or [])
-                    if any(f in (files.get(m) or []) for m in pair if m != n)
-                }
-            )
+            shared_set: set[str] = set()
+            for pair in conflicts:
+                for n in pair:
+                    others = [
+                        _parts(g) for m in pair if m != n for g in (files.get(m) or [])
+                    ]
+                    for f in files.get(n) or []:
+                        if any(_overlaps(_parts(f), g) for g in others):
+                            shared_set.add(f)
+            shared = sorted(shared_set)
             split_reasons.append(
                 {
                     "layer": idx,

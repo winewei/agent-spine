@@ -1272,6 +1272,8 @@ v3 波次并行编排原先自带四个 skill 脚本（waves.py / detect_plan_on
 
 `edges` 的 `[A,B]` 表示 A 先于 B；`files` 缺省视为空集（不冲突）；`tie_break` 为 `[tier, scope]` 稳定排序键，缺省排最后。
 
+文件冲突按**路径前缀重叠**判定而非字符串相等：归一化（剔除 `./`、尾部 `/`）后相等、或一方是另一方的组件前缀即冲突——`files` 由 LLM 从 proposal 抽取，目录级条目（如 `app/services/`）是保守冲突标识，必须命中其下所有具体文件。`nodes` 须为非空字符串且不得重复，否则 exit 2。
+
 **stdout**：
 
 ```json
@@ -1301,7 +1303,7 @@ manifest JSON 的 `files_written` 条目可为纯路径字符串或 `{"path":..,
 {"ok": true, "verdict": "code", "reason": null, "commit": "abc123", "files": {"ok": true, "reason": null, "present": 3, "missing": [], "sha_mismatch": [], "total": 3}}
 ```
 
-verdict 语义：`plan_only`（无 RESULT 行 / commit=- / 自报 plan-only / manifest 缺失或为空——没有可核对的真实产出）；`error`（自报 error）；`code`（有 commit 有产出；此时若文件丢失或 sha 不符，verdict 保持 code 但 `ok:false`，reason=`files_missing|sha_mismatch`）。
+verdict 语义：`plan_only`（无 RESULT 行 / commit=- / 自报 plan-only / manifest 缺失、为空或含非法条目——没有可信的真实产出，reason 含 `manifest_malformed_entry`）；`error`（自报 error）；`code`（有 commit 有产出；此时若文件丢失或 sha 不符，verdict 保持 code 但 `ok:false`，reason=`files_missing|sha_mismatch`）。
 
 **exit**：`0` verdict=code 且 manifest 全部核对通过；`1` 其余；`2` 用法错。
 

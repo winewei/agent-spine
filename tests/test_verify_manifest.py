@@ -108,6 +108,19 @@ def test_manifest_file_missing(tmp_path):
     assert out["ok"] is False and out["reason"] == "files_missing"
 
 
+def test_manifest_malformed_int_entry(tmp_path):
+    # manifest 是不可信的 sub-agent 输出，非法条目须结构化失败而非 traceback
+    m = _write_manifest(tmp_path, [123])
+    out = _verify.check_manifest_files(str(m))
+    assert out["ok"] is False and out["reason"] == "manifest_malformed_entry"
+
+
+def test_manifest_malformed_dict_without_path(tmp_path):
+    m = _write_manifest(tmp_path, [{"sha256": "0" * 64}])
+    out = _verify.check_manifest_files(str(m))
+    assert out["ok"] is False and out["reason"] == "manifest_malformed_entry"
+
+
 # ============================================================
 # run_manifest（CLI handler + 退出码）
 # ============================================================
@@ -141,6 +154,15 @@ def test_run_manifest_code_but_manifest_missing_becomes_plan_only(capsys):
     assert ei.value.code == 1
     out = json.loads(capsys.readouterr().out)
     assert out["verdict"] == "plan_only" and out["reason"] == "manifest_missing"
+
+
+def test_run_manifest_malformed_entry_becomes_plan_only(tmp_path, capsys):
+    m = _write_manifest(tmp_path, [123])
+    with pytest.raises(SystemExit) as ei:
+        _run(capsys, "RESULT: commit=abc tasks=1 tests=pass", str(m))
+    assert ei.value.code == 1
+    out = json.loads(capsys.readouterr().out)
+    assert out["verdict"] == "plan_only" and out["reason"] == "manifest_malformed_entry"
 
 
 def test_run_manifest_sha_mismatch_stays_code_verdict(tmp_path, capsys):

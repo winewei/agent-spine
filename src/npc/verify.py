@@ -370,7 +370,11 @@ def check_manifest_files(manifest_path: str | None) -> dict:
     for entry in files:
         if isinstance(entry, str):
             entry = {"path": entry}
-        path = Path(entry.get("path") or "")
+        # manifest 是不可信的 implementer 输出：条目不是 str/dict 或缺合法
+        # path 时返回结构化失败，而不是让 .get() 抛裸 traceback。
+        if not isinstance(entry, dict) or not isinstance(entry.get("path"), str) or not entry["path"]:
+            return fail("manifest_malformed_entry")
+        path = Path(entry["path"])
         if not path.is_file():
             missing.append(str(path))
             continue
@@ -406,11 +410,13 @@ def run_manifest(args: argparse.Namespace) -> None:
         files = check_manifest_files(parsed["manifest"])
         if not files["ok"]:
             ok = False
-            # manifest 缺失/为空视为 plan-only（没有可核对的真实产出）；
+            # manifest 缺失/为空/条目非法视为 plan-only（没有可信的真实产出）；
             # 文件丢失/sha 不符是核验失败（代码可能写了但与声明不符）。
-            if files["reason"] in ("manifest_missing", "manifest_empty_files") or str(
-                files["reason"] or ""
-            ).startswith("manifest_unreadable"):
+            if files["reason"] in (
+                "manifest_missing",
+                "manifest_empty_files",
+                "manifest_malformed_entry",
+            ) or str(files["reason"] or "").startswith("manifest_unreadable"):
                 parsed["verdict"] = "plan_only"
             reason = files["reason"]
 
