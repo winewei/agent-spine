@@ -574,6 +574,159 @@ def test_propagate_dep_failed_transitive(monkeypatch, tmp_path):
     assert prog["change-c"].get("skipped_reason") == "dep-failed"
 
 
+# ============================================================
+# F1 回归（round-5）：glob 路径重叠检测
+# ============================================================
+
+def test_dag_glob_overlaps_concrete_same_dir(monkeypatch, tmp_path):
+    """change-a 声明 `src/npc/*.py`，change-b 声明 `src/npc/state.py`。
+    两者目录+扩展名匹配 → 必须分到不同层，不得并行。
+
+    这是 F1 finding 的核心回归：精确字符串交集为空但实际存在冲突。
+    """
+    _make_change_dir(tmp_path, "change-a", tasks_content="修改 `src/npc/*.py`")
+    _make_change_dir(tmp_path, "change-b", tasks_content="修改 `src/npc/state.py`")
+
+    result = _run_dag(monkeypatch, tmp_path, ["change-a", "change-b"])
+    assert result["ok"] is True
+    layers = result["layers"]
+    for layer in layers:
+        assert not ("change-a" in layer and "change-b" in layer), (
+            f"glob src/npc/*.py 与 src/npc/state.py 重叠，不得同层：{layers}"
+        )
+
+
+def test_dag_doublestar_glob_overlaps_nested_concrete(monkeypatch, tmp_path):
+    """change-a 声明 `src/**/*.py`，change-b 声明 `src/npc/state.py`。
+    ** glob 应匹配任意子目录 → 必须分层。
+    """
+    _make_change_dir(tmp_path, "change-a", tasks_content="修改 `src/**/*.py`")
+    _make_change_dir(tmp_path, "change-b", tasks_content="修改 `src/npc/state.py`")
+
+    result = _run_dag(monkeypatch, tmp_path, ["change-a", "change-b"])
+    assert result["ok"] is True
+    layers = result["layers"]
+    for layer in layers:
+        assert not ("change-a" in layer and "change-b" in layer), (
+            f"glob src/**/*.py 与 src/npc/state.py 重叠，不得同层：{layers}"
+        )
+
+
+def test_dag_glob_no_overlap_different_dir(monkeypatch, tmp_path):
+    """change-a 声明 `src/npc/*.py`，change-b 声明 `src/other/foo.py`。
+    目录不同 → 应视为不重叠，可以同层。
+    """
+    _make_change_dir(tmp_path, "change-a", tasks_content="修改 `src/npc/*.py`")
+    _make_change_dir(tmp_path, "change-b", tasks_content="修改 `src/other/foo.py`")
+
+    result = _run_dag(monkeypatch, tmp_path, ["change-a", "change-b"])
+    assert result["ok"] is True
+    layers = result["layers"]
+    assert any(
+        "change-a" in layer and "change-b" in layer for layer in layers
+    ), f"不同目录的 glob 与具体路径不应被序列化：{layers}"
+
+
+def test_dag_glob_no_overlap_different_ext(monkeypatch, tmp_path):
+    """change-a 声明 `src/npc/*.py`，change-b 声明 `src/npc/README.md`。
+    扩展名不同 → 不重叠，可以同层。
+    """
+    _make_change_dir(tmp_path, "change-a", tasks_content="修改 `src/npc/*.py`")
+    _make_change_dir(tmp_path, "change-b", tasks_content="修改 `src/npc/README.md`")
+
+    result = _run_dag(monkeypatch, tmp_path, ["change-a", "change-b"])
+    assert result["ok"] is True
+    layers = result["layers"]
+    assert any(
+        "change-a" in layer and "change-b" in layer for layer in layers
+    ), f"不同扩展名的 glob 与具体路径不应被序列化：{layers}"
+
+
+def test_dag_two_globs_same_dir_overlap(monkeypatch, tmp_path):
+    """change-a 声明 `src/npc/*.py`，change-b 声明 `src/npc/*.md`（不同扩展名 glob）。
+    两 glob 目录前缀相同 → 保守视为重叠，必须分层。
+    """
+    _make_change_dir(tmp_path, "change-a", tasks_content="修改 `src/npc/*.py`")
+    _make_change_dir(tmp_path, "change-b", tasks_content="修改 `src/npc/*.md`")
+
+    result = _run_dag(monkeypatch, tmp_path, ["change-a", "change-b"])
+    assert result["ok"] is True
+    layers = result["layers"]
+    for layer in layers:
+        assert not ("change-a" in layer and "change-b" in layer), (
+            f"同目录下两个 glob 应保守视为重叠，不得同层：{layers}"
+        )
+
+
+def test_dag_glob_hotspot_named_in_serialization_reason(monkeypatch, tmp_path):
+    """glob 与具体路径冲突时，serialization_reason 应包含冲突路径信息。"""
+    _make_change_dir(tmp_path, "change-a", tasks_content="修改 `src/npc/*.py`")
+    _make_change_dir(tmp_path, "change-b", tasks_content="修改 `src/npc/state.py`")
+
+    result = _run_dag(monkeypatch, tmp_path, ["change-a", "change-b"])
+    assert result["ok"] is True
+    sr = result.get("serialization_reason") or {}
+    all_reasons = []
+    for reasons in sr.values():
+        if isinstance(reasons, list):
+            all_reasons.extend(reasons)
+        else:
+            all_reasons.append(str(reasons))
+    assert any("hotspot" in r for r in all_reasons), (
+        f"glob 冲突应产生 hotspot 序列化原因：{sr}"
+    )
+
+
+# ============================================================
+# _paths_overlap / _glob_overlaps_path 单元测试
+# ============================================================
+
+def test_glob_overlaps_path_same_dir_same_ext():
+    from npc.plan import _glob_overlaps_path
+    assert _glob_overlaps_path("src/npc/*.py", "src/npc/state.py") is True
+
+
+def test_glob_overlaps_path_different_dir():
+    from npc.plan import _glob_overlaps_path
+    assert _glob_overlaps_path("src/npc/*.py", "src/other/state.py") is False
+
+
+def test_glob_overlaps_path_different_ext():
+    from npc.plan import _glob_overlaps_path
+    assert _glob_overlaps_path("src/npc/*.py", "src/npc/README.md") is False
+
+
+def test_glob_overlaps_path_doublestar():
+    from npc.plan import _glob_overlaps_path
+    assert _glob_overlaps_path("src/**/*.py", "src/npc/state.py") is True
+
+
+def test_paths_overlap_exact():
+    from npc.plan import _paths_overlap
+    assert _paths_overlap({"src/a.py"}, {"src/a.py"}) is True
+
+
+def test_paths_overlap_glob_vs_concrete():
+    from npc.plan import _paths_overlap
+    assert _paths_overlap({"src/npc/*.py"}, {"src/npc/state.py"}) is True
+
+
+def test_paths_overlap_glob_vs_concrete_no_match():
+    from npc.plan import _paths_overlap
+    assert _paths_overlap({"src/npc/*.py"}, {"src/other/state.py"}) is False
+
+
+def test_paths_overlap_two_globs_same_dir():
+    from npc.plan import _paths_overlap
+    # 保守：同目录两 glob 视为重叠
+    assert _paths_overlap({"src/npc/*.py"}, {"src/npc/*.md"}) is True
+
+
+def test_paths_overlap_two_globs_different_dir():
+    from npc.plan import _paths_overlap
+    assert _paths_overlap({"src/npc/*.py"}, {"src/other/*.py"}) is False
+
+
 def test_propagate_dep_failed_invalid_deps_map(monkeypatch, tmp_path):
     """非法 deps_map JSON → emit_error 而非崩溃。"""
     import argparse as _argparse

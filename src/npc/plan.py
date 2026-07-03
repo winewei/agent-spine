@@ -313,29 +313,170 @@ def run_new_change(args: argparse.Namespace, runner=subprocess.run) -> None:
 # 从 markdown 文本提取文件路径的正则集：
 # 匹配反引号代码片段中的路径、src/ plugins/ tests/ openspec/ docs/ 前缀路径，
 # 以及 *.py *.md *.json *.toml 后缀路径。
+# 同时支持 glob 模式（含 * 或 **）如 `src/npc/*.py`。
 _PATH_RE = re.compile(
     r"""
-    `([^`\s]+\.(?:py|md|json|toml|yaml|yml|sh|txt))`   # backtick
+    `([^`\s]+)`                                           # backtick — 任意非空格内容（含 glob）
     | (?<![A-Za-z0-9_/.-])                               # word boundary
-      ((?:src|plugins|tests|openspec|docs|\.npc)/[A-Za-z0-9/_\-\.]+\.(?:py|md|json|toml|yaml|yml|sh))
+      ((?:src|plugins|tests|openspec|docs|\.npc)/[A-Za-z0-9/_\-\.\*]+\.(?:py|md|json|toml|yaml|yml|sh))
     | (?<![A-Za-z0-9_/.-])
       ([A-Za-z0-9_\-]+\.(?:py|json|toml|yaml|yml|sh))   # bare filename with extension
     """,
     re.VERBOSE,
 )
 
+# 路径必须含有效扩展名或 glob 通配符才算路径（过滤纯自然语言词）
+_VALID_PATH_RE = re.compile(
+    r'(?:\.(?:py|md|json|toml|yaml|yml|sh|txt)|[*])'
+)
+
 
 def _extract_paths_from_text(text: str) -> set[str]:
-    """从文本中静态提取文件路径集合（正则匹配，归一化为 posix 字符串）。"""
+    """从文本中静态提取文件路径集合（正则匹配，归一化为 posix 字符串）。
+
+    支持 glob 模式：含 * 的路径（如 src/npc/*.py）会被原样保留，
+    后续由 _paths_overlap 做 glob 感知的重叠判断。
+    """
     paths: set[str] = set()
     for m in _PATH_RE.finditer(text):
         for group in m.groups():
             if group:
-                # 过滤极短的（<3 字符）或含参数前缀
                 p = group.strip()
-                if len(p) >= 3 and not p.startswith("-"):
+                # 过滤极短的（<3 字符）、含参数前缀、或不含有效扩展名/通配符
+                if len(p) >= 3 and not p.startswith("-") and _VALID_PATH_RE.search(p):
                     paths.add(p)
     return paths
+
+
+def _is_glob(path: str) -> bool:
+    """判断路径是否为 glob 模式（含 * 字符）。"""
+    return "*" in path
+
+
+def _glob_overlaps_path(glob_pat: str, concrete: str) -> bool:
+    """保守判断 glob 模式 glob_pat 是否与具体路径 concrete 重叠。
+
+    策略：
+    1. 提取 glob 的目录前缀（第一个 * 之前的目录部分）。
+    2. 提取 glob 的文件扩展名（如果 * 后面有 .ext 则取之）。
+    3. concrete 路径必须以该目录前缀开头，且（若有扩展名约束）扩展名匹配。
+
+    例：
+    - glob=src/npc/*.py, concrete=src/npc/state.py → True（前缀+扩展名匹配）
+    - glob=src/**/*.py, concrete=src/npc/state.py → True（前缀匹配）
+    - glob=src/npc/*.py, concrete=src/other/a.py  → False（不同目录）
+    - glob=src/npc/*.py, concrete=src/npc/a.md   → False（扩展名不符）
+    """
+    # 找到第一个 * 的位置，取其左侧作为目录前缀
+    star_idx = glob_pat.index("*")
+    prefix = glob_pat[:star_idx]
+    # prefix 可能以 / 结尾（如 "src/npc/"），也可能不以 / 结尾（如 "src/npc"）
+    # 取到最后一个 / 处作为目录前缀（确保只匹配目录边界）
+    if "/" in prefix:
+        dir_prefix = prefix[: prefix.rfind("/") + 1]
+    else:
+        dir_prefix = ""
+
+    if not concrete.startswith(dir_prefix):
+        return False
+
+    # 提取 glob 中 * 之后的扩展名约束（如 *.py → .py）
+    suffix_part = glob_pat[star_idx:]
+    # 找到后缀的扩展名：去掉所有 * 后，剩余部分若以 .ext 结尾则匹配
+    ext_match = re.search(r'(\.[a-zA-Z0-9]+)$', suffix_part.replace("*", ""))
+    if ext_match:
+        required_ext = ext_match.group(1)
+        if not concrete.endswith(required_ext):
+            return False
+
+    return True
+
+
+def _paths_overlap(paths_a: set[str], paths_b: set[str]) -> bool:
+    """Glob 感知的路径集合重叠判断。
+
+    两个集合存在重叠当且仅当：
+    - 存在精确字符串相同的路径；或
+    - paths_a 中有 glob 模式匹配 paths_b 中的具体路径（反之亦然）；或
+    - 两个 glob 模式都存在且目录前缀+扩展名约束相互包含（保守：前缀相同即视为重叠）。
+    """
+    # 快速路径：精确交集
+    if paths_a & paths_b:
+        return True
+
+    globs_a = {p for p in paths_a if _is_glob(p)}
+    concretes_a = paths_a - globs_a
+    globs_b = {p for p in paths_b if _is_glob(p)}
+    concretes_b = paths_b - globs_b
+
+    # glob_a vs concrete_b
+    for gp in globs_a:
+        for cp in concretes_b:
+            if _glob_overlaps_path(gp, cp):
+                return True
+
+    # glob_b vs concrete_a
+    for gp in globs_b:
+        for cp in concretes_a:
+            if _glob_overlaps_path(gp, cp):
+                return True
+
+    # glob_a vs glob_b：两个 glob 前缀相同 → 保守视为重叠
+    for ga in globs_a:
+        for gb in globs_b:
+            star_a = ga.index("*")
+            star_b = gb.index("*")
+            prefix_a = ga[:star_a]
+            prefix_b = gb[:star_b]
+            # 取各自到最后一个 / 的目录前缀
+            dir_a = prefix_a[: prefix_a.rfind("/") + 1] if "/" in prefix_a else ""
+            dir_b = prefix_b[: prefix_b.rfind("/") + 1] if "/" in prefix_b else ""
+            if dir_a and dir_b and (dir_a.startswith(dir_b) or dir_b.startswith(dir_a)):
+                return True
+
+    return False
+
+
+def _overlapping_paths_for_hotspot(paths_a: set[str], paths_b: set[str]) -> set[str]:
+    """返回两集合之间重叠的路径（用于 hotspot 命名，glob 感知）。
+
+    返回的是具体路径名（用于显示），glob 模式本身也可能被返回。
+    """
+    result: set[str] = set()
+
+    # 精确交集
+    result |= paths_a & paths_b
+
+    globs_a = {p for p in paths_a if _is_glob(p)}
+    concretes_a = paths_a - globs_a
+    globs_b = {p for p in paths_b if _is_glob(p)}
+    concretes_b = paths_b - globs_b
+
+    for gp in globs_a:
+        for cp in concretes_b:
+            if _glob_overlaps_path(gp, cp):
+                result.add(gp)
+                result.add(cp)
+
+    for gp in globs_b:
+        for cp in concretes_a:
+            if _glob_overlaps_path(gp, cp):
+                result.add(gp)
+                result.add(cp)
+
+    for ga in globs_a:
+        for gb in globs_b:
+            star_a = ga.index("*")
+            star_b = gb.index("*")
+            prefix_a = ga[:star_a]
+            prefix_b = gb[:star_b]
+            dir_a = prefix_a[: prefix_a.rfind("/") + 1] if "/" in prefix_a else ""
+            dir_b = prefix_b[: prefix_b.rfind("/") + 1] if "/" in prefix_b else ""
+            if dir_a and dir_b and (dir_a.startswith(dir_b) or dir_b.startswith(dir_a)):
+                result.add(ga)
+                result.add(gb)
+
+    return result
 
 
 def _extract_paths_for_change(change_dir: Path) -> set[str]:
@@ -466,12 +607,12 @@ def _build_dag_layers(
                 serialization_reasons[cid].append("no-paths")
                 continue
 
-            overlap = cid_paths & current_paths
+            overlap = _paths_overlap(cid_paths, current_paths)
             if overlap:
                 # 路径重叠：检查与当前层中谁冲突，记录 hotspot
                 for placed in current_layer:
                     placed_paths = paths_map.get(placed, set())
-                    hot = cid_paths & placed_paths
+                    hot = _overlapping_paths_for_hotspot(cid_paths, placed_paths)
                     if hot:
                         hotspot_names = sorted(Path(p).name for p in hot)[:3]
                         reason = "hotspot=" + ",".join(hotspot_names)
