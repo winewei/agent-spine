@@ -1,7 +1,7 @@
 {
   "name": "agent-spine",
-  "version": "1.3.0",
-  "description": "本地自主 harness（跑在 Claude Code 进程内，无需任何服务/容器）。/spine-run 编排长时自主的 implement→review→fix→archive 循环；coder 默认路由到 MiMo 廉价层执行、review/决策留 Claude/codex（成本感知）；/spine-analyze 读跨 run 指标提自迭代建议。核心不变量见 docs/principles.md。确定性动作全部委托给 npc CLI。",
+  "version": "1.4.0",
+  "description": "本地自主 harness（跑在 Claude Code 进程内，无需任何服务/容器）。/spine-run 编排长时自主的 implement→review→fix→archive 循环；coder 默认路由到 MiMo 廉价层执行、review/决策留 Claude/codex（成本感知）；/spine-analyze 读跨 run 指标提自迭代建议。另含 new-plan-changes-v2/v3 skill：批量推进 OpenSpec active changes（v2 串行、v3 波次并行 worktree）。核心不变量见 docs/principles.md。确定性动作全部委托给 npc CLI。",
   "author": {
     "name": "alpha"
   },

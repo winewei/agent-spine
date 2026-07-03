@@ -12,11 +12,15 @@
 
 ## 提供的能力
 
-| 命令 / agent | 作用 |
+| 命令 / agent / skill | 作用 |
 |---|---|
 | `/spine-run <目标 或 change名> [--auto]` | 主 harness：init→plan→（每个 change）implement→review→fix→archive→收尾。支持续跑。 |
 | `spine-coder`（subagent） | 专职执行体，被 `/spine-run` spawn，产代码 commit + summary.md 详细日志。 |
 | `/spine-analyze` | 读跨 run 指标，提 ≤3 条 harness 自迭代建议（只读不改，人审闸门）。 |
+| `/new-plan-changes-v2` | 批量推进所有活跃 OpenSpec changes：DAG 拓扑排序后**串行** implement→review→fix→archive，复用 npc 状态/日志/续跑/telemetry。 |
+| `new-plan-changes-v3`（skill，自动触发） | v2 的**波次并行**升级版：架构师 sub-agent 切波次，每波在独立 git worktree 内并行 implement，串行 cherry-pick 整合后逐字复用 v2/npc 的 review→fix→archive。用户说"并行推进 changes"/"波次并行实施"等描述时自动触发，也可显式要求。 |
+
+`/spine-run` 面向"给定一个自由目标、全自主拆解并实施"；`new-plan-changes-v2/v3` 面向"OpenSpec 已有一批 active changes，按依赖顺序批量推进"——两条互补的入口，共享同一个 `npc` 底座。
 
 ## 前置依赖
 
@@ -24,6 +28,7 @@
   在 agent-spine 仓库根执行 `uv tool install --force --from . npc`
 - **`git`**、**`openspec`**（archive + 目标拆解需要）
 - **`codex`**（默认 review 引擎；可经 `.npc/config.toml` 切 `claude` 引擎）
+- `new-plan-changes-v3` 额外要求 `npc --version` ≥ 1.4.0，且 `worktree.baseRef=head`（`.claude/settings.json` 或 `~/.claude/settings.json`），否则拒绝以 fresh 语义静默降级
 
 ## 安装
 
@@ -38,6 +43,9 @@
 /spine-run 给认证模块加限流 --auto      # 自由目标 → 自动拆解 → 全自主跑完
 /spine-run add-rate-limit               # 已有 openspec change → 交互档跑
 /spine-analyze                          # 跑几个 run 后分析、迭代 harness 自身
+
+/new-plan-changes-v2                    # 批量推进所有活跃 openspec changes（串行）
+并行推进所有活跃的 changes              # 触发 new-plan-changes-v3（波次并行 worktree）
 ```
 
 ## 两种运行档
