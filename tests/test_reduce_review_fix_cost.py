@@ -279,14 +279,21 @@ class TestComplexityGate:
         assert len(captured_output) == 1
         out = captured_output[0]
         assert out["ok"] is True
-        # breadth=1 (all under src), should not trigger IF breadth_threshold=3
-        # files=11 >= files_threshold=10, so might trigger on file count
-        # Check the breadth for the "big-single-domain" result
+        # 11 文件全在 src/npc → breadth=1，未超 breadth_threshold=3
+        # spec plan-complexity-gate: 单领域 large change 不应触发 warning
         results = out["results"]
         assert len(results) == 1
         result = results[0]
         # breadth should be 1 (all under src)
         assert result["breadth"] == 1
+        # 关键断言：单领域（breadth < threshold）下文件数超阈值不触发 warning
+        assert result["triggered"] is False, (
+            "单领域 11 文件 change 不应触发复杂度 warning（breadth=1 < breadth_threshold）"
+        )
+        # warning_count 必须为 0
+        assert out["warning_count"] == 0, (
+            f"单领域 change 不应产生任何 warning，实际 warning_count={out['warning_count']}"
+        )
 
     def test_complexity_gate_does_not_block_run(self, tmp_path: Path, fake_change_dir):
         """Scenario: 软门触发告警时 run 不被阻断（返回 ok=True）。"""

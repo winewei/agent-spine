@@ -104,7 +104,7 @@ npc state init-run --plan-order '["change-a","change-b","change-c"]'
 - **交互档**：把 plan_order + 每个 change 一句话意图列给用户，AskUserQuestion 确认/调整后再 `init-run`。
 - **auto 档**：把拆出来的**全部** change 按依赖顺序排进 plan_order，直接 `init-run`——不挑子集、不问"这轮跑哪些"、不确认。一次跑完整条依赖链。
 
-**Step 2.5 — DAG 分析（init-run 之后）**：
+**Step 2.5 — DAG 分析 + 复杂度告警（init-run 之后）**：
 ```bash
 DAG=$(npc plan dag --plan-order '["change-a","change-b","change-c"]')
 # 输出：{"ok":true,"layers":[["change-a","change-b"],["change-c"]],"parallelizable_fraction":0.667,...}
@@ -112,6 +112,19 @@ LAYERS=$(echo "$DAG" | jq -r '.layers')       # JSON 二维数组
 LAYERS_COUNT=$(echo "$LAYERS" | jq 'length')  # 层数
 # 输出诊断（供后续 /spine-analyze）：
 echo "$DAG" | jq -r '{parallelizable_fraction, serialization_reason, degraded_reason}'
+
+# 前置软性复杂度告警（在 DAG 分析之后、主循环之前执行）：
+# - 输出跨领域广度 warning，展示/记录供用户参考
+# - 同时将 files 超阈值的 large change 标记写入 plan-state（供 3b 循环读取预算）
+COMPLEXITY=$(npc plan complexity --plan-order '["change-a","change-b","change-c"]')
+if [ "$(echo "$COMPLEXITY" | jq -r '.ok')" = "true" ]; then
+  WARN_COUNT=$(echo "$COMPLEXITY" | jq -r '.warning_count')
+  if [ "$WARN_COUNT" -gt 0 ]; then
+    echo "[spine-run] 复杂度告警（仅提示，不阻断执行）："
+    echo "$COMPLEXITY" | jq -r '.warnings[] | "  - \(.change_id): breadth=\(.breadth) → \(.suggestion)"'
+  fi
+fi
+# 注意：npc plan complexity 失败时不阻断 run，large 标记可能未落盘，3b 使用默认轮次上限。
 ```
 
 `npc plan dag` 产出：
@@ -300,10 +313,18 @@ if [ "$(echo "$R" | jq -r '.ok')" != "true" ]; then
 else
 N=0
 FIX_EXHAUSTED=false   # 标记 fix 分支是否因预算耗尽而 break 2
+# 读取 large 标记与 max_rounds_large：大 change 使用更高上限，非 large 使用默认 20
+IS_LARGE=$(npc state get ".progress[$((SEQ-1))].large // false" 2>/dev/null || echo "false")
+MAX_ROUNDS_LARGE=$(npc state get ".progress[$((SEQ-1))].max_rounds_large // 20" 2>/dev/null || echo "20")
+if [ "$IS_LARGE" = "true" ]; then
+  MAX_ROUNDS=$MAX_ROUNDS_LARGE
+else
+  MAX_ROUNDS=20
+fi
 # .ok=true 时才读 blocking/stale，避免 null 参与整数比较
 while [ "$(echo "$R" | jq -r '.blocking')" -gt 0 ] \
    && [ "$(echo "$R" | jq -r '.stale')" = "false" ] \
-   && [ $N -lt 20 ]; do
+   && [ $N -lt $MAX_ROUNDS ]; do
   N=$((N+1))
   # npc 内部 render fix prompt（注入上轮 blocking findings + 修复历史），按 deferred 分发：
   FIX=$(npc fix run --seq $SEQ --round $N)

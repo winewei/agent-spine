@@ -1081,15 +1081,16 @@ def run_complexity_check(args: argparse.Namespace) -> None:
         breadth = complexity["breadth"]
         files = complexity["files"]
 
-        triggered = breadth >= breadth_threshold or files >= files_threshold
+        # 文件数只作为辅助信号，不能在 breadth 未超阈值时单独触发 warning（plan-complexity-gate spec）：
+        # - 单领域大 change（breadth < breadth_threshold，files >= files_threshold）→
+        #     triggered=False，不输出 warning，但仍写 large 标记以获得更多 review 预算。
+        # - 跨领域（breadth >= breadth_threshold）→ triggered=True，输出 warning，建议 split。
+        triggered = breadth >= breadth_threshold
+        is_large = files >= files_threshold  # 辅助信号：文件数超阈值即视为 large change
         suggestion: str | None = None
 
         if triggered:
-            # 广度超阈值 → 建议 split；仅文件数超阈值（广度未超）→ 建议 large
-            if breadth >= breadth_threshold:
-                suggestion = "split"
-            else:
-                suggestion = "large"
+            suggestion = "split"
 
             warn_entry = {
                 "change_id": cid,
@@ -1101,23 +1102,25 @@ def run_complexity_check(args: argparse.Namespace) -> None:
             }
             warnings.append(warn_entry)
 
-            # 若建议 large，写 plan-state large 标记
-            if suggestion == "large" and state_obj is not None and state_json_path and state_md_path:
-                try:
-                    from .state import update_state
+        # large 标记写入 plan-state（与 warning 是否触发解耦）：
+        # files >= files_threshold 时即标记为 large，赋予更大 max_rounds 预算；
+        # 这确保单领域大 change 在 review-fix 循环中得到更多修复机会。
+        if is_large and state_obj is not None and state_json_path and state_md_path:
+            try:
+                from .state import update_state
 
-                    def _mark_large(state: dict) -> None:
-                        progress = state.get("progress") or []
-                        plan_order = state.get("plan_order") or []
-                        for idx, pid in enumerate(plan_order):
-                            if pid == cid and idx < len(progress):
-                                progress[idx]["large"] = True
-                                progress[idx]["max_rounds_large"] = max_rounds_large
-                                break
+                def _mark_large(state: dict) -> None:
+                    progress = state.get("progress") or []
+                    plan_order = state.get("plan_order") or []
+                    for idx, pid in enumerate(plan_order):
+                        if pid == cid and idx < len(progress):
+                            progress[idx]["large"] = True
+                            progress[idx]["max_rounds_large"] = max_rounds_large
+                            break
 
-                    update_state(state_json_path, state_md_path, _mark_large)
-                except Exception:
-                    pass  # state 写失败是 warning 级别，不影响主流程
+                update_state(state_json_path, state_md_path, _mark_large)
+            except Exception:
+                pass  # state 写失败是 warning 级别，不影响主流程
 
         result_entry = {
             "change_id": cid,
