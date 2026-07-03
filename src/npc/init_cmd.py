@@ -126,6 +126,20 @@ def _get_current_branch(repo_root: Path, runner=subprocess.run) -> str:
     return "" if val == "HEAD" else val
 
 
+def _mark_initializing_skeleton_orphan(init_file: Path) -> None:
+    """将 initializing 骨架文件的 status 更新为 'orphan'。
+
+    worktree 缺失/残破时调用，使 clean 命令可以发现并回收该记录。
+    写入失败时静默忽略（保守：不因孤儿标记失败而中断 init）。
+    """
+    try:
+        data = json.loads(init_file.read_text(encoding="utf-8"))
+        data["status"] = "orphan"
+        init_file.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    except (OSError, json.JSONDecodeError):
+        pass
+
+
 def _scan_spine_worktrees_for_resume(
     canonical_repo_root: Path,
     home: Path,
@@ -138,6 +152,9 @@ def _scan_spine_worktrees_for_resume(
     - needs_resume=True + is_initializing=True：initializing 崩溃恢复，worktree 完好但
       init-run 未执行，调用方应复用该 worktree_root 重新走 init 流程（跳过 worktree 创建）。
     多个命中取 state mtime 最新（in-progress 优先于 initializing）。
+
+    副作用：发现 worktree 缺失/残破的 initializing 记录时，将骨架文件的 status 更新为
+    'orphan'（记录在案），以便后续 clean 命令可以发现并回收，同时 init 继续新建 worktree。
     """
     try:
         worktrees = _git_ops.list_worktrees(canonical_repo_root, runner=runner)
@@ -147,13 +164,27 @@ def _scan_spine_worktrees_for_resume(
     in_progress_candidates: list[tuple[float, Path]] = []
     initializing_candidates: list[tuple[float, Path]] = []
 
+    # 构建 git worktree 路径集合，用于反向扫描
+    known_wt_dirs: set[Path] = set()
+
     for wt in worktrees:
         branch = wt.get("branch", "")
         # branch 形如 refs/heads/spine/<run_ts>
         if not branch.startswith("refs/heads/spine/"):
             continue
         wt_path = Path(wt["path"])
+        known_wt_dirs.add(wt_path)
         if not wt_path.is_dir():
+            # Task 2.2: worktree 在 git 列表中但目录已缺失/残破 →
+            # 检查 task_log 里是否有对应 initializing 骨架，标记孤儿
+            try:
+                wt_proj_key = _paths.proj_key_for(wt_path)
+            except _paths.PathsError:
+                continue
+            wt_task_log_dir = home / "task_log" / wt_proj_key
+            init_file = resume.find_latest_initializing(wt_task_log_dir)
+            if init_file is not None:
+                _mark_initializing_skeleton_orphan(init_file)
             continue
         # 按 worktree 路径推 task_log_dir
         try:
@@ -180,6 +211,29 @@ def _scan_spine_worktrees_for_resume(
             except OSError:
                 mtime = 0.0
             initializing_candidates.append((mtime, wt_path))
+
+    # Task 2.2 反向扫描：遍历 home/task_log/* 找 initializing 骨架，
+    # 若骨架的 worktree_root 不在 git 列表中（骨架在 worktree add 之前/之后写入
+    # 但 worktree add 从未完成），标记为孤儿。
+    task_log_root = home / "task_log"
+    if task_log_root.is_dir():
+        for tl_dir in task_log_root.iterdir():
+            if not tl_dir.is_dir():
+                continue
+            init_file = resume.find_latest_initializing(tl_dir)
+            if init_file is None:
+                continue
+            try:
+                skel = json.loads(init_file.read_text(encoding="utf-8"))
+                wt_root_str = skel.get("worktree_root")
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not wt_root_str:
+                continue
+            wt_root = Path(wt_root_str)
+            # 如果 worktree 不在 git 列表里且目录不存在 → 标记孤儿
+            if wt_root not in known_wt_dirs and not wt_root.is_dir():
+                _mark_initializing_skeleton_orphan(init_file)
 
     # in-progress 优先
     if in_progress_candidates:

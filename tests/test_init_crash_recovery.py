@@ -284,10 +284,11 @@ class TestCrashRecovery:
         )
 
     def test_crash_recovery_worktree_root_absent_marks_orphan(self, crash_env, capsys):
-        """Task 2.2: initializing 骨架存在但 worktree 目录缺失 → 不复用，正常新建。
+        """Task 2.2: initializing 骨架存在但 worktree 目录缺失 → 标记孤儿 + 正常新建。
 
-        worktree 目录不存在时（例如手动删除），init 应跳过 initializing 记录，
-        正常创建新 worktree（走 step 4），worktree add 被调用 1 次。
+        worktree 目录不存在时（例如 worktree add 从未完成），init 应：
+        1. 将旧骨架标记为 orphan（status="orphan"）
+        2. 跳过该记录，正常创建新 worktree（worktree add 被调用 1 次）
         """
         canonical, home = crash_env
 
@@ -341,6 +342,80 @@ class TestCrashRecovery:
         assert worktree_add_count[0] >= 1, "worktree 缺失时应新建 worktree"
         # 新 run_ts 与旧的不同
         assert payload["run_ts"] != run_ts
+
+        # Task 2.2: 旧骨架应被标记为 orphan，使 clean 可发现并回收
+        orphan_skel = json.loads(skeleton_path.read_text(encoding="utf-8"))
+        assert orphan_skel["status"] == "orphan", (
+            f"worktree 缺失的 initializing 骨架应被标记为 orphan，实际 status={orphan_skel['status']!r}"
+        )
+
+    def test_crash_recovery_worktree_in_git_list_but_dir_absent_marks_orphan(self, crash_env, capsys):
+        """Task 2.2: initializing 骨架存在，worktree 在 git 列表中但目录已损坏/缺失 → 标记孤儿。
+
+        覆盖另一个落点：worktree 已被 git 记录（出现在 worktree list）但实际目录不存在。
+        这是与 test_crash_recovery_worktree_root_absent_marks_orphan 的区别：
+        前者 worktree 从未出现在 git list（add 未完成），
+        本用例 worktree 在 git list 中但 is_dir() 为 False（目录被手动删除）。
+        """
+        canonical, home = crash_env
+
+        run_ts = "2026-07-01-1300-beefdead"
+        spine_branch = f"spine/{run_ts}"
+        canonical_proj_key = _paths.proj_key_for(canonical)
+        worktree_dir = home / ".spine" / "worktrees" / canonical_proj_key / run_ts
+
+        # 写 initializing 骨架（worktree 目录不存在）
+        wt_proj_key = _paths.proj_key_for(worktree_dir)
+        wt_task_log = home / "task_log" / wt_proj_key
+        wt_task_log.mkdir(parents=True, exist_ok=True)
+        skeleton_path = wt_task_log / f"{run_ts}-plan-state.json"
+        skeleton = {
+            "schema_version": 2,
+            "run_ts": run_ts,
+            "status": "initializing",
+            "worktree_root": str(worktree_dir),
+            "spine_branch": spine_branch,
+            "base_branch": "main",
+            "plan_order": [],
+            "progress": [],
+        }
+        skeleton_path.write_text(json.dumps(skeleton, indent=2), encoding="utf-8")
+
+        worktree_add_count = [0]
+
+        def mock_runner(cmd, cwd=None, capture_output=False, text=False, env=None, **kwargs):
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = ""
+            result.stderr = ""
+
+            if "worktree" in cmd and "list" in cmd:
+                # worktree 在 git 列表中，但目录不存在（is_dir() 将返回 False）
+                result.stdout = (
+                    f"worktree {worktree_dir}\n"
+                    "HEAD abc123\n"
+                    f"branch refs/heads/{spine_branch}\n"
+                    "\n"
+                )
+            elif "worktree" in cmd and "add" in cmd:
+                worktree_add_count[0] += 1
+                Path(cmd[5]).mkdir(parents=True, exist_ok=True)
+            elif "rev-parse" in cmd and "--abbrev-ref" in cmd:
+                result.stdout = "main\n"
+            elif "rev-parse" in cmd and "--show-toplevel" in cmd:
+                result.stdout = str(cwd) + "\n"
+            return result
+
+        args = _make_args()
+        _init.run(args, runner=mock_runner)
+        capsys.readouterr()  # drain
+
+        # 骨架应被标记为 orphan
+        orphan_skel = json.loads(skeleton_path.read_text(encoding="utf-8"))
+        assert orphan_skel["status"] == "orphan", (
+            f"git-list 中存在但目录缺失的 initializing 骨架应被标记为 orphan，"
+            f"实际 status={orphan_skel['status']!r}"
+        )
 
 
 # ============================================================
