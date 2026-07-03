@@ -190,10 +190,33 @@ echo "$ARCH" | jq -r '{ok, archive_commit, total_rounds, error}'
 | 3c archive 失败 | `archive-failed` |
 
 ```bash
-DEC=$(npc auto-decide --trigger <上表对应值> --seq $SEQ)
+DEC=$(npc auto-decide --trigger <上表对应值> --seq $SEQ --apply)
 ACTION=$(echo "$DEC" | jq -r '.action')   # continue-retry | skip | force-archive | abort
 ```
-按 `ACTION` 执行：`continue-retry` 回到对应阶段重试；`skip` 标记跳过下一个 change；`force-archive` 强行 `npc archive run`；`abort` 终止整个 run。**不打断用户。**
+
+按 `ACTION` 执行：
+
+- **`continue-retry`**：回到对应阶段重试。
+- **`skip`**：已由 `--apply` 将当前 change 状态置为 `skipped-auto`，继续下一个 change。
+- **`force-archive`**：执行 `npc archive run --seq $SEQ`；若该命令失败（`.ok != true`），以 `--trigger archive-failed` 二次调用 `npc auto-decide`，此时 action 只在 `skip` 或 `abort` 中收敛（不再 force-archive，避免死循环）：
+  ```bash
+  ARCH2=$(npc archive run --seq $SEQ)
+  if [ "$(echo "$ARCH2" | jq -r '.ok')" != "true" ]; then
+    DEC2=$(npc auto-decide --trigger archive-failed --seq $SEQ --apply)
+    ACTION=$(echo "$DEC2" | jq -r '.action')   # skip | abort（不再 force-archive）
+    # 按新 ACTION 执行 skip 或 abort（见下）
+  fi
+  ```
+- **`abort`**：系统性阻塞止损——将剩余所有 `pending` change 批量标记为 `skipped-auto`，直接跳至 Step 4 finalize；worktree 与 spine 分支保留供人工排查，不做 ff-merge。
+  ```bash
+  # 将 progress 中仍为 pending 的 change 标记为 skipped-auto（reason=aborted）
+  for REMAINING_SEQ in $(npc state get ".progress | to_entries[] | select(.value.status==\"pending\") | .key+1"); do
+    npc state set-progress --seq $REMAINING_SEQ --status skipped-auto --reason aborted
+  done
+  # 直接进 Step 4 finalize
+  ```
+
+**不打断用户。**
 
 **交互档**：用 **AskUserQuestion** 把局面（哪个 change、blocking_trend、stale 原因）摆给用户，选项映射到上面四个 action，按用户选择执行。
 
