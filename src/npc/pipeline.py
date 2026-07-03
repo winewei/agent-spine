@@ -730,14 +730,26 @@ def run_review_round(
 # ============================================================
 
 
+class _GitHeadError(Exception):
+    """git rev-parse HEAD 失败时抛出，携带 stderr 摘要。"""
+
+    def __init__(self, stderr_summary: str) -> None:
+        self.stderr_summary = stderr_summary
+        super().__init__(stderr_summary)
+
+
 def _git_head(repo_root: Path) -> str:
-    out = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=repo_root,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo_root,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+        stderr = getattr(exc, "stderr", "") or ""
+        raise _GitHeadError(stderr.strip()[:500]) from exc
     return out.stdout.strip()
 
 
@@ -828,7 +840,31 @@ def run_archive(
         }
 
     # 4. git add + commit
-    subprocess.run(["git", "add", "openspec/"], cwd=p.repo_root, check=True)
+    try:
+        subprocess.run(
+            ["git", "add", "openspec/"],
+            cwd=p.repo_root,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+        stderr = getattr(exc, "stderr", "") or ""
+        _do_phase_exit(
+            p,
+            seq,
+            "archive",
+            status="failed",
+            extra={"reason": "git-add-failed", "stderr": stderr.strip()[:2000]},
+            progress_updates={"status": "failed", "reason": "git-add-failed"},
+        )
+        return {
+            "ok": False,
+            "seq": seq,
+            "change_id": change_id,
+            "error": "git-add-failed",
+            "stderr_tail": stderr.strip()[-1000:],
+        }
     commit = subprocess.run(
         ["git", "commit", "-m", f"chore: archive {change_id}"],
         cwd=p.repo_root,
@@ -851,7 +887,24 @@ def run_archive(
             "error": "git-commit-failed",
             "stderr_tail": commit.stderr.strip()[-1000:],
         }
-    archive_commit = _git_head(p.repo_root)
+    try:
+        archive_commit = _git_head(p.repo_root)
+    except _GitHeadError as exc:
+        _do_phase_exit(
+            p,
+            seq,
+            "archive",
+            status="failed",
+            extra={"reason": "git-head-failed", "stderr": exc.stderr_summary},
+            progress_updates={"status": "failed", "reason": "git-head-failed"},
+        )
+        return {
+            "ok": False,
+            "seq": seq,
+            "change_id": change_id,
+            "error": "git-head-failed",
+            "stderr_tail": exc.stderr_summary,
+        }
 
     # 5. 计算 total_rounds = 最大 review-rN 索引
     phases = entry.get("phases") or {}
@@ -1201,6 +1254,10 @@ def cli_archive_run(args: argparse.Namespace) -> None:
         result = run_archive(p, args.seq, openspec_bin=args.openspec_bin)
     except FileNotFoundError as e:
         _io.emit_error("dependency_missing", str(e), exit_code=4)
+        return
+    except subprocess.CalledProcessError as e:
+        stderr = (e.stderr or "").strip()[:500]
+        _io.emit_error("git-subprocess-failed", f"cmd={e.cmd} stderr={stderr}", exit_code=1)
         return
     except ValueError as e:
         _io.emit_error("invalid_args", str(e), exit_code=2)

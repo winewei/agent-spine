@@ -494,3 +494,160 @@ def test_run_archive_precheck_fails(env_setup, make_args, capsys, fake_repo: Pat
     assert result["ok"] is False
     assert result["error"] == "commit-chain-broken"
     assert "deadbeef" in result["missing"][0]
+
+
+# ============================================================
+# archive-structured-errors: git add / _git_head 失败仍输出结构化 JSON
+# ============================================================
+
+
+def _make_archive_ready(env_setup, make_args, capsys, fake_repo: Path):
+    """Bootstrap state so run_archive can reach the git steps."""
+    _bootstrap_run(env_setup, make_args, capsys, "add-foo")
+
+    # 写入一个真实的 implement_commit
+    (fake_repo / "i.txt").write_text("a")
+    subprocess.run(["git", "add", "."], cwd=fake_repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "impl"], cwd=fake_repo, check=True)
+    impl_commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=fake_repo, capture_output=True, text=True
+    ).stdout.strip()
+
+    p = env_setup
+    p_with_repo = type(p)(**{**p.__dict__, "repo_root": fake_repo})
+
+    def mutate(s):
+        e = s["progress"][0]
+        e["implement_commit"] = impl_commit
+        e["phases"] = {
+            "implement": {"status": "done", "commit": impl_commit, "started_ms": 0, "started_at": "x"}
+        }
+
+    _state.update_state(p.state_json, p.state_md, mutate)
+    return p_with_repo
+
+
+def _fake_run_openspec_ok(real_run):
+    """返回一个 subprocess.run 替换，openspec 命令总返回 0，其余走真实调用。"""
+
+    def fake_run(cmd, *args, **kwargs):
+        if isinstance(cmd, list) and len(cmd) >= 2 and "openspec" in cmd[0]:
+            r = MagicMock()
+            r.returncode = 0
+            r.stdout = ""
+            r.stderr = ""
+            return r
+        return real_run(cmd, *args, **kwargs)
+
+    return fake_run
+
+
+def test_run_archive_git_add_failed_returns_structured_json(
+    env_setup, make_args, capsys, fake_repo: Path, monkeypatch
+):
+    """Scenario: git add 因 index.lock 失败仍返回单行 JSON（ok=false, error=git-add-failed）。"""
+    p_with_repo = _make_archive_ready(env_setup, make_args, capsys, fake_repo)
+
+    real_run = subprocess.run
+
+    def fake_run(cmd, *args, **kwargs):
+        if isinstance(cmd, list) and cmd[:2] == ["git", "add"]:
+            exc = subprocess.CalledProcessError(128, cmd, stderr="fatal: Unable to create index.lock")
+            exc.stderr = "fatal: Unable to create index.lock"
+            raise exc
+        if isinstance(cmd, list) and len(cmd) >= 2 and "openspec" in cmd[0]:
+            r = MagicMock()
+            r.returncode = 0
+            r.stdout = ""
+            r.stderr = ""
+            return r
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(_pipeline, "_find_openspec_bin", lambda override=None: "/fake/openspec")
+
+    result = _pipeline.run_archive(p_with_repo, 1)
+
+    # 核心断言：返回值是结构化 dict，ok=false，error=git-add-failed
+    assert result["ok"] is False
+    assert result["error"] == "git-add-failed"
+    assert result["seq"] == 1
+
+    # 验证可被 json.dumps 序列化（等价于 stdout 是合法 JSON）
+    serialized = json.dumps(result)
+    parsed = json.loads(serialized)
+    assert parsed["ok"] is False
+    assert parsed["error"] == "git-add-failed"
+
+
+def test_run_archive_git_add_failed_no_traceback_in_output(
+    env_setup, make_args, capsys, fake_repo: Path, monkeypatch
+):
+    """Scenario: stdout 不含 traceback 字样（无裸 traceback 泄漏到 stdout）。"""
+    p_with_repo = _make_archive_ready(env_setup, make_args, capsys, fake_repo)
+
+    real_run = subprocess.run
+
+    def fake_run(cmd, *args, **kwargs):
+        if isinstance(cmd, list) and cmd[:2] == ["git", "add"]:
+            exc = subprocess.CalledProcessError(128, cmd, stderr="fatal: index.lock exists")
+            exc.stderr = "fatal: index.lock exists"
+            raise exc
+        if isinstance(cmd, list) and len(cmd) >= 2 and "openspec" in cmd[0]:
+            r = MagicMock()
+            r.returncode = 0
+            r.stdout = ""
+            r.stderr = ""
+            return r
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(_pipeline, "_find_openspec_bin", lambda override=None: "/fake/openspec")
+
+    result = _pipeline.run_archive(p_with_repo, 1)
+
+    # 结果序列化为 JSON 后不含 "Traceback"
+    serialized = json.dumps(result)
+    assert "Traceback" not in serialized
+    assert result["ok"] is False
+
+
+def test_run_archive_git_head_failed_returns_structured_json(
+    env_setup, make_args, capsys, fake_repo: Path, monkeypatch
+):
+    """Scenario: _git_head 失败 → stdout 单行 JSON ok=false, error=git-head-failed，无裸 traceback。"""
+    p_with_repo = _make_archive_ready(env_setup, make_args, capsys, fake_repo)
+
+    # openspec/ 目录需存在，让 git add 和 git commit 能成功
+    (fake_repo / "openspec").mkdir(exist_ok=True)
+    (fake_repo / "openspec" / "x.md").write_text("dummy")
+
+    real_run = subprocess.run
+
+    def fake_run(cmd, *args, **kwargs):
+        if isinstance(cmd, list) and len(cmd) >= 2 and "openspec" in cmd[0]:
+            r = MagicMock()
+            r.returncode = 0
+            r.stdout = ""
+            r.stderr = ""
+            return r
+        if isinstance(cmd, list) and cmd[:2] == ["git", "rev-parse"]:
+            exc = subprocess.CalledProcessError(128, cmd, stderr="fatal: not a git repository")
+            exc.stderr = "fatal: not a git repository"
+            raise exc
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(_pipeline, "_find_openspec_bin", lambda override=None: "/fake/openspec")
+
+    result = _pipeline.run_archive(p_with_repo, 1)
+
+    assert result["ok"] is False
+    assert result["error"] == "git-head-failed"
+
+    # 验证 JSON 可序列化且不含 Traceback
+    serialized = json.dumps(result)
+    assert "Traceback" not in serialized
+    parsed = json.loads(serialized)
+    assert parsed["ok"] is False
+    assert parsed["error"] == "git-head-failed"
