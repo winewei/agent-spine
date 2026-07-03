@@ -437,6 +437,23 @@ def _build_parser() -> argparse.ArgumentParser:
     p_plan_dag.add_argument("--config", default=None, help="显式 TOML 配置路径")
     p_plan_dag.set_defaults(handler=_make_handler("plan", "cli_dag"), _cmd_path="plan dag")
 
+    p_plan_pdf = sub_plan.add_parser(
+        "propagate-dep-failed",
+        help="依赖失败传播：把显式依赖某失败 change 的下游标记为 skipped-auto(dep-failed)",
+    )
+    p_plan_pdf.add_argument(
+        "--failed-change", required=True, dest="failed_change",
+        help="已失败/已跳过的前置 change-id",
+    )
+    p_plan_pdf.add_argument(
+        "--deps-map", required=True, dest="deps_map",
+        help="npc plan dag 输出的 deps_map 字段（JSON 对象字符串）",
+    )
+    p_plan_pdf.set_defaults(
+        handler=_make_handler("plan", "cli_propagate_dep_failed"),
+        _cmd_path="plan propagate-dep-failed",
+    )
+
     # ===== git =====
     p_git = sub.add_parser("git", help="SDD git 卫生（分支/脏树/commit）")
     sub_git = p_git.add_subparsers(dest="git_cmd", required=True)

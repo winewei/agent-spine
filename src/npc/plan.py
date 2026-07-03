@@ -629,6 +629,10 @@ def run_dag(args: argparse.Namespace) -> None:
             "degraded_reason": degraded_reason,
             "max_parallel": max_parallel,
             "max_evictions": max_evictions,
+            # 退化情况下仍输出已解析的依赖边（供 propagate-dep-failed 使用）
+            "deps_map": {
+                cid: sorted(deps) for cid, deps in deps_map.items() if deps
+            },
         })
         return
 
@@ -652,6 +656,11 @@ def run_dag(args: argparse.Namespace) -> None:
         "degraded_reason": None,
         "max_parallel": max_parallel,
         "max_evictions": max_evictions,
+        # deps_map: 显式依赖边（仅 plan_order 内部依赖），供编排者做依赖失败传播。
+        # 格式：{change_id: [dep_id, ...]}（只含有依赖的条目）
+        "deps_map": {
+            cid: sorted(deps) for cid, deps in deps_map.items() if deps
+        },
     })
 
 
@@ -674,6 +683,119 @@ def _extract_deps_for_change_all(change_dir: Path) -> set[str]:
 def cli_dag(args: argparse.Namespace) -> None:
     """``npc plan dag`` handler。"""
     run_dag(args)
+
+
+# ============================================================
+# propagate-dep-failed：依赖失败传播
+# ============================================================
+
+
+def run_propagate_dep_failed(args: argparse.Namespace) -> None:
+    """``npc plan propagate-dep-failed``：标记依赖失败的下游 change 为 skipped-auto。
+
+    当某 change（``--failed-change``）到达非 ``archived`` 终态（failed / skipped-auto）时，
+    调用本命令可确定性地找出所有显式依赖它的下游 change，并把其中仍为非终态的条目
+    原子写入 ``skipped-auto`` + ``skipped_reason=dep-failed``。
+
+    输入：
+      --failed-change <id>   已失败/已跳过的前置 change-id
+      --deps-map <JSON>      npc plan dag 输出的 deps_map 字段（dict: change_id → [dep_ids]）
+
+    输出 JSON：
+      {"ok": true, "failed_change": "...", "skipped": ["downstream-a", ...]}
+      {"ok": true, "failed_change": "...", "skipped": []}  — 无下游需处理
+
+    错误输出：exit 1/2/3（同其他 npc 命令约定）。
+    """
+    from . import state as _state
+
+    failed_change: str = getattr(args, "failed_change", None) or ""
+    deps_map_raw: str = getattr(args, "deps_map", None) or ""
+
+    if not failed_change:
+        _io.emit_error("invalid_args", "--failed-change 不能为空", exit_code=2)
+        return
+
+    if not deps_map_raw:
+        _io.emit_error("invalid_args", "--deps-map 不能为空", exit_code=2)
+        return
+
+    # 解析 deps_map（{change_id: [dep_id, ...]}）
+    try:
+        deps_map: dict[str, list[str]] = json.loads(deps_map_raw)
+        if not isinstance(deps_map, dict):
+            raise ValueError("deps_map 必须是 JSON 对象")
+    except (json.JSONDecodeError, ValueError) as e:
+        _io.emit_error("invalid_args", f"--deps-map 解析失败：{e}", exit_code=2)
+        return
+
+    # 找到所有直接或间接依赖 failed_change 的下游（传递性闭包，BFS）
+    # deps_map[child] = [parent, ...] ——> reverse: dependents_of[parent] = [child, ...]
+    dependents_of: dict[str, list[str]] = {}
+    for child, parents in deps_map.items():
+        for parent in parents:
+            dependents_of.setdefault(parent, []).append(child)
+
+    downstream: set[str] = set()
+    queue = list(dependents_of.get(failed_change, []))
+    while queue:
+        cid = queue.pop(0)
+        if cid not in downstream:
+            downstream.add(cid)
+            queue.extend(dependents_of.get(cid, []))
+
+    if not downstream:
+        _io.emit({"ok": True, "failed_change": failed_change, "skipped": []})
+        return
+
+    # 加载 state，找 plan_order，把 downstream 中非终态的条目写 skipped-auto
+    try:
+        p = _paths.load_paths(args)
+    except _paths.PathsError as e:
+        _io.emit_error("env_missing", str(e), exit_code=3)
+        return
+
+    try:
+        state = _state.read_state(p.state_json)
+    except FileNotFoundError:
+        _io.emit_error("state_not_found", f"STATE_JSON 不存在：{p.state_json}", exit_code=3)
+        return
+
+    plan_order: list[str] = state.get("plan_order") or []
+    progress: list[dict] = state.get("progress") or []
+
+    terminal_statuses = {"archived", "failed", "skipped-auto", "needs-user-decision"}
+
+    skipped: list[str] = []
+
+    def mutate(s: dict) -> None:
+        prog = s.get("progress") or []
+        plan = s.get("plan_order") or []
+        for idx, cid in enumerate(plan):
+            if cid not in downstream:
+                continue
+            if idx >= len(prog):
+                continue
+            entry = prog[idx]
+            if entry.get("status") in terminal_statuses:
+                continue
+            # 非终态 → 标记 skipped-auto + dep-failed
+            entry["status"] = "skipped-auto"
+            entry["skipped_reason"] = "dep-failed"
+            skipped.append(cid)
+
+    try:
+        _state.update_state(p.state_json, p.state_md, mutate)
+    except FileNotFoundError:
+        _io.emit_error("state_not_found", f"STATE_JSON 不存在：{p.state_json}", exit_code=3)
+        return
+
+    _io.emit({"ok": True, "failed_change": failed_change, "skipped": skipped})
+
+
+def cli_propagate_dep_failed(args: argparse.Namespace) -> None:
+    """``npc plan propagate-dep-failed`` handler。"""
+    run_propagate_dep_failed(args)
 
 
 # ============================================================

@@ -342,3 +342,258 @@ def test_config_load_scheduler_from_toml(tmp_path):
     cfg = load_config(tmp_path)
     assert cfg.scheduler.max_parallel == 5
     assert cfg.scheduler.max_evictions == 3
+
+
+# ============================================================
+# F1 回归：deps_map 包含在 dag 输出中
+# ============================================================
+
+
+def test_dag_output_includes_deps_map_no_deps(monkeypatch, tmp_path):
+    """无依赖的 plan → deps_map 为空字典（或不含有依赖的键）。"""
+    _make_change_dir(tmp_path, "change-a", tasks_content="修改 `src/a.py`")
+    _make_change_dir(tmp_path, "change-b", tasks_content="修改 `src/b.py`")
+
+    result = _run_dag(monkeypatch, tmp_path, ["change-a", "change-b"])
+    assert result["ok"] is True
+    assert "deps_map" in result, "dag 输出必须包含 deps_map 字段"
+    # 无显式依赖时 deps_map 应为空
+    assert result["deps_map"] == {}, f"无依赖时 deps_map 应为空：{result['deps_map']}"
+
+
+def test_dag_output_includes_deps_map_with_deps(monkeypatch, tmp_path):
+    """change-b 依赖 change-a → deps_map[change-b] = ['change-a']。"""
+    _make_change_dir(tmp_path, "change-a", tasks_content="修改 `src/a.py`")
+    _make_change_dir(tmp_path, "change-b",
+                     tasks_content="修改 `src/b.py`",
+                     proposal_content="依赖前置：change-a\n")
+
+    result = _run_dag(monkeypatch, tmp_path, ["change-a", "change-b"])
+    assert result["ok"] is True
+    assert "deps_map" in result, "dag 输出必须包含 deps_map 字段"
+    deps_map = result["deps_map"]
+    assert "change-b" in deps_map, f"change-b 应在 deps_map：{deps_map}"
+    assert "change-a" in deps_map["change-b"], f"change-b 应依赖 change-a：{deps_map}"
+
+
+def test_dag_output_deps_map_in_degraded_path(monkeypatch, tmp_path):
+    """依赖环退化到串行时，deps_map 仍应在输出中（即使为空或含环内节点）。"""
+    _make_change_dir(tmp_path, "change-a",
+                     tasks_content="修改 `src/a.py`",
+                     proposal_content="依赖前置：change-b\n")
+    _make_change_dir(tmp_path, "change-b",
+                     tasks_content="修改 `src/b.py`",
+                     proposal_content="依赖前置：change-a\n")
+
+    result = _run_dag(monkeypatch, tmp_path, ["change-a", "change-b"])
+    assert result["ok"] is True
+    assert result.get("degraded_reason") is not None
+    assert "deps_map" in result, "退化路径下 dag 输出也必须含 deps_map"
+
+
+# ============================================================
+# F1 回归：propagate-dep-failed 真实回归测试
+# ============================================================
+
+import json as _json_mod
+
+
+def _make_state_for_propagate(tmp_path: Path, changes: list[str], statuses: dict[str, str] | None = None) -> tuple[Path, Path]:
+    """创建用于 propagate-dep-failed 测试的最简 state.json + state.md。"""
+    import json as j
+    state_json = tmp_path / "state.json"
+    state_md = tmp_path / "state.md"
+    progress = []
+    for i, cid in enumerate(changes):
+        st = (statuses or {}).get(cid, "pending")
+        progress.append({
+            "seq": i + 1,
+            "change_id": cid,
+            "status": st,
+            "blocking_trend": [],
+            "categories_seen": [],
+            "rounds_since_strict_decrease": 0,
+            "phases": {},
+        })
+    state = {
+        "schema_version": 2,
+        "run_ts": "2026-07-03-1000-000000",
+        "started_at": "2026-07-03T10:00:00+00:00",
+        "last_updated_at": "2026-07-03T10:00:00+00:00",
+        "mode": "interactive",
+        "fresh": False,
+        "status": "in-progress",
+        "project_root": str(tmp_path),
+        "proj_key": "-test",
+        "git_head_at_start": "abc0000",
+        "cc_session": {"session_id": None, "transcript_path": None, "source": "unknown"},
+        "plan_order": changes,
+        "progress": progress,
+    }
+    state_json.write_text(j.dumps(state, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    state_md.write_text("# test\n", encoding="utf-8")
+    return state_json, state_md
+
+
+def _run_propagate(monkeypatch, tmp_path: Path, failed_change: str, deps_map: dict) -> dict:
+    """运行 run_propagate_dep_failed，捕获输出 JSON。"""
+    import argparse as _argparse
+    import json as j
+
+    # monkeypatch load_paths 返回 state 路径
+    class FakePaths:
+        state_json = tmp_path / "state.json"
+        state_md = tmp_path / "state.md"
+
+    monkeypatch.setattr(_plan._paths, "load_paths", lambda args: FakePaths())
+
+    captured = {}
+    errors = []
+    original_emit = _plan._io.emit
+
+    def capture_emit(data: Any) -> None:
+        captured.update(data)
+
+    def capture_error(kind, msg, exit_code=1):
+        errors.append((kind, msg, exit_code))
+
+    monkeypatch.setattr(_plan._io, "emit", capture_emit)
+    monkeypatch.setattr(_plan._io, "emit_error", capture_error)
+
+    args = _argparse.Namespace(
+        failed_change=failed_change,
+        deps_map=j.dumps(deps_map),
+        run_ts=None,
+        task_log_dir=None,
+        state_json=None,
+    )
+    _plan.run_propagate_dep_failed(args)
+    return {"result": captured, "errors": errors}
+
+
+def test_propagate_dep_failed_marks_downstream_pending(monkeypatch, tmp_path):
+    """前置 change-a 失败 → change-c（显式依赖 a）从 pending 变 skipped-auto。
+
+    change-b 路径重叠但非显式依赖 → 不受影响。
+    这是 F1 finding 要求的核心回归：dep-failed 仅传播至显式依赖，不传播至路径重叠。
+    """
+    changes = ["change-a", "change-b", "change-c"]
+    # change-b 是路径重叠，change-c 显式依赖 change-a
+    state_json, state_md = _make_state_for_propagate(
+        tmp_path, changes,
+        statuses={"change-a": "failed", "change-b": "pending", "change-c": "pending"}
+    )
+
+    deps_map = {"change-c": ["change-a"]}  # change-b 无依赖
+    out = _run_propagate(monkeypatch, tmp_path, "change-a", deps_map)
+
+    assert not out["errors"], f"不应有错误：{out['errors']}"
+    result = out["result"]
+    assert result["ok"] is True
+    assert "change-c" in result["skipped"], f"change-c 应被标记 skipped：{result}"
+    assert "change-b" not in result["skipped"], f"change-b（路径重叠非依赖）不应被 skipped：{result}"
+
+    # 验证 state 文件已被实际修改
+    from npc import state as _state
+    loaded = _state.read_state(state_json)
+    prog = {e["change_id"]: e for e in loaded["progress"]}
+    assert prog["change-c"]["status"] == "skipped-auto"
+    assert prog["change-c"].get("skipped_reason") == "dep-failed"
+    assert prog["change-b"]["status"] == "pending", "change-b 不应被改动"
+
+
+def test_propagate_dep_failed_no_downstream(monkeypatch, tmp_path):
+    """失败的 change 无下游依赖 → skipped 为空列表，state 不变。"""
+    changes = ["change-a", "change-b"]
+    state_json, state_md = _make_state_for_propagate(
+        tmp_path, changes,
+        statuses={"change-a": "failed", "change-b": "pending"}
+    )
+
+    deps_map: dict = {}  # 无依赖关系
+    out = _run_propagate(monkeypatch, tmp_path, "change-a", deps_map)
+
+    assert not out["errors"]
+    result = out["result"]
+    assert result["ok"] is True
+    assert result["skipped"] == [], f"无下游时 skipped 应为空：{result}"
+
+    from npc import state as _state
+    loaded = _state.read_state(state_json)
+    prog = {e["change_id"]: e for e in loaded["progress"]}
+    assert prog["change-b"]["status"] == "pending"
+
+
+def test_propagate_dep_failed_skips_already_terminal(monkeypatch, tmp_path):
+    """下游 change 已是终态（archived/failed） → 不重复修改。"""
+    changes = ["change-a", "change-b", "change-c"]
+    state_json, state_md = _make_state_for_propagate(
+        tmp_path, changes,
+        statuses={"change-a": "failed", "change-b": "archived", "change-c": "failed"}
+    )
+
+    deps_map = {"change-b": ["change-a"], "change-c": ["change-a"]}
+    out = _run_propagate(monkeypatch, tmp_path, "change-a", deps_map)
+
+    assert not out["errors"]
+    result = out["result"]
+    assert result["ok"] is True
+    # 两者均已是终态，不应被再次写入
+    assert result["skipped"] == [], f"已终态的下游不应再写入：{result}"
+
+    from npc import state as _state
+    loaded = _state.read_state(state_json)
+    prog = {e["change_id"]: e for e in loaded["progress"]}
+    assert prog["change-b"]["status"] == "archived"
+    assert prog["change-c"]["status"] == "failed"
+
+
+def test_propagate_dep_failed_transitive(monkeypatch, tmp_path):
+    """传递依赖：a 失败 → b 依赖 a → c 依赖 b；c 也应被标记 skipped-auto。"""
+    changes = ["change-a", "change-b", "change-c"]
+    state_json, state_md = _make_state_for_propagate(
+        tmp_path, changes,
+        statuses={"change-a": "failed", "change-b": "pending", "change-c": "pending"}
+    )
+
+    deps_map = {"change-b": ["change-a"], "change-c": ["change-b"]}
+    out = _run_propagate(monkeypatch, tmp_path, "change-a", deps_map)
+
+    assert not out["errors"]
+    result = out["result"]
+    assert result["ok"] is True
+    assert "change-b" in result["skipped"]
+    assert "change-c" in result["skipped"]
+
+    from npc import state as _state
+    loaded = _state.read_state(state_json)
+    prog = {e["change_id"]: e for e in loaded["progress"]}
+    assert prog["change-b"]["status"] == "skipped-auto"
+    assert prog["change-b"].get("skipped_reason") == "dep-failed"
+    assert prog["change-c"]["status"] == "skipped-auto"
+    assert prog["change-c"].get("skipped_reason") == "dep-failed"
+
+
+def test_propagate_dep_failed_invalid_deps_map(monkeypatch, tmp_path):
+    """非法 deps_map JSON → emit_error 而非崩溃。"""
+    import argparse as _argparse
+    from npc import plan as _plan_mod
+
+    class FakePaths:
+        state_json = tmp_path / "state.json"
+        state_md = tmp_path / "state.md"
+
+    monkeypatch.setattr(_plan._paths, "load_paths", lambda args: FakePaths())
+
+    errors = []
+    monkeypatch.setattr(_plan._io, "emit", lambda d: None)
+    monkeypatch.setattr(_plan._io, "emit_error", lambda kind, msg, exit_code=1: errors.append((kind, exit_code)))
+
+    args = _argparse.Namespace(
+        failed_change="change-a",
+        deps_map="not-json",
+        run_ts=None, task_log_dir=None, state_json=None,
+    )
+    _plan.run_propagate_dep_failed(args)
+    assert errors, "非法 JSON 应触发 emit_error"
+    assert errors[0][0] == "invalid_args"

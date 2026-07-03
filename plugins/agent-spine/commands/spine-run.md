@@ -130,9 +130,12 @@ echo "$DAG" | jq -r '{parallelizable_fraction, serialization_reason, degraded_re
 
 **层屏障**：一层内所有 change 到达终态（`archived` / `failed` / `skipped-auto`）之前，**不得**启动下一层的任何 phase。
 
-**依赖失败传播**：若某 change 的显式依赖前置未达 `archived` 终态（已 `failed` 或 `skipped-auto`），该 change 自动标记 `skipped-auto`（`skipped_reason=dep-failed`），不 implement、不占并发额度。
+**依赖失败传播**：若某 change 的显式依赖前置未达 `archived` 终态（已 `failed` 或 `skipped-auto`），该 change 自动标记 `skipped-auto`（`skipped_reason=dep-failed`），不 implement、不占并发额度。调用 `npc plan propagate-dep-failed` 触发传播（确定性，基于 `npc plan dag` 输出的 `deps_map`）。
 
 ```bash
+# Step 2.5 之后保存 deps_map，供后续依赖失败传播使用：
+DEPS_MAP=$(echo "$DAG" | jq -c '.deps_map // {}')
+
 for LAYER_IDX in $(seq 0 $((LAYERS_COUNT - 1))); do
   LAYER=$(echo "$LAYERS" | jq -r ".[$LAYER_IDX][]")
   LAYER_SIZE=$(echo "$LAYERS" | jq -r ".[$LAYER_IDX] | length")
@@ -167,6 +170,19 @@ for LAYER_IDX in $(seq 0 $((LAYERS_COUNT - 1))); do
 
   # 层屏障：等本层所有 change 到达终态再进下一层
   # 检查：progress 中本层所有 change.status ∈ {archived, failed, skipped-auto}
+
+  # 依赖失败传播：本层有 change 到达非 archived 终态时，传播至后置层下游
+  # （必须在层屏障确认后、下一层开始前执行）
+  for CID in $LAYER; do
+    CID_STATUS=$(npc state get ".progress[] | select(.change_id==\"$CID\") | .status" | tr -d '"')
+    if [ "$CID_STATUS" = "failed" ] || [ "$CID_STATUS" = "skipped-auto" ]; then
+      PROP=$(npc plan propagate-dep-failed \
+        --failed-change "$CID" \
+        --deps-map "$DEPS_MAP")
+      PROP_SKIPPED=$(echo "$PROP" | jq -r '.skipped // [] | join(",")')
+      [ -n "$PROP_SKIPPED" ] && echo "[dep-failed] $CID → skipped downstream: $PROP_SKIPPED"
+    fi
+  done
 done
 ```
 
