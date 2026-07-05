@@ -9,7 +9,7 @@
 - **智能层**：[`/spine-run`](plugins/agent-spine/commands/spine-run.md) 编排 plan→implement→review→fix→archive；[`/spine-analyze`](plugins/agent-spine/commands/spine-analyze.md) 自迭代。
 - **执行层**：[`spine-coder`](plugins/agent-spine/agents/spine-coder.md) subagent。
 - **底座**：安装后的 `npc` 命令（代码在 `src/npc`）。
-- **批量入口**：[`/new-plan-changes-v2`](plugins/agent-spine/commands/new-plan-changes-v2.md)（串行）与 [`new-plan-changes-v3`](plugins/agent-spine/skills/new-plan-changes-v3/SKILL.md)（波次并行 worktree，skill 自动触发）——按依赖顺序批量推进 OpenSpec active changes，共享同一个 `npc` 底座。
+- **批量入口**：[`/new-plan-changes-v2`](plugins/agent-spine/commands/new-plan-changes-v2.md)（串行）、[`new-plan-changes-v3`](plugins/agent-spine/skills/new-plan-changes-v3/SKILL.md)（波次并行 worktree）与 [`new-plan-changes-v4`](plugins/agent-spine/skills/new-plan-changes-v4/SKILL.md)（v1.5 上下文预算版：每 change 三条 npc 命令——spawn / `npc integrate` / `npc change run`，主 session 只在决策分叉点出场）——按依赖顺序批量推进 OpenSpec active changes，共享同一个 `npc` 底座。
 - **宪法**：[docs/principles.md](docs/principles.md) 4 条不变量。
 
 ---
@@ -22,7 +22,7 @@ cd agent-spine
 
 # 1) 装 npc 命令（从当前仓库根安装 src/npc）
 uv tool install --force --from . npc
-npc --version          # npc 1.4.0
+npc --version          # npc 1.5.0
 
 # 2) 装 harness plugin（Claude Code 内）
 #   /plugin marketplace add <本仓库路径或 winewei/agent-spine>
@@ -47,7 +47,7 @@ uv tool install --force --from . npc && claude plugin marketplace add "$(pwd)" &
 /plugin install agent-spine@agent-spine
 ```
 
-装完得到 `/spine-run`、`/spine-analyze`、`spine-coder`、`/new-plan-changes-v2`、`new-plan-changes-v3`（skill，自动触发）（**重启 Claude Code 后生效**）。Plugin 升级 `/plugin update agent-spine@agent-spine`。
+装完得到 `/spine-run`、`/spine-analyze`、`spine-coder`、`/new-plan-changes-v2`、`new-plan-changes-v3`、`new-plan-changes-v4`（skill，自动触发）（**重启 Claude Code 后生效**）。Plugin 升级 `/plugin update agent-spine@agent-spine`。
 
 > `npc` 命令与 plugin 相互独立：CLI 机器级装一次，plugin 用户级装一次。`npc` 的命令速查/契约见 [docs/cli.md](docs/cli.md)。
 
@@ -408,7 +408,8 @@ agent-spine/
 │       ├── scripts/
 │       │   └── spine-coder-mimo.sh     # MiMo 成本路由 helper（coder.py 调用）
 │       └── skills/
-│           └── new-plan-changes-v3/
+│           ├── new-plan-changes-v3/
+│           └── new-plan-changes-v4/
 │               └── SKILL.md            # v3 波次并行 skill
 ├── docs/
 │   ├── design.md               # 总体方案 + 设计决策记录

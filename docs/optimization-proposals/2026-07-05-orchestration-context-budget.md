@@ -1,7 +1,7 @@
 # v1.5 迭代设计：主 session 上下文预算与编排边界下推
 
 - 日期：2026-07-05
-- 状态：设计定稿（owner 与 assistant 三轮讨论收敛；本文档是 v1.5 迭代的唯一依据）
+- 状态：**已实施（v1.5.0，本分支）**——P1/P2（`npc change run` / `npc integrate`）、P3（triage guardrail 入 v4 skill）、P4（`status --brief` / `state note`）、P5（`verify tasks`）、P6（re-plan 入 v4 skill Step 3e）、P7（telemetry `deviation` 记账）、P8（cron 化文档，docs/usage.md）、P9（new-plan-changes-v4 skill）、P10（`init-run --goal` + summary Goal Coverage）全部落地；§4 缓建清单维持缓建。契约见 docs/cli.md §8f，设计对齐见 design.md §11.10
 - 关联：[principles.md](../principles.md)（不变量过滤）、[design.md](../design.md) §11.2/11.3/11.6、[2026-07-03-npc-handoff.md](2026-07-03-npc-handoff.md)（同一"一行收单"思想）
 - 基线：`feat/npc-v1.4-plan-waves`（commit `0115530`）
 
