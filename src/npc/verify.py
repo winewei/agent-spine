@@ -431,3 +431,80 @@ def run_manifest(args: argparse.Namespace) -> None:
     )
     if not ok:
         raise SystemExit(1)
+
+
+# ============================================================
+# 子命令 4：npc verify tasks（v1.5，P5）
+# ============================================================
+
+
+def run_tasks_check(args: argparse.Namespace) -> None:
+    """``npc verify tasks --change ID [--seq N]``：tasks.md 完成度派生计数。
+
+    change 是调度量子，task 绝不进主 context——主 session 与人只看
+    ``tasks_done/tasks_total`` 两个数，不看清单。--seq 给定时与 state 里
+    implement RESULT 自报的 tasks= 计数交叉验证（claim != tasks_done → 不一致）。
+
+    退出码：0 一致或无 claim；1 claim 存在且不一致；2 缺 --change；
+    3 change 目录 / tasks.md 缺失。
+    """
+    from .spec_analyze import parse_tasks
+
+    change = getattr(args, "change", None)
+    if not change:
+        _io.emit_error("invalid_args", "必须提供 --change", exit_code=2)
+        return
+
+    try:
+        repo_root = _resolve_repo_root(args)
+    except _paths.PathsError as e:
+        _io.emit_error("env_missing", f"未能定位 repo_root：{e}", exit_code=3)
+        return
+
+    tasks_md = repo_root / "openspec" / "changes" / change / "tasks.md"
+    if not tasks_md.is_file():
+        _io.emit_error(
+            "tasks_not_found", f"tasks.md 不存在：{tasks_md}", exit_code=3
+        )
+        return
+
+    try:
+        tasks = parse_tasks(tasks_md.read_text(encoding="utf-8", errors="replace"))
+    except OSError as e:
+        _io.emit_error("tasks_unreadable", f"tasks.md 读取失败：{e}", exit_code=3)
+        return
+    done = sum(1 for t in tasks if t["done"])
+    total = len(tasks)
+
+    claim: int | None = None
+    seq = getattr(args, "seq", None)
+    if seq is not None:
+        from . import state as _state
+
+        try:
+            p = _paths.load_paths(args)
+            state = _state.read_state(p.state_json)
+            entry = (state.get("progress") or [])[seq - 1]
+            c = ((entry.get("phases") or {}).get("implement") or {}).get("tasks")
+            if isinstance(c, int):
+                claim = c
+        except (
+            _paths.PathsError,
+            FileNotFoundError,
+            IndexError,
+        ):
+            pass  # claim 拿不到不阻塞：退化为纯计数
+
+    consistent = None if claim is None else (claim == done)
+    _io.emit(
+        {
+            "ok": consistent is not False,
+            "change": change,
+            "tasks_done": done,
+            "tasks_total": total,
+            "claim": claim,
+            "consistent": consistent,
+        }
+    )
+    if consistent is False:
+        raise SystemExit(1)

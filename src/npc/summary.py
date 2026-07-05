@@ -89,6 +89,27 @@ def render_summary(state: dict) -> str:
     lines.append(f"Status: {status}")
     lines.append("")
 
+    # 目标覆盖对照（v1.5，P10）：人据此做 run 级验收——
+    # 逐 change 全过不等于组合达标，最初目标是否被覆盖由人对照裁定。
+    goal = state.get("goal")
+    if goal:
+        lines.append("## Goal Coverage")
+        lines.append("")
+        lines.append(f"> 原始目标：{goal}")
+        lines.append("")
+        lines.append("| # | change | 终态 |")
+        lines.append("|---|--------|------|")
+        for p in progress:
+            lines.append(
+                f"| {p.get('seq', '?')} | {p.get('change_id', '?')} | {p.get('status', '?')} |"
+            )
+        lines.append("")
+        lines.append(
+            "请对照原始目标核对：以上 changes 的组合是否覆盖目标的全部隐含需求？"
+            "未覆盖的缺口应立为新 change。"
+        )
+        lines.append("")
+
     lines.append("## Totals")
     lines.append(f"- Total changes: {len(progress)}")
     lines.append(f"- Archived: {len(archived)}")
