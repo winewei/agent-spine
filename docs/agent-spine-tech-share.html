@@ -1,0 +1,543 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>agent-spine — 本地自主 harness · 技术分享</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,600;0,800;1,400&display=swap" rel="stylesheet">
+<style>
+/* ===== 主题变量（改配色只动这里） ===== */
+:root {
+  --bg: #0d1117;            /* GitHub dark 底 */
+  --bg-panel: #161b22;
+  --border: #30363d;
+  --text: #c9d1d9;
+  --text-dim: #8b949e;
+  --green: #3fb950;         /* 终端绿主色 */
+  --green-bright: #56d364;
+  --green-dim: #238636;
+  --amber: #d29922;         /* 警示/成本 */
+  --red: #f85149;           /* blocking/violation */
+  --cyan: #79c0ff;          /* 路径/命令参数 */
+
+  --title-size: clamp(1.5rem, 5vw, 4rem);
+  --h2-size: clamp(1.25rem, 3.5vw, 2.5rem);
+  --h3-size: clamp(1rem, 2.5vw, 1.75rem);
+  --body-size: clamp(0.75rem, 1.5vw, 1.125rem);
+  --small-size: clamp(0.65rem, 1vw, 0.875rem);
+  --slide-padding: clamp(1rem, 4vw, 4rem);
+  --content-gap: clamp(0.5rem, 2vw, 2rem);
+  --element-gap: clamp(0.25rem, 1vw, 1rem);
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { height: 100%; overflow-x: hidden; background: var(--bg); }
+/* height:100% 使 body 成为实际滚动容器，snap 需同时声明在 html 与 body 上 */
+html, body { scroll-snap-type: y mandatory; scroll-behavior: smooth; }
+body { font-family: 'JetBrains Mono', ui-monospace, monospace; color: var(--text); }
+
+/* ===== 每页 = 一屏，禁止内部滚动 ===== */
+.slide {
+  width: 100vw; height: 100vh; height: 100dvh;
+  overflow: hidden; scroll-snap-align: start;
+  display: flex; flex-direction: column; position: relative;
+}
+.slide-content {
+  flex: 1; display: flex; flex-direction: column; justify-content: center;
+  max-height: 100%; overflow: hidden; padding: var(--slide-padding);
+  max-width: 1200px; width: 100%; margin: 0 auto; gap: var(--content-gap);
+  position: relative; z-index: 2;
+}
+
+/* ===== 扫描线 + 网格氛围 ===== */
+body::after {
+  content: ''; position: fixed; inset: 0; z-index: 10; pointer-events: none;
+  background: repeating-linear-gradient(0deg, rgba(0,0,0,0.12) 0 1px, transparent 1px 3px);
+  opacity: .5;
+}
+.slide::before {
+  content: ''; position: absolute; inset: 0; z-index: 0;
+  background-image: linear-gradient(rgba(63,185,80,0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(63,185,80,0.05) 1px, transparent 1px);
+  background-size: 42px 42px;
+  mask-image: radial-gradient(ellipse 90% 80% at 50% 40%, #000 30%, transparent 75%);
+  -webkit-mask-image: radial-gradient(ellipse 90% 80% at 50% 40%, #000 30%, transparent 75%);
+}
+
+/* ===== 顶部终端状态栏 ===== */
+.chrome {
+  display: flex; align-items: center; gap: .6em; z-index: 3;
+  padding: clamp(.4rem,1vh,.7rem) var(--slide-padding);
+  border-bottom: 1px solid var(--border); background: rgba(13,17,23,.7);
+  font-size: var(--small-size); color: var(--text-dim);
+}
+.chrome .dot { width: .65em; height: .65em; border-radius: 50%; background: var(--border); }
+.chrome .dot:first-child { background: var(--red); opacity:.7 }
+.chrome .dot:nth-child(2) { background: var(--amber); opacity:.7 }
+.chrome .dot:nth-child(3) { background: var(--green); opacity:.7 }
+.chrome .path { margin-left: .5em; }
+.chrome .path b { color: var(--green); font-weight: 600; }
+.chrome .idx { margin-left: auto; }
+
+/* ===== 排版 ===== */
+h1 { font-size: var(--title-size); font-weight: 800; line-height: 1.1; color: #fff; letter-spacing: -.02em; }
+h2 { font-size: var(--h2-size); font-weight: 800; color: #fff; line-height: 1.15; }
+h3 { font-size: var(--h3-size); font-weight: 600; color: var(--green-bright); }
+p, li { font-size: var(--body-size); line-height: 1.55; }
+.dim { color: var(--text-dim); }
+.g { color: var(--green-bright); } .c { color: var(--cyan); }
+.a { color: var(--amber); } .r { color: var(--red); }
+.kicker {
+  font-size: var(--small-size); color: var(--green); letter-spacing: .25em;
+  text-transform: uppercase; font-weight: 600;
+}
+.kicker::before { content: '// '; color: var(--text-dim); }
+.cursor { display: inline-block; width: .55em; height: 1em; background: var(--green); vertical-align: -0.12em; animation: blink 1.1s steps(1) infinite; }
+@keyframes blink { 50% { opacity: 0; } }
+
+.bullets { list-style: none; display: flex; flex-direction: column; gap: clamp(.4rem,1vh,1rem); }
+.bullets li { padding-left: 1.4em; position: relative; }
+.bullets li::before { content: '>'; position: absolute; left: 0; color: var(--green); font-weight: 800; }
+
+/* 终端窗口卡片 */
+.term {
+  background: var(--bg-panel); border: 1px solid var(--border); border-radius: 8px;
+  padding: clamp(.7rem,1.6vw,1.3rem) clamp(.8rem,2vw,1.5rem);
+  font-size: var(--body-size); line-height: 1.6; overflow: hidden;
+  box-shadow: 0 0 40px rgba(63,185,80,.06), 0 8px 24px rgba(0,0,0,.4);
+}
+.term .prompt::before { content: '$ '; color: var(--green); font-weight: 800; }
+.term .out { color: var(--text-dim); }
+
+/* 卡片网格 */
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%,240px),1fr)); gap: clamp(.5rem,1.5vw,1rem); }
+.card {
+  background: var(--bg-panel); border: 1px solid var(--border); border-radius: 8px;
+  padding: clamp(.7rem,1.5vw,1.2rem); display: flex; flex-direction: column; gap: .45em;
+  transition: border-color .25s, transform .25s, box-shadow .25s;
+}
+.card:hover { border-color: var(--green-dim); transform: translateY(-3px); box-shadow: 0 0 24px rgba(63,185,80,.12); }
+.card .tag { font-size: var(--small-size); color: var(--green); font-weight: 600; }
+.card p { font-size: var(--small-size); color: var(--text-dim); }
+.card h3 { font-size: clamp(.9rem,1.8vw,1.2rem); color: var(--text); }
+.card.hot { border-color: var(--green-dim); background: linear-gradient(160deg, rgba(35,134,54,.16), var(--bg-panel) 55%); }
+
+/* 流程链 */
+.flow { display: flex; flex-wrap: wrap; align-items: center; gap: clamp(.3rem,.8vw,.6rem); font-size: clamp(.7rem,1.6vw,1.05rem); font-weight: 600; }
+.flow .node { border: 1px solid var(--border); background: var(--bg-panel); border-radius: 6px; padding: .35em .7em; }
+.flow .node.on { border-color: var(--green-dim); color: var(--green-bright); box-shadow: 0 0 14px rgba(63,185,80,.18); }
+.flow .arr { color: var(--green); }
+.flow .loop { color: var(--amber); font-size: .85em; }
+
+/* 法则页大编号 */
+.law { display: grid; grid-template-columns: auto 1fr; gap: clamp(1rem,3vw,2.5rem); align-items: start; }
+.law .num {
+  font-size: clamp(3rem,10vw,7.5rem); font-weight: 800; line-height: .9;
+  color: transparent; -webkit-text-stroke: 2px var(--green-dim); text-stroke: 2px var(--green-dim);
+}
+.law .body { display: flex; flex-direction: column; gap: var(--element-gap); }
+
+table.tbl { border-collapse: collapse; width: 100%; font-size: var(--small-size); }
+.tbl th, .tbl td { border: 1px solid var(--border); padding: .5em .8em; text-align: left; line-height: 1.4; }
+.tbl th { color: var(--green-bright); background: var(--bg-panel); font-weight: 600; }
+.tbl td { color: var(--text); }
+
+.badge { display: inline-block; border: 1px solid var(--green-dim); color: var(--green-bright); border-radius: 999px; padding: .15em .8em; font-size: var(--small-size); }
+
+/* ===== 进场动画 ===== */
+.reveal { opacity: 0; transform: translateY(22px); transition: opacity .6s ease, transform .6s cubic-bezier(.16,1,.3,1); }
+.slide.active .reveal { opacity: 1; transform: none; }
+.slide.active .reveal:nth-child(2) { transition-delay: .08s }
+.slide.active .reveal:nth-child(3) { transition-delay: .16s }
+.slide.active .reveal:nth-child(4) { transition-delay: .24s }
+.slide.active .reveal:nth-child(5) { transition-delay: .32s }
+.slide.active .reveal:nth-child(6) { transition-delay: .4s }
+
+/* ===== 导航点 + 进度条 ===== */
+.progress { position: fixed; top: 0; left: 0; height: 2px; background: var(--green); z-index: 20; width: 0; transition: width .3s; box-shadow: 0 0 8px var(--green); }
+.nav-dots { position: fixed; right: clamp(.5rem,1.5vw,1.2rem); top: 50%; transform: translateY(-50%); z-index: 20; display: flex; flex-direction: column; gap: .55rem; }
+.nav-dots button { width: .5rem; height: .5rem; border-radius: 50%; border: 1px solid var(--text-dim); background: transparent; cursor: pointer; padding: 0; transition: all .25s; }
+.nav-dots button.on { background: var(--green); border-color: var(--green); box-shadow: 0 0 8px var(--green); }
+.keyboard-hint { position: fixed; bottom: .8rem; left: 50%; transform: translateX(-50%); z-index: 20; font-size: var(--small-size); color: var(--text-dim); opacity: .7; }
+
+/* ===== 高度/宽度降级 ===== */
+@media (max-height: 700px) {
+  :root { --slide-padding: clamp(.75rem,3vw,2rem); --content-gap: clamp(.4rem,1.5vw,1rem);
+    --title-size: clamp(1.25rem,4.5vw,2.5rem); --h2-size: clamp(1rem,3vw,1.75rem); }
+}
+@media (max-height: 600px) {
+  :root { --slide-padding: clamp(.5rem,2.5vw,1.5rem); --content-gap: clamp(.3rem,1vw,.75rem);
+    --title-size: clamp(1.1rem,4vw,2rem); --body-size: clamp(.7rem,1.2vw,.95rem); }
+  .nav-dots, .keyboard-hint { display: none; }
+  .law .num { font-size: clamp(2rem,7vw,3.5rem); }
+}
+@media (max-height: 500px) {
+  :root { --slide-padding: clamp(.4rem,2vw,1rem); --title-size: clamp(1rem,3.5vw,1.5rem);
+    --h2-size: clamp(.9rem,2.5vw,1.25rem); --body-size: clamp(.65rem,1vw,.85rem); }
+  .chrome { display: none; }
+}
+@media (max-width: 600px) {
+  :root { --title-size: clamp(1.25rem,7vw,2.5rem); }
+  .grid { grid-template-columns: 1fr; }
+  .law { grid-template-columns: 1fr; }
+  .tbl th, .tbl td { padding: .35em .5em; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .2s !important; }
+  html { scroll-behavior: auto; }
+  .reveal { opacity: 1; transform: none; }
+}
+</style>
+</head>
+<body>
+<div class="progress" id="progress"></div>
+<nav class="nav-dots" id="dots" aria-label="幻灯片导航"></nav>
+<div class="keyboard-hint">← → / 空格 翻页</div>
+
+<main id="deck">
+
+<!-- 1 · 封面 -->
+<section class="slide" aria-label="封面">
+  <div class="chrome"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="path"><b>ethan@spine</b>:~/talk</span><span class="idx">01</span></div>
+  <div class="slide-content" style="align-items:flex-start">
+    <p class="kicker reveal">tech share · claude code plugin</p>
+    <h1 class="reveal">$ /spine-run <span class="c">&lt;目标&gt;</span> <span class="a">--auto</span><span class="cursor"></span></h1>
+    <p class="reveal" style="font-size:var(--h3-size);color:var(--text-dim)">agent-spine —— 跑在 Claude Code 进程内的<span class="g">本地自主 harness</span></p>
+    <p class="reveal dim">无服务 · 无容器 · 无常驻进程 &nbsp;|&nbsp; 从 spec 到结果交付</p>
+  </div>
+</section>
+
+<!-- 2 · 痛点 -->
+<section class="slide" aria-label="痛点">
+  <div class="chrome"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="path"><b>ethan@spine</b>:~/why</span><span class="idx">02</span></div>
+  <div class="slide-content">
+    <p class="kicker reveal">why</p>
+    <h2 class="reveal">手工跑一批 change，你在当「人肉调度器」</h2>
+    <ul class="bullets reveal">
+      <li>写完 → 提 review → 盯 review → 有问题再喊模型修 → 再 review → 归档，<span class="a">每一步都要人盯</span></li>
+      <li>context 里搬运 prompt 模板、review 报告原文，<span class="a">智能退化成数据搬运</span></li>
+      <li>模型自己说「写好了、测试全过」——<span class="r">敢信吗？</span></li>
+      <li>全程跑在贵模型上，执行类杂活也烧 premium token</li>
+    </ul>
+    <div class="term reveal"><span class="prompt">wc -l 你的耐心</span><br><span class="out">0 你的耐心 &nbsp;# 第 3 个 change 之后</span></div>
+  </div>
+</section>
+
+<!-- 3 · 是什么 -->
+<section class="slide" aria-label="是什么">
+  <div class="chrome"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="path"><b>ethan@spine</b>:~/what</span><span class="idx">03</span></div>
+  <div class="slide-content">
+    <p class="kicker reveal">what</p>
+    <h2 class="reveal">agent-spine = <span class="g">人驾驭的自主 harness</span></h2>
+    <p class="reveal">把「长时运行 + 自主决策 + 反复 review 打磨」的编排做成纯 markdown skill，确定性动作全部委托给 <span class="c">npc</span> CLI。</p>
+    <div class="grid reveal">
+      <div class="card"><span class="tag">/spine-run</span><h3>主 harness</h3><p>init → plan →（每个 change）implement → review → fix → archive → 收尾，支持断点续跑</p></div>
+      <div class="card"><span class="tag">spine-coder</span><h3>专职执行体</h3><p>被 spawn 的 subagent，产代码 commit + summary.md，只回一行 RESULT</p></div>
+      <div class="card"><span class="tag">/spine-analyze</span><h3>自迭代入口</h3><p>读跨 run 指标，提 ≤3 条 harness 改进建议（只读，人审闸门）</p></div>
+    </div>
+    <p class="reveal dim">定位：从 spec 到结果交付的 skill，<b class="g">不是</b>无人值守的生产系统——人随时可介入。</p>
+  </div>
+</section>
+
+<!-- 4 · 三层职责 -->
+<section class="slide" aria-label="三层职责">
+  <div class="chrome"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="path"><b>ethan@spine</b>:~/arch</span><span class="idx">04</span></div>
+  <div class="slide-content">
+    <p class="kicker reveal">architecture</p>
+    <h2 class="reveal">三层职责：谁思考、谁动手、谁搬砖</h2>
+    <table class="tbl reveal">
+      <tr><th>层</th><th>角色</th><th>由谁承担</th></tr>
+      <tr><td><span class="g">智能层</span></td><td>调度 + 决策：排计划、spawn、读一行 JSON 做分支</td><td>主 session（/spine-run）</td></tr>
+      <tr><td><span class="c">执行层</span></td><td>写代码 + 过程日志 + 一行 RESULT 回报</td><td>spine-coder subagent</td></tr>
+      <tr><td><span class="a">底座</span></td><td>确定性机械动作：状态 / 事件 / 模板 / 子进程 / 指标</td><td>npc CLI（Python）</td></tr>
+    </table>
+    <ul class="bullets reveal">
+      <li>主 session <span class="g">只调度与决策</span>——不写业务代码、不解析自然语言日志</li>
+      <li>凡是能确定性完成的，<span class="a">一律下沉给 npc</span>，不占智能层 context</li>
+    </ul>
+  </div>
+</section>
+
+<!-- 5 · 运行循环 -->
+<section class="slide" aria-label="运行循环">
+  <div class="chrome"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="path"><b>ethan@spine</b>:~/loop</span><span class="idx">05</span></div>
+  <div class="slide-content">
+    <p class="kicker reveal">the loop</p>
+    <h2 class="reveal">一个 run 的完整生命周期</h2>
+    <div class="flow reveal">
+      <span class="node">npc init</span><span class="arr">→</span>
+      <span class="node">plan 拆解</span><span class="arr">→</span>
+      <span class="node on">implement</span><span class="arr">→</span>
+      <span class="node on">review</span><span class="arr">→</span>
+      <span class="node on">fix</span><span class="loop">⟲ 直到 blocking==0</span><span class="arr">→</span>
+      <span class="node">archive</span><span class="arr">→</span>
+      <span class="node">finalize</span>
+    </div>
+    <ul class="bullets reveal">
+      <li>自由目标（如「给认证模块加限流」）会先被<span class="g">自动拆解成若干 openspec change</span>，排出 plan_order</li>
+      <li>每个 change：spawn coder 实现 → <span class="c">npc review run</span> 多轮独立 review → 有 blocking 就 spawn coder 修</li>
+      <li>决策点（review 卡死 / archive 失败）：交互档问你，auto 档 <span class="c">npc auto-decide</span> 机械判定</li>
+      <li>中断后再跑 /spine-run 自动检测 <span class="c">needs_resume</span>，从断点接着来</li>
+    </ul>
+  </div>
+</section>
+
+<!-- 6 · 不变量总览 -->
+<section class="slide" aria-label="不变量总览">
+  <div class="chrome"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="path"><b>ethan@spine</b>:~/principles</span><span class="idx">06</span></div>
+  <div class="slide-content">
+    <p class="kicker reveal">constitution</p>
+    <h2 class="reveal">4 条核心不变量（宪法，冲突时以它为准）</h2>
+    <div class="grid reveal">
+      <div class="card hot"><span class="tag">01</span><h3>生成 ⊥ 验证</h3><p>写代码的角色，绝不评判自己的代码</p></div>
+      <div class="card hot"><span class="tag">02</span><h3>只信结构化契约</h3><p>状态以落盘数据为准，不信 LLM 散文</p></div>
+      <div class="card hot"><span class="tag">03</span><h3>笼子 ∝ 1/(人在回路)</h3><p>人驾驭 → 硬轨最小化，按需再加</p></div>
+      <div class="card hot"><span class="tag">04</span><h3>成本分层</h3><p>廉价模型只许执行，决策与验证恒 premium</p></div>
+    </div>
+    <p class="reveal dim">来源：从生产级零信任架构（aidevos）蒸馏出的、适配「人驾驭 skill」定位的最小集。</p>
+  </div>
+</section>
+
+<!-- 7 · 不变量 1 -->
+<section class="slide" aria-label="不变量1">
+  <div class="chrome"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="path"><b>ethan@spine</b>:~/principles/1</span><span class="idx">07</span></div>
+  <div class="slide-content">
+    <div class="law">
+      <div class="num reveal">01</div>
+      <div class="body">
+        <h2 class="reveal">生成 ⊥ 验证：执行者永不给自己盖章</h2>
+        <ul class="bullets reveal">
+          <li>coder 只<span class="g">生成</span>；合格与否由<span class="g">独立 review</span>（codex / Claude 引擎）判定</li>
+          <li>review 引擎<span class="r">绝不可与 coder 同源</span>——coder 走 MiMo 时 review 必须仍是 codex/Claude</li>
+          <li>archive 闸门只认 review 的 <span class="c">blocking==0</span>（或人类显式 override）</li>
+          <li>不认 coder 自报的「我写好了」「测试全过」</li>
+        </ul>
+        <div class="term reveal"><span class="prompt">npc archive run</span><br><span class="out">{"ok": false, "reason": "review.blocking=2"} &nbsp;<span class="r"># 门不开</span></span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- 8 · 不变量 2 -->
+<section class="slide" aria-label="不变量2">
+  <div class="chrome"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="path"><b>ethan@spine</b>:~/principles/2</span><span class="idx">08</span></div>
+  <div class="slide-content">
+    <div class="law">
+      <div class="num reveal">02</div>
+      <div class="body">
+        <h2 class="reveal">轨迹与结构化契约是唯一真相</h2>
+        <ul class="bullets reveal">
+          <li>主 session 只读 npc 返回的<span class="g">一行 JSON 关键字段</span>做分支</li>
+          <li>角色交接走结构化契约：coder → 一行 RESULT；npc → 一行 JSON</li>
+          <li>全轨迹落 <span class="c">~/task_log/&lt;PROJ_KEY&gt;/</span>，跨 run 指标落 <span class="c">_telemetry/</span></li>
+          <li><span class="r">反模式</span>：读 summary 原文做决策、把模板搬进 context——npc 存在就是为了消灭这个</li>
+        </ul>
+        <div class="term reveal"><span class="prompt">npc review run --change add-rate-limit</span><br><span class="out">{"blocking": 0, "warnings": 3, "round": 2, "stale": false}</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- 9 · 不变量 3 -->
+<section class="slide" aria-label="不变量3">
+  <div class="chrome"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="path"><b>ethan@spine</b>:~/principles/3</span><span class="idx">09</span></div>
+  <div class="slide-content">
+    <div class="law">
+      <div class="num reveal">03</div>
+      <div class="body">
+        <h2 class="reveal">确定性「笼子」∝ 1 / (人在回路)</h2>
+        <ul class="bullets reveal">
+          <li>spine 有人驾驭（人即编排者 + 验证锚）→ <span class="g">笼子最小化</span></li>
+          <li>不照搬重机器：policy 闸门、不可变 ledger、日历锁——那些是给「全程无人」准备的</li>
+          <li>加任何新硬轨前先问：<span class="a">「这是因为去掉人了吗？」</span>不是，就别加</li>
+          <li>硬轨由 <span class="c">npc telemetry hotspots</span> 指出的真实方差点位「打」出来，不预先过度设计</li>
+          <li><span class="c">--auto</span> 是「少打断人」的便利档，≠ 无人产品</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- 10 · 不变量 4 -->
+<section class="slide" aria-label="不变量4">
+  <div class="chrome"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="path"><b>ethan@spine</b>:~/principles/4</span><span class="idx">10</span></div>
+  <div class="slide-content">
+    <div class="law">
+      <div class="num reveal">04</div>
+      <div class="body">
+        <h2 class="reveal">成本分层：廉价层只许执行</h2>
+        <ul class="bullets reveal">
+          <li>便宜模型（MiMo）<span class="g">只可用于 coder 层</span>；决策 + review/分析<span class="g">恒留 premium</span>（Claude / codex）</li>
+          <li>premium coder 默认走 <span class="c">in-session subagent</span>（对冲 headless <span class="c">claude -p</span> 的计费风险）；MiMo 恒走 headless</li>
+          <li>MiMo 默认不启用，按需显式开：全局 / per-phase（只把 fix 给 MiMo）/ 临时 <span class="c">--backend mimo</span></li>
+          <li><span class="c">npc verify routing</span> 在代码层强制：review 含 mimo = <span class="r">violation</span>，mimo + in-session 亦是</li>
+        </ul>
+        <div class="term reveal"><span class="prompt">npc verify routing</span><br><span class="out">{"ok": true, "coder": "mimo", "review": "codex", "violations": []}</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- 11 · 两种运行档 -->
+<section class="slide" aria-label="运行档">
+  <div class="chrome"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="path"><b>ethan@spine</b>:~/modes</span><span class="idx">11</span></div>
+  <div class="slide-content">
+    <p class="kicker reveal">modes</p>
+    <h2 class="reveal">交互档 vs <span class="a">--auto</span> 档</h2>
+    <div class="grid reveal">
+      <div class="card"><span class="tag">交互档（默认）</span><h3>人拍板</h3><p>plan 排好先给你确认；review 卡死 / archive 失败时 AskUserQuestion 让你定。适合高风险或首次上手。</p></div>
+      <div class="card hot"><span class="tag">--auto 档</span><h3>fire-and-forget</h3><p>绝不打断人：例行决策交给 npc auto-decide 机械判定，一路跑到底，只在真正卡死时才停。</p></div>
+    </div>
+    <ul class="bullets reveal">
+      <li>auto 档硬规则：<span class="r">绝不调用 AskUserQuestion</span>，每个分叉用确定性默认或 auto-decide</li>
+      <li>每个 run 独立 <span class="c">worktree</span> 隔离，ff-only 合回主干——工程目录零侵入</li>
+    </ul>
+  </div>
+</section>
+
+<!-- 12 · 轨迹与自迭代 -->
+<section class="slide" aria-label="自迭代">
+  <div class="chrome"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="path"><b>ethan@spine</b>:~/telemetry</span><span class="idx">12</span></div>
+  <div class="slide-content">
+    <p class="kicker reveal">self-iteration</p>
+    <h2 class="reveal">全轨迹留存 → harness 自己迭代自己</h2>
+    <div class="term reveal">~/task_log/&lt;PROJ_KEY&gt;/<br>
+      <span class="out">├── run.json / active.json &nbsp;&nbsp;# 状态机</span><br>
+      <span class="out">├── events.jsonl &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;# 每步事件</span><br>
+      <span class="out">├── &lt;change&gt;/review-r*.json &nbsp;# 每轮 review</span><br>
+      <span class="out">└── &lt;change&gt;/summary.md &nbsp;&nbsp;&nbsp;&nbsp;# coder 过程日志</span><br>
+      ~/task_log/_telemetry/ &nbsp;&nbsp;<span class="out"># 跨 run 指标</span>
+    </div>
+    <ul class="bullets reveal">
+      <li><span class="c">/spine-analyze</span> 读跨 run 指标，提 ≤3 条改进建议——<span class="g">只读不改，人审闸门</span></li>
+      <li>复盘不靠回忆：review 轮数、fix 次数、卡点分布全部可查</li>
+    </ul>
+  </div>
+</section>
+
+<!-- 13 · 安装 -->
+<section class="slide" aria-label="安装">
+  <div class="chrome"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="path"><b>ethan@spine</b>:~/install</span><span class="idx">13</span></div>
+  <div class="slide-content">
+    <p class="kicker reveal">getting started</p>
+    <h2 class="reveal">三层配置，5 分钟上手</h2>
+    <div class="term reveal">
+      <span class="out"># 层 1 · npc CLI（机器级）</span><br>
+      <span class="prompt">uv tool install --force --from . npc &nbsp;<span class="out"># 在 agent-spine 仓库根</span></span><br><br>
+      <span class="out"># 层 2 · plugin（用户级）—— 已上内部 hub</span><br>
+      <span class="prompt">qlj-skills plugin install agent-spine</span><br><br>
+      <span class="out"># 层 3 · CLAUDE.md 片段（项目级，告诉主 session 何时用 harness）</span>
+    </div>
+    <ul class="bullets reveal">
+      <li>外部依赖：<span class="c">git</span>（必需）、<span class="c">openspec</span>（archive + 目标拆解）、<span class="c">codex</span>（默认 review 引擎，可切 claude）</li>
+      <li>plugin 与 CLI 版本保持一致（当前 <span class="badge">v1.3.0</span>）</li>
+    </ul>
+  </div>
+</section>
+
+<!-- 14 · Demo -->
+<section class="slide" aria-label="demo">
+  <div class="chrome"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="path"><b>ethan@spine</b>:~/demo</span><span class="idx">14</span></div>
+  <div class="slide-content">
+    <p class="kicker reveal">demo</p>
+    <h2 class="reveal">第一次跑：一句话到归档</h2>
+    <div class="term reveal">
+      <span class="prompt">/spine-run 给认证模块加请求限流和审计日志 --auto</span><br>
+      <span class="out">[plan] &nbsp;拆解 → add-rate-limit, add-audit-log</span><br>
+      <span class="out">[1/2] &nbsp;add-rate-limit: implement ✓ → review r1 blocking=1 → fix ✓ → review r2 <span class="g">blocking=0</span> → archive ✓</span><br>
+      <span class="out">[2/2] &nbsp;add-audit-log: &nbsp;implement ✓ → review r1 <span class="g">blocking=0</span> → archive ✓</span><br>
+      <span class="out">[done] 2 archived · 轨迹 ~/task_log/myproj/ · 指标 _telemetry/</span>
+    </div>
+    <ul class="bullets reveal">
+      <li>前提：一个带 <span class="c">openspec/</span> 的 git 工程</li>
+      <li>已有 change 直接 <span class="c">/spine-run add-rate-limit</span>；跑几个 run 后 <span class="c">/spine-analyze</span></li>
+    </ul>
+  </div>
+</section>
+
+<!-- 15 · Roadmap + 结尾 -->
+<section class="slide" aria-label="结尾">
+  <div class="chrome"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="path"><b>ethan@spine</b>:~/next</span><span class="idx">15</span></div>
+  <div class="slide-content">
+    <p class="kicker reveal">roadmap &amp; takeaway</p>
+    <h2 class="reveal">设计了、暂不做（遵不变量 3：按需加）</h2>
+    <ul class="bullets reveal">
+      <li>复跑测试硬轨：npc 真实复跑测试、不裸信 RESULT——<span class="dim">仅在真去掉人时才必需</span></li>
+      <li>风险分级人在回路：按 change 爆炸半径决定「哪里问人」</li>
+      <li>fix 阶段成本升级：早期轮 MiMo，连续卡住自动升级 Claude</li>
+    </ul>
+    <div class="term reveal">
+      <span class="prompt">qlj-skills plugin install agent-spine</span><br>
+      <span class="out">装上，在你的工程里跑一个 change 试试。</span>
+    </div>
+    <h1 class="reveal">谢谢 <span class="dim">&amp;</span> Q&amp;A<span class="cursor"></span></h1>
+  </div>
+</section>
+
+</main>
+
+<script>
+// ===== 演示控制器：键盘 / 滚轮 / 触摸 / 导航点 =====
+class Deck {
+  constructor() {
+    this.slides = [...document.querySelectorAll('.slide')];
+    this.idx = 0;
+    this.dotsWrap = document.getElementById('dots');
+    this.progress = document.getElementById('progress');
+    this.buildDots();
+    this.bind();
+    this.observe();
+  }
+  buildDots() {
+    this.slides.forEach((_, i) => {
+      const b = document.createElement('button');
+      b.setAttribute('aria-label', `第 ${i + 1} 页`);
+      b.addEventListener('click', () => this.go(i));
+      this.dotsWrap.appendChild(b);
+    });
+  }
+  go(i) {
+    this.idx = Math.max(0, Math.min(this.slides.length - 1, i));
+    this.slides[this.idx].scrollIntoView({ behavior: 'smooth' });
+  }
+  sync(i) {
+    this.idx = i;
+    this.dotsWrap.querySelectorAll('button').forEach((b, j) => b.classList.toggle('on', j === i));
+    this.progress.style.width = `${((i + 1) / this.slides.length) * 100}%`;
+  }
+  bind() {
+    document.addEventListener('keydown', (e) => {
+      if (['ArrowRight', 'ArrowDown', ' ', 'PageDown'].includes(e.key)) { e.preventDefault(); this.go(this.idx + 1); }
+      if (['ArrowLeft', 'ArrowUp', 'PageUp'].includes(e.key)) { e.preventDefault(); this.go(this.idx - 1); }
+      if (e.key === 'Home') this.go(0);
+      if (e.key === 'End') this.go(this.slides.length - 1);
+    });
+    // 触摸滑动
+    let y0 = null;
+    document.addEventListener('touchstart', (e) => { y0 = e.touches[0].clientY; }, { passive: true });
+    document.addEventListener('touchend', (e) => {
+      if (y0 === null) return;
+      const dy = y0 - e.changedTouches[0].clientY;
+      if (Math.abs(dy) > 50) this.go(this.idx + (dy > 0 ? 1 : -1));
+      y0 = null;
+    }, { passive: true });
+  }
+  observe() {
+    // 进入视口的页标记 active（触发 reveal 动画）并同步导航
+    const io = new IntersectionObserver((entries) => {
+      entries.forEach((en) => {
+        if (en.isIntersecting) {
+          en.target.classList.add('active');
+          this.sync(this.slides.indexOf(en.target));
+        }
+      });
+    }, { threshold: 0.6 });
+    this.slides.forEach((s) => io.observe(s));
+  }
+}
+new Deck();
+</script>
+</body>
+</html>

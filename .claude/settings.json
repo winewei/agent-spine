@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(* *)",
+      "Bash(npc *)",
+      "Bash(git *)",
+      "Bash(openspec *)",
+      "Bash(codex *)",
+      "Bash(claude *)",
+      "Bash(python3 *)",
+      "Bash(python *)",
+      "Bash(pytest *)",
+      "Bash(uv *)",
+      "Bash(jq *)",
+      "Bash(node *)",
+      "Bash(npm *)",
+      "Bash(pnpm *)",
+      "Bash(yarn *)",
+      "Bash(make *)",
+      "Bash(cargo *)",
+      "Bash(go *)"
+    ]
+  }
+}
