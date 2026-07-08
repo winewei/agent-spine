@@ -149,20 +149,22 @@ wheels = [
 name = "npc"
 version = "1.6.0"
 source = { editable = "." }
+dependencies = [
+    { name = "jsonschema" },
+]
 
 [package.dev-dependencies]
 dev = [
-    { name = "jsonschema" },
     { name = "pytest" },
     { name = "pytest-cov" },
     { name = "pyyaml" },
 ]
 
 [package.metadata]
+requires-dist = [{ name = "jsonschema", specifier = ">=4.0" }]
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "jsonschema", specifier = ">=4.0" },
     { name = "pytest", specifier = ">=8.0" },
     { name = "pytest-cov", specifier = ">=5.0" },
     { name = "pyyaml", specifier = ">=6.0.3" },

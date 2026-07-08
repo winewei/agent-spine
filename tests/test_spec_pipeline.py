@@ -346,6 +346,66 @@ def test_spec_review_run_writes_round_n_without_overwriting_round_0(env_setup, f
     assert (base / "round-1.spec-review.json").is_file()
 
 
+def test_spec_review_run_exposes_configured_max_rounds_default(env_setup, fake_repo, monkeypatch):
+    """review round 3 fix (F3)：`/spine-spec` 的 fix 循环上限判定必须能从
+    `npc spec review run` 的 stdout 直接读到 `[spec_review].max_rounds`——
+    `npc verify routing` 从不 emit 该字段，不能作为真相源。默认配置（无
+    `.npc/config.toml`）下应回落到 config.py 的默认值 3。
+    """
+    _make_change_dir(fake_repo, "add-foo")
+    p = _with_repo(env_setup, fake_repo)
+    monkeypatch.setattr(_sp, "_find_openspec_bin", lambda override=None: "/fake/openspec")
+    monkeypatch.setattr(_sp, "_spec_engine_exec", _stub_engine_writes({"verdict": "approve", "findings": []}))
+
+    result = _sp.spec_review_run(
+        p, "add-foo", 0,
+        validate_runner=_fake_validate_runner(returncode=0),
+        gate_runner=subprocess.run,
+    )
+    assert result["ok"] is True
+    assert result["max_rounds"] == 3
+
+
+def test_spec_review_run_exposes_configured_max_rounds_custom(env_setup, fake_repo, monkeypatch):
+    """同上，但 `.npc/config.toml` 显式配置了非默认 `max_rounds`——stdout 必须
+    原样透传该值，不得被硬编码默认值覆盖（回归 F3 具体给出的 `max_rounds = 0`
+    「只审不修」场景）。
+    """
+    _make_change_dir(fake_repo, "add-foo")
+    npc_dir = fake_repo / ".npc"
+    npc_dir.mkdir()
+    (npc_dir / "config.toml").write_text("[spec_review]\nmax_rounds = 0\n", encoding="utf-8")
+    p = _with_repo(env_setup, fake_repo)
+    monkeypatch.setattr(_sp, "_find_openspec_bin", lambda override=None: "/fake/openspec")
+    monkeypatch.setattr(_sp, "_spec_engine_exec", _stub_engine_writes({"verdict": "approve", "findings": []}))
+
+    result = _sp.spec_review_run(
+        p, "add-foo", 0,
+        config_path=npc_dir / "config.toml",
+        validate_runner=_fake_validate_runner(returncode=0),
+        gate_runner=subprocess.run,
+    )
+    assert result["ok"] is True
+    assert result["max_rounds"] == 0
+
+
+def test_spine_spec_command_reads_max_rounds_from_review_stdout_not_verify_routing():
+    """command-contract 回归：`plugins/agent-spine/commands/spine-spec.md` 的
+    fix 循环上限判定必须从 `$REVIEW`（`npc spec review run` 的 stdout）取
+    `max_rounds`，禁止再出现 `npc verify routing` 派生 `MAX_ROUNDS` 的写法——
+    后者只 emit 路由不变量字段，从不含 `[spec_review].max_rounds`（F3 根因）。
+    """
+    spine_spec_md = (
+        Path(__file__).resolve().parent.parent
+        / "plugins" / "agent-spine" / "commands" / "spine-spec.md"
+    )
+    src = spine_spec_md.read_text(encoding="utf-8")
+    assert "MAX_ROUNDS=$(printf '%s' \"$REVIEW\" | jq -r '.max_rounds" in src
+    # 允许散文/注释里提及 `npc verify routing`（解释为什么不用它）；
+    # 禁止的是真正把它当 MAX_ROUNDS 数据源的调用写法。
+    assert "MAX_ROUNDS=$(npc verify routing" not in src
+
+
 # ============================================================
 # 4. 固定轮次上限的 fix 循环（tasks 4.1–4.4）
 # ============================================================

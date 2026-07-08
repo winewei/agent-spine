@@ -867,6 +867,12 @@ def spec_review_run(
         "gate_skipped": gate_result["skipped"],
         "gate_rule_hits": gate_result["rule_hits"],
         "pointer": {"spec_review_json": str(review_path)},
+        # F3 修复：`/spine-spec` 的 fix 循环上限判定需要一个确定性的、
+        # 已经在被调用的命令里就能拿到的 [spec_review].max_rounds 真相源——
+        # 而不是从 `npc verify routing`（只 emit 路由字段，从不含 max_rounds）
+        # 猜一个默认值。此处把已加载的 config 值原样透传，round_n>=1 的每次
+        # `npc spec review run` 调用都会带上它，供命令层直接读取。
+        "max_rounds": spec_review_cfg.max_rounds,
     }
 
 

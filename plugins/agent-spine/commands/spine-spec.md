@@ -101,7 +101,11 @@ while true; do
   fi
 
   # blocking > 0：是否已达 fix 次数上限（[spec_review].max_rounds，默认 3）？
-  MAX_ROUNDS=$(npc verify routing 2>/dev/null | jq -r '.max_rounds // 3')  # 或直接读 .npc/config.toml
+  # 注意：MAX_ROUNDS 必须从本轮 $REVIEW 里读——`npc verify routing` 只 emit 路由字段
+  # （ok/coder_backend/review_engine/violations），从不含 [spec_review].max_rounds；
+  # `npc spec review run` 已经加载了同一份 config，success 分支会把 max_rounds 原样
+  # 透传出来，这是唯一确定性真相源。
+  MAX_ROUNDS=$(printf '%s' "$REVIEW" | jq -r '.max_rounds // 3')
   if [ "$ROUND" -ge "$MAX_ROUNDS" ]; then
     # status=needs-user-decision：达上限仍有 blocking，交人，绝不自动 archive。
     break
