@@ -27,28 +27,35 @@ command -v openspec >/dev/null
 
 任一缺失，一句话告诉用户缺什么、怎么装，**不要继续**。
 
-## Step 0.5 — 判断输入类型，确定 `CHANGE_ID` 与 `GOAL`
-
-`/spine-spec` 后的参数只有两种合法形态；由你（主 session）判断走哪条分支——判断依据是参数字面量是否已经是 `openspec/changes/` 下存在的 change-id，而不是猜测语义：
-
-- **分支 A：一句话自由目标**（如 `给认证模块加限流`）——参数不是一个已存在的 change-id。
-  - `GOAL` = 用户输入的原文，**一字不改、不摘要**（下游要原文传给 `spine-spec-writer`，语义丢失在这一步发生，不能靠后面补）。
-  - 由你自己从 `GOAL` 的语义提炼一个简短、描述性的 kebab-case `CHANGE_ID`（如 `auth-rate-limit`）；提炼时不得引入本次评审的 rubric/category 措辞（不变量 1）。
-  - 若 `openspec/changes/$CHANGE_ID/` 不存在：`npc plan new-change --change "$CHANGE_ID" --description "$GOAL"` 建脚手架——`--description` 会把 `GOAL` 原文落盘到脚手架 `README.md`，作为磁盘层面的第二道留痕（与 Step 2 传给 writer prompt 的路径互为冗余，不互相替代）。
-  - 若目录已存在（同名 change 已有人起过头）：不重新建脚手架，`GOAL` 仍保留，进入 Step 1。
-- **分支 B：已存在 change-id 需要补全/修复**——参数本身就是 `openspec/changes/<id>/` 已存在的目录名。
-  - `CHANGE_ID` = 该参数原文。
-  - `GOAL` 留空（不强行编造目标文本；已有草稿本身就是上下文，`spine-spec-writer` 会读 `openspec/changes/<id>/` 下现有文件）。
-
 ## Step 1 — 初始化运行环境
 
 ```bash
 INIT=$(npc init)
+WORKTREE_ROOT=$(printf '%s' "$INIT" | jq -r '.worktree_root // empty')
 ```
 
-按 `INIT` 解析 `run_ts` / `worktree_root`（若有）；后续所有 `npc spec ...` 调用与 `spine-spec-writer` spawn 均在该目录下执行。
+按 `INIT` 解析 `run_ts` / `worktree_root`（若有）。**`npc init` 默认从 HEAD 新建一个独立 worktree**（`--no-worktree` 才就地执行）——若 `WORKTREE_ROOT` 非空，**立即 `cd "$WORKTREE_ROOT"`**：
 
-## Step 2 — spec write（round 0 前置）
+```bash
+if [ -n "$WORKTREE_ROOT" ]; then cd "$WORKTREE_ROOT"; fi
+```
+
+本命令**后续所有步骤**（Step 2 判断 change-id 是否已存在 / `npc plan new-change` 建脚手架 / `npc spec write|review|fix run` / `spine-spec-writer` spawn）**必须**在此目录（`WORKTREE_ROOT`，若为空则原 checkout）下进行，不得散落在两处——否则脚手架文件会落在原 checkout 而未提交，`npc spec ...` 系列命令实际执行的 worktree 里看不到它们（round 4 finding F2：free-goal 分支曾在 `npc init` 之前就跑 `npc plan new-change`，脚手架建在了错误的 repo root）。
+
+## Step 2 — 判断输入类型，确定 `CHANGE_ID` 与 `GOAL`
+
+`/spine-spec` 后的参数只有两种合法形态；由你（主 session）判断走哪条分支——判断依据是参数字面量是否已经是（当前 cwd 下）`openspec/changes/` 下存在的 change-id，而不是猜测语义：
+
+- **分支 A：一句话自由目标**（如 `给认证模块加限流`）——参数不是一个已存在的 change-id。
+  - `GOAL` = 用户输入的原文，**一字不改、不摘要**（下游要原文传给 `spine-spec-writer`，语义丢失在这一步发生，不能靠后面补）。
+  - 由你自己从 `GOAL` 的语义提炼一个简短、描述性的 kebab-case `CHANGE_ID`（如 `auth-rate-limit`）；提炼时不得引入本次评审的 rubric/category 措辞（不变量 1）。
+  - 若 `openspec/changes/$CHANGE_ID/` 不存在：在当前 cwd（`WORKTREE_ROOT`）下 `npc plan new-change --change "$CHANGE_ID" --description "$GOAL"` 建脚手架——`--description` 会把 `GOAL` 原文落盘到脚手架 `README.md`，作为磁盘层面的第二道留痕（与 Step 3 传给 writer prompt 的路径互为冗余，不互相替代）。
+  - 若目录已存在（同名 change 已有人起过头）：不重新建脚手架，`GOAL` 仍保留，进入 Step 3。
+- **分支 B：已存在 change-id 需要补全/修复**——参数本身就是（当前 cwd 下）`openspec/changes/<id>/` 已存在的目录名。
+  - `CHANGE_ID` = 该参数原文。
+  - `GOAL` 留空（不强行编造目标文本；已有草稿本身就是上下文，`spine-spec-writer` 会读 `openspec/changes/<id>/` 下现有文件）。
+
+## Step 3 — spec write（round 0 前置）
 
 ```bash
 if [ -n "$GOAL" ]; then
@@ -80,13 +87,13 @@ npc spec write record --change "$CHANGE_ID" --result "$RESULT_LINE"
 - `out_of_scope_changes` / `unexpected_commit` → 这是 `spine-spec-writer` 违反了职责边界，停止并把违规详情报告用户（不要自动重试掩盖）。
 - 其它（`result-missing-keys` 等）→ 视情况重试一次或停止询问用户。
 
-## Step 3 — spec review + fix 循环（固定轮次上限）
+## Step 4 — spec review + fix 循环（固定轮次上限）
 
 ```bash
 ROUND=0
 while true; do
   REVIEW=$(npc spec review run --change "$CHANGE_ID" --round "$ROUND")
-  BLOCKING=$(printf '%s' "$REVIEW" | jq -r '.blocking // 0')
+  OK=$(printf '%s' "$REVIEW" | jq -r '.ok')
   GATE_FAILED=$(printf '%s' "$REVIEW" | jq -r '.gate_failed // empty')
 
   if [ -n "$GATE_FAILED" ]; then
@@ -94,6 +101,19 @@ while true; do
     # 把详情报告用户；这通常意味着 spec write/fix 产物本身有硬伤。
     break
   fi
+
+  if [ "$OK" != "true" ]; then
+    # ok=false 且 gate_failed 为空：LLM 语义评审本身没有真正跑完——
+    # dependency_missing（portable_timeout/codex/claude 二进制缺失）、
+    # <engine>-exec-failed（引擎超时/非零退出/产物缺失）、
+    # invalid_spec_review_schema（引擎输出不符 schema）均属此类。
+    # 此时 `.blocking` 键必然缺失，绝不能把它当 0 处理进入 clean 分支
+    # （round 4 finding F1：曾经只读 `.blocking // 0`，非门失败会被误判为 clean）。
+    # 停止，把 `.error`/`.detail` 原样报告用户——这是配置/环境问题，不是可自动重试掩盖的。
+    break
+  fi
+
+  BLOCKING=$(printf '%s' "$REVIEW" | jq -r '.blocking // 0')
 
   if [ "$BLOCKING" = "0" ]; then
     # status=clean：本 change 通过独立语义评审。
@@ -114,16 +134,23 @@ while true; do
   NEXT_ROUND=$((ROUND + 1))
   FIX=$(npc spec fix run --change "$CHANGE_ID" --round "$NEXT_ROUND")
   # .ok == false 且含 prev_spec_review_missing → 不应发生（本轮刚跑完 review），若发生则停止排查
-  # 否则同 Step 2：spawn spine-spec-writer（spawn_prompt/prompt_file），record 后进入下一轮
+  # 否则同 Step 3：spawn spine-spec-writer（spawn_prompt/prompt_file），record 后进入下一轮
   ROUND=$NEXT_ROUND
 done
 ```
 
 **关键约束（不可违反）**：
+- **`.ok` 必须在 `.blocking` 之前判定**——`.ok == false` 时（无论是否带 `gate_failed`）都不得读 `.blocking` 做分支决策；只有 `.ok == true` 的成功评审结果才谈得上 `.blocking` 是否为 0。
 - **不复用 code review 的 stale 检测**——spec 的 blocking 计数可能在改写后反弹，反弹本身不代表卡死，只有触达 `max_rounds` 才终止。
 - 达到 `max_rounds` 仍有 blocking → 报告用户 `needs-user-decision`，**绝不自动 archive**。
 - fix 轮的 prompt 只含**上一轮已签发**的 blocking findings；你不需要、也不应该向 `spine-spec-writer` 转述本轮 review 的 rubric 或 category 枚举。
 
-## Step 4 — 收尾
+## Step 5 — 收尾
 
-跑完（`clean` 或 `needs-user-decision`）后，把最终状态、`openspec/changes/<id>/` 路径、以及（若 `needs-user-decision`）尚存的 blocking findings 摘要报告给用户。**不要**自动继续跑 `/spine-run <change-id>`——由用户显式决定何时开始实施。
+跑完后按最终状态分三种情况报告给用户，并附上 `openspec/changes/<id>/` 路径：
+
+- **`clean`**（`.ok == true` 且 `.blocking == 0`）：通过独立语义评审，可交给用户决定何时 `/spine-run <change-id>`。
+- **`needs-user-decision`**（达 `max_rounds` 仍有 blocking）：附上尚存的 blocking findings 摘要。
+- **评审未完成**（`.ok == false` 且无 `gate_failed`，或 `gate_failed` 非空）：附上 `.error`/`.detail`/`.gate_failed`，说明这是环境/配置问题或 artifact 结构性硬伤，而非语义评审给出的结论——不要暗示 change 已"通过"或"未通过"评审。
+
+**不要**自动继续跑 `/spine-run <change-id>`——由用户显式决定何时开始实施。

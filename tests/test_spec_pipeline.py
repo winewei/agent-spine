@@ -406,6 +406,57 @@ def test_spine_spec_command_reads_max_rounds_from_review_stdout_not_verify_routi
     assert "MAX_ROUNDS=$(npc verify routing" not in src
 
 
+def test_spine_spec_command_checks_ok_before_treating_review_as_clean():
+    """command-contract 回归（round 4 F1）：`spine-spec.md` 的 review+fix 循环
+    必须先判定 `.ok`，非门失败的 `ok:false`（``dependency_missing`` /
+    ``<engine>-exec-failed`` / ``invalid_spec_review_schema`` 等，此时
+    `gate_failed` 为空、`blocking` 键缺失）绝不能被 `jq '.blocking // 0'`
+    的 `// 0` 缺省值悄悄判成 `BLOCKING=0` 进入 clean 分支。
+    """
+    spine_spec_md = (
+        Path(__file__).resolve().parent.parent
+        / "plugins" / "agent-spine" / "commands" / "spine-spec.md"
+    )
+    src = spine_spec_md.read_text(encoding="utf-8")
+
+    assert "OK=$(printf '%s' \"$REVIEW\" | jq -r '.ok')" in src
+    assert 'if [ "$OK" != "true" ]' in src
+
+    # 顺序断言：`.ok` 判定必须先于 `.blocking` 求值（同一轮 while 循环体内）。
+    while_body_start = src.index("while true; do")
+    ok_check_pos = src.index('if [ "$OK" != "true" ]', while_body_start)
+    blocking_read_pos = src.index(
+        "BLOCKING=$(printf '%s' \"$REVIEW\" | jq -r '.blocking", while_body_start
+    )
+    assert ok_check_pos < blocking_read_pos, (
+        "`.ok` 判定必须先于 `.blocking` 求值，否则非门失败的 ok:false 会被 "
+        "`// 0` 缺省值悄悄当成 clean（F1 根因复发）"
+    )
+
+
+def test_spine_spec_command_inits_worktree_before_scaffolding_change():
+    """command-contract 回归（round 4 F2）：`spine-spec.md` 必须先 `npc init`
+    拿到 `worktree_root` 并 `cd` 进去，之后才能判断 change-id 是否存在 /
+    跑 `npc plan new-change` 建脚手架——否则自由目标分支会在原 checkout 建
+    脚手架，而后续 `npc spec ...` 与 `spine-spec-writer` 实际执行的 worktree
+    里看不到这些文件。
+    """
+    spine_spec_md = (
+        Path(__file__).resolve().parent.parent
+        / "plugins" / "agent-spine" / "commands" / "spine-spec.md"
+    )
+    src = spine_spec_md.read_text(encoding="utf-8")
+
+    init_pos = src.index("INIT=$(npc init)")
+    cd_worktree_pos = src.index('cd "$WORKTREE_ROOT"')
+    new_change_pos = src.index("npc plan new-change")
+
+    assert init_pos < cd_worktree_pos < new_change_pos, (
+        "`npc init` → cd 进 worktree_root → `npc plan new-change` 建脚手架 "
+        "三者必须严格按此顺序出现，否则脚手架会建在错误的 repo root（F2 根因复发）"
+    )
+
+
 # ============================================================
 # 4. 固定轮次上限的 fix 循环（tasks 4.1–4.4）
 # ============================================================
