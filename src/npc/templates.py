@@ -257,14 +257,29 @@ def render_spec_writer(
     change_id: str,
     base: str,
     repo_root: str,
+    goal: str | None = None,
 ) -> str:
     """渲染 spec writer 的 write 轮 prompt（对应 change ``spine-spec-writer``）。
 
     硬边界（不变量 1）：本函数 MUST NOT 引用 ``SPEC_REVIEW_SCHEMA`` 的
     category 枚举、任何 spec-review 的 rubric 细则，或任何 ``round-*.spec-review.json``
     的 findings 原文——write 轮生成侧不得预知本轮评判标准。
+
+    ``goal``：来自 ``/spine-spec`` 命令行参数的用户一句话原始目标，原文透传，
+    不做任何改写/摘要。为 ``None``（或空串）时表示调用方走的是"已存在
+    change-id 补全/修复"分支，没有自由目标文本可传，此时不渲染该段落
+    （不得伪造/编造目标文本）。
     """
     summary_path = f"{base}/spec-write.summary.md"
+    goal_section = (
+        f"""
+## 用户原始目标（原文保留，作为本次 change 的语义锚点；不是评审标准）
+
+{goal}
+"""
+        if goal
+        else ""
+    )
     return f"""你是 OpenSpec change 撰写专家。请为 change `{change_id}` 撰写 / 完善 artifact（proposal.md / design.md / tasks.md / specs/**/spec.md）。
 
 ## Runtime Variables（npc 已注入；prompt 内引用变量名）
@@ -273,7 +288,7 @@ def render_spec_writer(
 - LOG_BASE={base}
 - CHANGE_ID={change_id}
 - SUMMARY_PATH={summary_path}
-
+{goal_section}
 ## 必读输入（按需自取）
 
 - openspec/changes/{change_id}/ 下已存在的任何草稿（如有）

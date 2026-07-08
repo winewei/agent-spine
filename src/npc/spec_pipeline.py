@@ -301,7 +301,16 @@ def _scope_guard_violation(
 # ============================================================
 
 
-def spec_write_run(p: _paths.Paths, change_id: str, *, config_path: Path | None = None) -> dict:
+def spec_write_run(
+    p: _paths.Paths,
+    change_id: str,
+    *,
+    config_path: Path | None = None,
+    goal: str | None = None,
+) -> dict:
+    """``goal``：来自 ``/spine-spec`` 的用户一句话原始目标（原文透传给
+    ``render_spec_writer``）。为 ``None``/空串时不渲染目标段落（已存在
+    change-id 补全/修复分支）。"""
     try:
         cfg = load_config(p.repo_root, override_path=config_path)
     except ConfigError as e:
@@ -317,7 +326,7 @@ def spec_write_run(p: _paths.Paths, change_id: str, *, config_path: Path | None 
 
     prompt_file = base / "spec-write.prompt.md"
     text = templates.render_spec_writer(
-        change_id=change_id, base=str(base), repo_root=str(p.repo_root)
+        change_id=change_id, base=str(base), repo_root=str(p.repo_root), goal=goal
     )
     prompt_file.write_text(text, encoding="utf-8")
 
@@ -918,6 +927,7 @@ def cli_spec_write_run(args: argparse.Namespace) -> None:
             p,
             args.change_id,
             config_path=Path(args.config) if getattr(args, "config", None) else None,
+            goal=getattr(args, "goal", None),
         )
     except ValueError as e:
         _io.emit_error("invalid_args", str(e), exit_code=2)

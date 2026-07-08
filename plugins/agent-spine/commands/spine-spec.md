@@ -27,7 +27,18 @@ command -v openspec >/dev/null
 
 任一缺失，一句话告诉用户缺什么、怎么装，**不要继续**。
 
-若目标是"已存在的 change-id 需要补全/修复"而非"一句话自由目标"，先确认 `openspec/changes/<id>/` 是否已存在；不存在则先跑 `npc plan new-change --change <id>` 建脚手架。
+## Step 0.5 — 判断输入类型，确定 `CHANGE_ID` 与 `GOAL`
+
+`/spine-spec` 后的参数只有两种合法形态；由你（主 session）判断走哪条分支——判断依据是参数字面量是否已经是 `openspec/changes/` 下存在的 change-id，而不是猜测语义：
+
+- **分支 A：一句话自由目标**（如 `给认证模块加限流`）——参数不是一个已存在的 change-id。
+  - `GOAL` = 用户输入的原文，**一字不改、不摘要**（下游要原文传给 `spine-spec-writer`，语义丢失在这一步发生，不能靠后面补）。
+  - 由你自己从 `GOAL` 的语义提炼一个简短、描述性的 kebab-case `CHANGE_ID`（如 `auth-rate-limit`）；提炼时不得引入本次评审的 rubric/category 措辞（不变量 1）。
+  - 若 `openspec/changes/$CHANGE_ID/` 不存在：`npc plan new-change --change "$CHANGE_ID" --description "$GOAL"` 建脚手架——`--description` 会把 `GOAL` 原文落盘到脚手架 `README.md`，作为磁盘层面的第二道留痕（与 Step 2 传给 writer prompt 的路径互为冗余，不互相替代）。
+  - 若目录已存在（同名 change 已有人起过头）：不重新建脚手架，`GOAL` 仍保留，进入 Step 1。
+- **分支 B：已存在 change-id 需要补全/修复**——参数本身就是 `openspec/changes/<id>/` 已存在的目录名。
+  - `CHANGE_ID` = 该参数原文。
+  - `GOAL` 留空（不强行编造目标文本；已有草稿本身就是上下文，`spine-spec-writer` 会读 `openspec/changes/<id>/` 下现有文件）。
 
 ## Step 1 — 初始化运行环境
 
@@ -40,8 +51,14 @@ INIT=$(npc init)
 ## Step 2 — spec write（round 0 前置）
 
 ```bash
-WRITE=$(npc spec write run --change "$CHANGE_ID")
+if [ -n "$GOAL" ]; then
+  WRITE=$(npc spec write run --change "$CHANGE_ID" --goal "$GOAL")
+else
+  WRITE=$(npc spec write run --change "$CHANGE_ID")
+fi
 ```
+
+`--goal`（分支 A 才传）把 `GOAL` 原文透传进 `spec-write.prompt.md`，使 `spine-spec-writer` 在撰写 artifact 时能看到用户的原始一句话目标，而不仅仅是一个 `CHANGE_ID` 字符串。
 
 - `.ok == false` 且含 `spec_routing_violation` → 停止，把 `violations` 里的 `rule`/`detail` 告诉用户（配置问题，不是你能决定的）。
 - `.ok == true`：`.deferred == true` 恒成立（v1 只支持 in-session）。取 `.spawn_prompt` 与 `.prompt_file`，用 Claude 的 `Agent` 工具以 `spine-spec-writer` 身份 spawn 一次，`prompt` 字段传 `.spawn_prompt`。

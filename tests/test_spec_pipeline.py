@@ -474,6 +474,53 @@ def test_spec_write_prompt_does_not_leak_rubric(env_setup, fake_repo):
     assert "spec-review.json" not in text
 
 
+def test_spec_write_prompt_contains_user_goal_when_provided(env_setup, fake_repo):
+    """round-2 F1: 一句话自由目标必须原文透传进 spec-write.prompt.md，不能只有 CHANGE_ID。"""
+    _make_change_dir(fake_repo, "add-foo")
+    p = _with_repo(env_setup, fake_repo)
+    goal = "给认证模块加限流，防止暴力破解"
+    result = _sp.spec_write_run(p, "add-foo", goal=goal)
+    text = Path(result["prompt_file"]).read_text(encoding="utf-8")
+    assert goal in text
+    # 目标段落与不变量 1 正交：仍不得出现 review rubric/category 枚举或 findings 原文。
+    assert "scope-creep" not in text
+    assert "implementation-leak" not in text
+    assert "spec-review.json" not in text
+
+
+def test_spec_write_prompt_omits_goal_section_when_absent(env_setup, fake_repo):
+    """已存在 change-id 补全/修复分支：不传 goal 时不得渲染目标段落或伪造目标文本。"""
+    _make_change_dir(fake_repo, "add-foo")
+    p = _with_repo(env_setup, fake_repo)
+    result = _sp.spec_write_run(p, "add-foo")
+    text = Path(result["prompt_file"]).read_text(encoding="utf-8")
+    assert "用户原始目标" not in text
+
+
+def test_render_spec_writer_goal_section_placed_before_required_inputs():
+    """目标段落是撰写侧的语义锚点，必须在"必读输入"之前出现，且原文一字不改。"""
+    from npc import templates as _templates
+
+    goal = "把首页加载时间降到 1 秒以内 (P95)"
+    text = _templates.render_spec_writer(
+        change_id="perf-home", base="/tmp/base", repo_root="/tmp/repo", goal=goal
+    )
+    assert goal in text
+    assert text.index(goal) < text.index("必读输入")
+
+
+def test_cli_spec_write_run_threads_goal_flag(env_setup, make_args, fake_repo, capsys):
+    """CLI 层：`npc spec write run --goal` 必须真的把 goal 传到 spec_write_run/render 层。"""
+    _make_change_dir(fake_repo, "add-foo")
+    _with_repo(env_setup, fake_repo)
+    args = make_args(change_id="add-foo", goal="一句话自由目标 GOAL_MARKER_XYZ", config=None)
+    _sp.cli_spec_write_run(args)
+    out = json.loads(capsys.readouterr().out.strip())
+    assert out["ok"] is True
+    prompt_text = Path(out["prompt_file"]).read_text(encoding="utf-8")
+    assert "GOAL_MARKER_XYZ" in prompt_text
+
+
 def test_spec_fix_prompt_contains_prev_round_finding_detail(env_setup, fake_repo):
     _make_change_dir(fake_repo, "add-foo")
     p = _with_repo(env_setup, fake_repo)

@@ -965,11 +965,13 @@ npc telemetry hotspots [--top N=5] [--since DUR]
 | `scripts/check_spec.py --change <id>`（仓库本地资产，非 `npc` 子命令） | 静态语义 lint（四条 warning-only 规则），由 `[spec_review] gate_cmd` 调用 | 作为 gate_cmd 被本节的 `npc spec review run` 调用，但 npc 本身不持有其规则语义 |
 | `npc spec write\|fix\|review`（本节） | 一句话目标 → openspec change artifact → 强制独立语义评审 + 固定轮次 fix 循环 | 是 |
 
-### `npc spec write run --change <id> [--config PATH]`
+### `npc spec write run --change <id> [--goal "<原始一句话目标>"] [--config PATH]`
 
 渲染 write 轮 prompt（`<base>/spec-write.prompt.md`）。渲染前先调 `check_routing(cfg)`；`spec_` 前缀 violation 立即以 `spec_routing_violation` 拒绝，**不渲染任何 prompt 文件**。恒返回 `.deferred == true`（v1 只支持 in-session，由编排者 spawn `spine-spec-writer` subagent）。
 
-prompt 正文 **MUST NOT** 含任何 `SPEC_REVIEW_SCHEMA` 的 `category` 枚举、评分 rubric 细则或任何 `round-*.spec-review.json` 的 findings 原文——write 轮生成侧不得预知本轮评判标准（不变量 1，时点边界）。
+`--goal`：`/spine-spec` 收到的用户一句话自由目标原文（"给认证模块加限流"这一类）。传入时原文透传进 prompt 的「用户原始目标」段落，作为 `spine-spec-writer` 撰写 artifact 的语义锚点；省略（已存在 change-id 补全/修复分支）时不渲染该段落，不伪造目标文本。这是「一句话目标 → openspec change artifact」这条能力主张实际落地的必经路径——`CHANGE_ID` 本身只是一个标识符，不携带语义。
+
+prompt 正文 **MUST NOT** 含任何 `SPEC_REVIEW_SCHEMA` 的 `category` 枚举、评分 rubric 细则或任何 `round-*.spec-review.json` 的 findings 原文——write 轮生成侧不得预知本轮评判标准（不变量 1，时点边界）。`--goal` 的透传与此不变量正交：目标文本来自用户输入，不是 review 产物。
 
 **stdout（成功）**：
 

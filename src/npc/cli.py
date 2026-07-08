@@ -419,6 +419,14 @@ def _build_parser() -> argparse.ArgumentParser:
         "run", help="渲染 spec write prompt，恒 in-session（deferred=true）"
     )
     p_sw_run.add_argument("--change", dest="change_id", required=True)
+    p_sw_run.add_argument(
+        "--goal",
+        default=None,
+        help=(
+            "用户一句话原始目标原文（来自 /spine-spec 自由目标参数），原样嵌入 "
+            "write prompt 作为语义锚点；已存在 change-id 补全/修复场景可省略"
+        ),
+    )
     p_sw_run.add_argument("--config", default=None, help="显式 TOML 配置路径")
     p_sw_run.set_defaults(
         handler=_make_handler("spec_pipeline", "cli_spec_write_run"), _cmd_path="spec write run"
