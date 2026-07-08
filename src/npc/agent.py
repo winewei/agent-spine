@@ -377,12 +377,54 @@ def _resolve_phase_entry(state: dict, seq: int, phase: str) -> tuple[dict, dict]
     return entry, phase_dict
 
 
+def _spec_timeout_state_path(p: _paths.Paths, change_id: str) -> Path:
+    """spec_write/spec_fix 等未纳入 run progress 的 phase 的超时重试计数落盘路径。
+
+    spec 生成/评审流水线与 STATE_JSON.progress 解耦（change 先于被纳入任何
+    run 的 progress 数组，见 change ``spine-spec-writer`` design.md D5c）；
+    但超时预算 MUST 复用既有的渐进退避算法，故独立于 STATE_JSON 之外单开
+    一份按 change_id 分片的小文件，语义与 progress[].phases[phase] 等价。
+    """
+    return p.run_dir / f"spec-{change_id}" / "timeout_state.json"
+
+
+def _read_spec_timeout_retries(path: Path, phase: str) -> int:
+    if not path.is_file():
+        return 0
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return 0
+    phase_dict = (data or {}).get(phase) or {}
+    return int(phase_dict.get("timeout_retries") or 0)
+
+
+def _bump_spec_timeout_retries(path: Path, phase: str) -> int:
+    data: dict = {}
+    if path.is_file():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8")) or {}
+        except (OSError, json.JSONDecodeError):
+            data = {}
+    phase_dict = data.setdefault(phase, {})
+    retries = int(phase_dict.get("timeout_retries") or 0) + 1
+    phase_dict["timeout_retries"] = retries
+    phase_dict["timeout_last_ts"] = _io.now_iso()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return retries
+
+
 def timeout_budget(args: argparse.Namespace) -> None:
-    """``npc agent timeout-budget --seq N --phase X [--base N --mult F --max N]``。
+    """``npc agent timeout-budget (--seq N | --change ID) --phase X [--base N --mult F --max N]``。
 
     纯查询；不修改 state。返回 ``{timeout_sec, retries, exhausted, max_reached}``。
     主 session 在每次 Agent(...) 调用前先取一次预算，超时则调 ``record-timeout``，
     再下次 Agent 调用时再取——直到 ``exhausted=true`` 则放弃当前 change。
+
+    ``--seq``：既有 implement/fix 路径，检索 STATE_JSON.progress。
+    ``--change``：spec_write/spec_fix 路径，检索独立的按 change 分片文件
+    （见 :func:`_spec_timeout_state_path`）——两者互斥，``--seq`` 优先。
     """
     try:
         p = _paths.load_paths(args)
@@ -390,19 +432,29 @@ def timeout_budget(args: argparse.Namespace) -> None:
         _io.emit_error("env_missing", str(e), exit_code=3)
         return
 
-    try:
-        state = read_state(p.state_json)
-    except FileNotFoundError as e:
-        _io.emit_error("state_not_found", str(e), exit_code=3)
+    seq = getattr(args, "seq", None)
+    change_id = getattr(args, "change_id", None)
+
+    if seq is not None:
+        try:
+            state = read_state(p.state_json)
+        except FileNotFoundError as e:
+            _io.emit_error("state_not_found", str(e), exit_code=3)
+            return
+        try:
+            _, phase_dict = _resolve_phase_entry(state, seq, args.phase)
+        except ValueError as e:
+            _io.emit_error("seq_out_of_range", str(e), exit_code=1)
+            return
+        retries = int(phase_dict.get("timeout_retries") or 0)
+    elif change_id:
+        retries = _read_spec_timeout_retries(
+            _spec_timeout_state_path(p, change_id), args.phase
+        )
+    else:
+        _io.emit_error("missing_args", "必须提供 --seq 或 --change 其一", exit_code=2)
         return
 
-    try:
-        _, phase_dict = _resolve_phase_entry(state, args.seq, args.phase)
-    except ValueError as e:
-        _io.emit_error("seq_out_of_range", str(e), exit_code=1)
-        return
-
-    retries = int(phase_dict.get("timeout_retries") or 0)
     base = int(args.base) if args.base is not None else TIMEOUT_BASE_SEC_DEFAULT
     mult = float(args.mult) if args.mult is not None else TIMEOUT_MULTIPLIER_DEFAULT
     max_sec = int(args.max_sec) if args.max_sec is not None else TIMEOUT_MAX_SEC_DEFAULT
@@ -411,7 +463,8 @@ def timeout_budget(args: argparse.Namespace) -> None:
     _io.emit(
         {
             "ok": True,
-            "seq": args.seq,
+            "seq": seq,
+            "change": change_id,
             "phase": args.phase,
             "timeout_sec": timeout_sec,
             "retries": retries,
@@ -426,9 +479,9 @@ def timeout_budget(args: argparse.Namespace) -> None:
 
 
 def record_timeout(args: argparse.Namespace) -> None:
-    """``npc agent record-timeout --seq N --phase X``。
+    """``npc agent record-timeout (--seq N | --change ID) --phase X``。
 
-    递增 ``phases[X].timeout_retries`` 并写 ``timeout_last_ts``。返回新的预算。
+    递增该 phase 的 timeout_retries 并写 timeout_last_ts。返回新的预算。
     """
     try:
         p = _paths.load_paths(args)
@@ -439,38 +492,46 @@ def record_timeout(args: argparse.Namespace) -> None:
     base = int(args.base) if args.base is not None else TIMEOUT_BASE_SEC_DEFAULT
     mult = float(args.mult) if args.mult is not None else TIMEOUT_MULTIPLIER_DEFAULT
     max_sec = int(args.max_sec) if args.max_sec is not None else TIMEOUT_MAX_SEC_DEFAULT
-    seq = args.seq
+    seq = getattr(args, "seq", None)
+    change_id = getattr(args, "change_id", None)
     phase = args.phase
 
-    captured: dict = {}
+    if seq is not None:
+        captured: dict = {}
 
-    def mutate(state: dict) -> None:
-        progress = state.get("progress") or []
-        if not (1 <= seq <= len(progress)):
-            raise ValueError(f"seq={seq} 超出 progress 数组长度（total={len(progress)}）")
-        entry = progress[seq - 1]
-        phases = entry.setdefault("phases", {})
-        phase_dict = phases.setdefault(phase, {})
-        retries = int(phase_dict.get("timeout_retries") or 0) + 1
-        phase_dict["timeout_retries"] = retries
-        phase_dict["timeout_last_ts"] = _io.now_iso()
-        captured["retries"] = retries
+        def mutate(state: dict) -> None:
+            progress = state.get("progress") or []
+            if not (1 <= seq <= len(progress)):
+                raise ValueError(f"seq={seq} 超出 progress 数组长度（total={len(progress)}）")
+            entry = progress[seq - 1]
+            phases = entry.setdefault("phases", {})
+            phase_dict = phases.setdefault(phase, {})
+            retries = int(phase_dict.get("timeout_retries") or 0) + 1
+            phase_dict["timeout_retries"] = retries
+            phase_dict["timeout_last_ts"] = _io.now_iso()
+            captured["retries"] = retries
 
-    try:
-        update_state(p.state_json, p.state_md, mutate)
-    except ValueError as e:
-        _io.emit_error("seq_out_of_range", str(e), exit_code=1)
+        try:
+            update_state(p.state_json, p.state_md, mutate)
+        except ValueError as e:
+            _io.emit_error("seq_out_of_range", str(e), exit_code=1)
+            return
+        except FileNotFoundError as e:
+            _io.emit_error("state_not_found", str(e), exit_code=3)
+            return
+        retries = captured["retries"]
+    elif change_id:
+        retries = _bump_spec_timeout_retries(_spec_timeout_state_path(p, change_id), phase)
+    else:
+        _io.emit_error("missing_args", "必须提供 --seq 或 --change 其一", exit_code=2)
         return
-    except FileNotFoundError as e:
-        _io.emit_error("state_not_found", str(e), exit_code=3)
-        return
 
-    retries = captured["retries"]
     next_budget = _compute_budget(retries, base, mult, max_sec)
     _io.emit(
         {
             "ok": True,
             "seq": seq,
+            "change": change_id,
             "phase": phase,
             "retries": retries,
             "next_timeout_sec": next_budget,

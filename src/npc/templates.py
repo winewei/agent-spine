@@ -253,6 +253,117 @@ RESULT: commit=- fixed=0 tests=fail summary=<path or -> categories_scanned=- reg
 """
 
 
+def render_spec_writer(
+    change_id: str,
+    base: str,
+    repo_root: str,
+) -> str:
+    """渲染 spec writer 的 write 轮 prompt（对应 change ``spine-spec-writer``）。
+
+    硬边界（不变量 1）：本函数 MUST NOT 引用 ``SPEC_REVIEW_SCHEMA`` 的
+    category 枚举、任何 spec-review 的 rubric 细则，或任何 ``round-*.spec-review.json``
+    的 findings 原文——write 轮生成侧不得预知本轮评判标准。
+    """
+    summary_path = f"{base}/spec-write.summary.md"
+    return f"""你是 OpenSpec change 撰写专家。请为 change `{change_id}` 撰写 / 完善 artifact（proposal.md / design.md / tasks.md / specs/**/spec.md）。
+
+## Runtime Variables（npc 已注入；prompt 内引用变量名）
+
+- REPO_ROOT={repo_root}
+- LOG_BASE={base}
+- CHANGE_ID={change_id}
+- SUMMARY_PATH={summary_path}
+
+## 必读输入（按需自取）
+
+- openspec/changes/{change_id}/ 下已存在的任何草稿（如有）
+- openspec/AGENTS.md / openspec/project.md（写作规范与项目背景）
+- 项目根 CLAUDE.md
+
+## 职责边界（MUST，确定性校验；不是口头约束）
+
+- 只写 / 改 `openspec/changes/{change_id}/` 目录下的文件；MUST NOT 修改该目录之外的任何文件
+- MUST NOT 运行 `git commit`（本 phase 的 RESULT 契约不含 `commit` 键，自报的 commit 无处安放）
+- 完成后自行运行 `openspec validate {change_id} --type change --strict` 自检（结果记入 RESULT 的 `validate` 键；此为自报，不构成信任来源——真相由后续 `npc spec review run` 内部重新执行的确定性门给出）
+
+## 双产物契约（缺一视为失败）
+
+(1) 用 Write 工具创建摘要到 `{summary_path}`（≤ 80 行）：
+
+```markdown
+# Spec Write Summary — {change_id}
+
+Artifacts: <bulleted list of files written>
+Validate: pass | fail
+Summary: <一段话概述本次 change 的目标与关键设计取舍>
+```
+
+(2) 最终 message **最后一行**严格输出：
+
+```
+RESULT: change={change_id} artifacts=<comma-sep files> validate=<pass|fail> summary={summary_path}
+```
+
+两条产物缺一不可：summary 文件必须真的 Write，RESULT 行必须出现在 message 最后一行。
+"""
+
+
+def render_spec_fixer(
+    change_id: str,
+    round_n: int,
+    base: str,
+    repo_root: str,
+    blocking_findings_md: str,
+) -> str:
+    """渲染 spec fixer 的 fix 轮 prompt。
+
+    ``blocking_findings_md`` 只含**上一轮已签发**（``round-(round_n-1)``）的
+    blocking findings 原文——时点边界由调用方（``spec_pipeline.spec_fix_run``）
+    保证，本函数不做取舍，只负责嵌入。
+    """
+    summary_path = f"{base}/round-{round_n}.spec-fix.summary.md"
+    return f"""你是 OpenSpec change 撰写专家。请修复上一轮 spec 语义评审指出的以下 blocking 问题。
+
+## Runtime Variables
+
+- REPO_ROOT={repo_root}
+- LOG_BASE={base}
+- CHANGE_ID={change_id}
+- FIX_ROUND={round_n}
+- SUMMARY_PATH={summary_path}
+
+## 上一轮已签发的 Blocking Findings
+
+{blocking_findings_md}
+
+## 职责边界（MUST，确定性校验；不是口头约束）
+
+- 只写 / 改 `openspec/changes/{change_id}/` 目录下的文件；MUST NOT 修改该目录之外的任何文件
+- MUST NOT 运行 `git commit`
+- 完成后自行运行 `openspec validate {change_id} --type change --strict` 自检（结果记入 RESULT 的 `validate` 键）
+
+## 双产物契约（缺一视为失败）
+
+(1) 用 Write 工具创建摘要到 `{summary_path}`（≤ 100 行）：
+
+```markdown
+# Spec Fix Round {round_n} Summary — {change_id}
+
+Findings Addressed: <list with status，按 id 排序>
+Validate: pass | fail
+Artifacts: <bulleted list of files touched>
+```
+
+(2) 最终 message **最后一行**严格输出：
+
+```
+RESULT: change={change_id} fixed=<count> validate=<pass|fail> summary={summary_path}
+```
+
+两条产物缺一不可。
+"""
+
+
 def render_spawn_prompt(
     phase: str,
     change_id: str,
@@ -269,6 +380,10 @@ def render_spawn_prompt(
     """
     if phase == "implement":
         action_phrase = f"实施 OpenSpec change `{change_id}`"
+    elif phase == "spec_write":
+        action_phrase = f"撰写 OpenSpec change `{change_id}` 的 artifact"
+    elif phase == "spec_fix":
+        action_phrase = f"修复 change `{change_id}` 的 spec 语义评审 findings"
     else:
         action_phrase = f"修复 change `{change_id}` 的 review findings"
 

@@ -406,11 +406,75 @@ def _build_parser() -> argparse.ArgumentParser:
     p_doctor.set_defaults(handler=_make_handler("doctor", "run"), _cmd_path="doctor")
 
     # ===== spec =====
-    p_spec = sub.add_parser("spec", help="spec 一致性分析")
+    p_spec = sub.add_parser("spec", help="spec 一致性分析 + spec 生成/评审流水线")
     sub_spec = p_spec.add_subparsers(dest="spec_cmd", required=True)
     p_spec_an = sub_spec.add_parser("analyze", help="spec↔tasks 漂移/覆盖检查（实现前闸门）")
     p_spec_an.add_argument("--change", required=True, help="change-id")
     p_spec_an.set_defaults(handler=_make_handler("spec_analyze", "run"), _cmd_path="spec analyze")
+
+    # ----- spec write（change: spine-spec-writer） -----
+    p_spec_write = sub_spec.add_parser("write", help="spec write 阶段（渲染 prompt / 装订 RESULT）")
+    sub_spec_write = p_spec_write.add_subparsers(dest="spec_write_cmd", required=True)
+    p_sw_run = sub_spec_write.add_parser(
+        "run", help="渲染 spec write prompt，恒 in-session（deferred=true）"
+    )
+    p_sw_run.add_argument("--change", dest="change_id", required=True)
+    p_sw_run.add_argument("--config", default=None, help="显式 TOML 配置路径")
+    p_sw_run.set_defaults(
+        handler=_make_handler("spec_pipeline", "cli_spec_write_run"), _cmd_path="spec write run"
+    )
+    p_sw_rec = sub_spec_write.add_parser(
+        "record", help="装订 spec write 的 RESULT 行（含越界修改 / 意外 commit 的确定性拦截）"
+    )
+    p_sw_rec.add_argument("--change", dest="change_id", required=True)
+    p_sw_rec.add_argument("--result", required=True)
+    p_sw_rec.set_defaults(
+        handler=_make_handler("spec_pipeline", "cli_spec_write_record"),
+        _cmd_path="spec write record",
+    )
+
+    # ----- spec fix（change: spine-spec-writer） -----
+    p_spec_fix = sub_spec.add_parser("fix", help="spec fix 阶段（渲染 prompt / 装订 RESULT）")
+    sub_spec_fix = p_spec_fix.add_subparsers(dest="spec_fix_cmd", required=True)
+    p_sf_run = sub_spec_fix.add_parser(
+        "run", help="渲染 spec fix-rN prompt（只含上一轮已签发的 blocking findings）"
+    )
+    p_sf_run.add_argument("--change", dest="change_id", required=True)
+    p_sf_run.add_argument("--round", dest="round_n", type=int, required=True)
+    p_sf_run.add_argument("--config", default=None, help="显式 TOML 配置路径")
+    p_sf_run.set_defaults(
+        handler=_make_handler("spec_pipeline", "cli_spec_fix_run"), _cmd_path="spec fix run"
+    )
+    p_sf_rec = sub_spec_fix.add_parser("record", help="装订 spec fix-rN 的 RESULT 行")
+    p_sf_rec.add_argument("--change", dest="change_id", required=True)
+    p_sf_rec.add_argument("--round", dest="round_n", type=int, required=True)
+    p_sf_rec.add_argument("--result", required=True)
+    p_sf_rec.set_defaults(
+        handler=_make_handler("spec_pipeline", "cli_spec_fix_record"), _cmd_path="spec fix record"
+    )
+
+    # ----- spec review（change: spine-spec-writer） -----
+    p_spec_review = sub_spec.add_parser(
+        "review", help="独立的 spec 语义评审（openspec validate → gate_cmd → LLM）"
+    )
+    sub_spec_review = p_spec_review.add_subparsers(dest="spec_review_cmd", required=True)
+    p_sr_run = sub_spec_review.add_parser("run", help="跑完整一轮 spec review")
+    p_sr_run.add_argument("--change", dest="change_id", required=True)
+    p_sr_run.add_argument("--round", dest="round_n", type=int, required=True)
+    p_sr_run.add_argument(
+        "--engine",
+        choices=["codex", "claude"],
+        default=None,
+        help="覆盖 spec_review 引擎（默认从配置文件 [spec_review].engine 读，缺省 codex）",
+    )
+    p_sr_run.add_argument("--timeout", type=int, default=900, help="单次引擎调用超时秒数")
+    p_sr_run.add_argument("--retries", type=int, default=0, help="引擎失败重试次数")
+    p_sr_run.add_argument("--codex-bin", dest="codex_bin", default=None, help="覆盖 codex 路径")
+    p_sr_run.add_argument("--config", default=None, help="显式 TOML 配置路径")
+    p_sr_run.set_defaults(
+        handler=_make_handler("spec_pipeline", "cli_spec_review_run"),
+        _cmd_path="spec review run",
+    )
 
     # ===== plan =====
     p_plan = sub.add_parser("plan", help="阶段前置门 + change 脚手架")
@@ -586,11 +650,19 @@ def _build_parser() -> argparse.ArgumentParser:
         "timeout-budget",
         help="查询当前 phase 应用的 Agent 调用 wall-clock timeout（不副作用）",
     )
-    p_agent_tb.add_argument("--seq", type=int, required=True)
+    p_agent_tb.add_argument(
+        "--seq", type=int, default=None, help="与 --change 二选一（coder/fixer 用 --seq）"
+    )
+    p_agent_tb.add_argument(
+        "--change",
+        dest="change_id",
+        default=None,
+        help="与 --seq 二选一；spec_write/spec_fix 等未纳入 run progress 的 phase 用此项",
+    )
     p_agent_tb.add_argument(
         "--phase",
         required=True,
-        help="phase 名（implement / fix-rN）；查询的是该 phase 的 timeout_retries",
+        help="phase 名（implement / fix-rN / spec_write / spec_fix-rN）；查询的是该 phase 的 timeout_retries",
     )
     p_agent_tb.add_argument("--base", type=int, default=None, help="覆盖 base 秒数（默认 1800）")
     p_agent_tb.add_argument("--mult", type=float, default=None, help="覆盖退避倍率（默认 1.2）")
@@ -605,7 +677,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "record-timeout",
         help="记录一次 Agent 调用超时；递增 retries 并返回下次的预算",
     )
-    p_agent_rt.add_argument("--seq", type=int, required=True)
+    p_agent_rt.add_argument("--seq", type=int, default=None, help="与 --change 二选一")
+    p_agent_rt.add_argument("--change", dest="change_id", default=None, help="与 --seq 二选一")
     p_agent_rt.add_argument("--phase", required=True)
     p_agent_rt.add_argument("--base", type=int, default=None)
     p_agent_rt.add_argument("--mult", type=float, default=None)

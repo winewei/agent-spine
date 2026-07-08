@@ -16,6 +16,8 @@
 |---|---|
 | `/spine-run <目标 或 change名> [--auto]` | 主 harness：init→plan→（每个 change）implement→review→fix→archive→收尾。支持续跑。 |
 | `spine-coder`（subagent） | 专职执行体，被 `/spine-run` spawn，产代码 commit + summary.md 详细日志。 |
+| `/spine-spec "<目标>"` | 独立的 spec 生成入口：拆目标→撰写 openspec change→强制独立语义评审→固定轮次上限 fix 循环。不接管 `/spine-run` Step 2B；产出可被 `/spine-run <change名>` 直接消费。 |
+| `spine-spec-writer`（subagent） | 专职 spec 生成执行体，被 `/spine-spec` spawn，只写 `openspec/changes/<id>/` 下的 artifact，不 commit。 |
 | `/spine-analyze` | 读跨 run 指标，提 ≤3 条 harness 自迭代建议（只读不改，人审闸门）。 |
 
 ## 前置依赖

@@ -120,6 +120,16 @@ EMIT_FIELD_CONTRACT: dict[str, frozenset[str]] = {
         "worktree_removed", "spine_branch", "archived_count", "failed_count",
         "skipped_count", "total_count",
     }),
+    # spec_pipeline.py：npc spec review run 每轮结束（成功/门失败/引擎失败均 emit 一次）。
+    # 与 review.round 的公共字段对齐，再加 spec 侧专有的 gate_* 三个字段；
+    # MUST NOT 含 spec_attribution_counts（spec review 无 in_scope/spec_attribution 概念，
+    # 见 change spine-spec-writer design.md D2）。
+    "spec_review.round": frozenset({
+        "proj_key", "canonical_proj_key", "run_ts", "change_seq", "change_id",
+        "phase", "round", "status", "duration_ms", "verdict", "blocking_count",
+        "blocking_categories", "engine", "retry_count", "outcome_reason",
+        "tokens", "pointer", "gate_failed", "gate_skipped", "gate_rule_hits",
+    }),
 }
 
 # token 估算系数：bytes / 4 ≈ tokens（OpenAI/Anthropic tokenizer 在中英混合文本上的中位数）。
@@ -976,6 +986,70 @@ def emit_review_round(
             per_change_events=base_p / "events.jsonl",
             review_json=review_json,
             focus_md=focus_md,
+        ),
+    }
+    emit_event(record)
+
+
+def emit_spec_review_round(
+    *,
+    proj_key: str,
+    canonical_proj_key: str | None = None,
+    run_ts: str | None,
+    change_seq: int | None,
+    change_id: str,
+    round_n: int,
+    base: Path | str,
+    ok: bool,
+    engine: str | None,
+    verdict: str | None,
+    blocking_count: int | None,
+    blocking_categories: list[str] | None,
+    duration_ms: int | None,
+    retry_count: int,
+    outcome_reason: str | None,
+    gate_failed: str | None,
+    gate_skipped: bool,
+    gate_rule_hits: dict | None,
+    state_json: Path | str | None = None,
+    run_events: Path | str | None = None,
+) -> None:
+    """spec review 一轮结束（成功 / 门失败 / 引擎失败都调用一次）。
+
+    与 :func:`emit_review_round` 结构同构，但独立登记（spec review 无
+    ``in_scope``/``spec_attribution`` 概念），且多出 ``gate_failed`` /
+    ``gate_skipped`` / ``gate_rule_hits`` 三个 spec 侧专有字段——门失败时
+    ``verdict`` MUST 为 ``None``（未跑评审即无 verdict，不得伪装成判定结果，
+    见 change ``spine-spec-writer`` design.md D6）。
+    """
+    base_p = Path(base)
+    review_json = base_p / f"round-{round_n}.spec-review.json"
+    record: dict[str, Any] = {
+        "kind": "spec_review.round",
+        "proj_key": proj_key,
+        "canonical_proj_key": canonical_proj_key if canonical_proj_key is not None else proj_key,
+        "run_ts": run_ts,
+        "change_seq": change_seq,
+        "change_id": change_id,
+        "phase": f"spec_review-r{round_n}",
+        "round": round_n,
+        "status": "done" if ok else "failed",
+        "duration_ms": duration_ms,
+        "verdict": verdict,
+        "blocking_count": blocking_count,
+        "blocking_categories": blocking_categories,
+        "engine": engine,
+        "retry_count": retry_count,
+        "outcome_reason": outcome_reason,
+        "tokens": _build_tokens(None, review_json if review_json.exists() else None),
+        "gate_failed": gate_failed,
+        "gate_skipped": gate_skipped,
+        "gate_rule_hits": gate_rule_hits,
+        "pointer": _build_pointer(
+            state_json=state_json,
+            run_events=run_events,
+            per_change_events=base_p / "events.jsonl",
+            spec_review_json=review_json if review_json.exists() else None,
         ),
     }
     emit_event(record)

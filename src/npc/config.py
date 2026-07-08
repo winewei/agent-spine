@@ -182,16 +182,42 @@ class SpecWriterConfig:
 
 @dataclass(frozen=True)
 class SpecReviewConfig:
-    """spec 验证方引擎配置。语义与 :class:`ReviewEngineConfig` 同构。"""
+    """spec 验证方引擎配置。语义与 :class:`ReviewEngineConfig` 同构。
+
+    ``gate_cmd``：确定性 gate 命令，argv 数组（如
+    ``["uv", "run", "scripts/check_spec.py"]``）；``None`` = 未配置，跳过该门。
+    npc 会在其后追加 ``--change <id>`` 两个 argv 元素并以 ``shell=False`` 执行，
+    只读其 stdout JSON 的 ``ok``/``rule_hits`` 两个键（见 change
+    ``spine-spec-writer`` design.md D3b）。
+
+    ``max_rounds``：spec fix 循环的**最多 fix 次数**（不是 review 轮数）。
+    语义与 code review 的 ``rounds_since_strict_decrease`` stale 检测无关——
+    spec fix 循环 MUST NOT 复用该判据（design.md D4）。默认 3。
+    """
 
     engine: str = "codex"  # 安全默认值：与既有 review 默认一致
     claude_bin: str | None = None
     claude_model: str | None = None
+    gate_cmd: tuple[str, ...] | None = None
+    max_rounds: int = 3
 
     def __post_init__(self) -> None:
         if self.engine not in SUPPORTED_ENGINES:
             raise ConfigError(
                 f"未知 spec_review engine：{self.engine!r}（仅支持 {'/'.join(SUPPORTED_ENGINES)}）"
+            )
+        if self.gate_cmd is not None:
+            if not isinstance(self.gate_cmd, tuple) or not all(
+                isinstance(x, str) for x in self.gate_cmd
+            ):
+                raise ConfigError(
+                    f"[spec_review].gate_cmd 必须是字符串数组（argv），得到：{self.gate_cmd!r}"
+                )
+            if len(self.gate_cmd) == 0:
+                raise ConfigError("[spec_review].gate_cmd 不得为空数组")
+        if not isinstance(self.max_rounds, int) or self.max_rounds < 0:
+            raise ConfigError(
+                f"[spec_review].max_rounds 必须是整数 ≥0，得到：{self.max_rounds!r}"
             )
 
 
@@ -382,6 +408,20 @@ def _build(data: dict, source: str) -> Config:
     spec_review_claude_model = _opt_str(
         spec_review_raw.get("claude_model"), "spec_review.claude_model", source
     )
+    gate_cmd_raw = spec_review_raw.get("gate_cmd")
+    if gate_cmd_raw is None:
+        spec_review_gate_cmd: tuple[str, ...] | None = None
+    else:
+        if not isinstance(gate_cmd_raw, list) or any(
+            not isinstance(x, str) for x in gate_cmd_raw
+        ):
+            raise ConfigError(
+                f"[spec_review].gate_cmd 必须是字符串数组（{source}）"
+            )
+        spec_review_gate_cmd = tuple(gate_cmd_raw)
+    spec_review_max_rounds_raw = spec_review_raw.get("max_rounds", 3)
+    if not isinstance(spec_review_max_rounds_raw, int):
+        raise ConfigError(f"[spec_review].max_rounds 必须是整数（{source}）")
 
     scheduler_raw = data.get("scheduler") or {}
     if not isinstance(scheduler_raw, dict):
@@ -444,6 +484,8 @@ def _build(data: dict, source: str) -> Config:
             engine=spec_review_engine,
             claude_bin=spec_review_claude_bin,
             claude_model=spec_review_claude_model,
+            gate_cmd=spec_review_gate_cmd,
+            max_rounds=spec_review_max_rounds_raw,
         ),
         source=source,
     )

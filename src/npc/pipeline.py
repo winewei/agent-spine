@@ -1187,6 +1187,12 @@ RESULT_REQUIRED_KEYS: dict[str, frozenset[str]] = {
         "categories_scanned", "regressions_added",
     }),
     "failure": frozenset({"commit", "tests", "summary", "notes"}),
+    # spec writer 的产物是 openspec/changes/<id>/ 下的 artifact 文件，不是代码
+    # commit（沿用 implement 的 commit/tests 键会逼它做无意义的动作，见 change
+    # spine-spec-writer design.md D5）。spec_write/spec_fix 的 RESULT 不含
+    # commit/tests，故不会被 `_is_failure_schema` 误判为失败态覆盖。
+    "spec_write": frozenset({"change", "artifacts", "validate", "summary"}),
+    "spec_fix": frozenset({"change", "fixed", "validate", "summary"}),
 }
 
 

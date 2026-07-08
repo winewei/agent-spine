@@ -507,15 +507,36 @@ def test_npc_spec_help_has_no_lint_subcommand():
     assert "lint" not in proc.stdout
 
 
-def test_this_change_does_not_modify_src_npc():
-    proc = subprocess.run(
-        ["git", "diff", "--name-only", "HEAD"],
+def test_repo_spec_lint_commit_does_not_modify_src_npc():
+    """change ``repo-spec-lint``（已归档）的实施 commit 本身零 ``src/npc/`` 改动。
+
+    历史上本测试用 ``git diff --name-only HEAD``（工作区实时 diff）断言"当前改动
+    不碰 src/npc"——这只在 ``repo-spec-lint`` 自己的开发窗口内有意义；一旦该 change
+    归档提交，同一断言会对**此后任何**触及 src/npc 的正常开发（如 change
+    ``spine-spec-writer``）产生假阳性。改为定位该 change 实际落地的历史 commit
+    （通过 ``git log --follow`` 定位 ``scripts/check_spec.py`` 的首次引入 commit），
+    校验那一次 commit 本身的改动集，语义不变，但不再阻塞后续开发。
+    """
+    log_proc = subprocess.run(
+        ["git", "log", "--format=%H", "--follow", "--", "scripts/check_spec.py"],
         capture_output=True,
         text=True,
         check=False,
         cwd=REPO_ROOT,
     )
-    changed = proc.stdout.splitlines()
+    commits = [c for c in log_proc.stdout.splitlines() if c.strip()]
+    if not commits:
+        pytest.skip("scripts/check_spec.py 尚未提交（开发中快照），跳过历史 commit 校验")
+    introducing_commit = commits[-1]
+
+    show_proc = subprocess.run(
+        ["git", "show", "--name-only", "--format=", introducing_commit],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=REPO_ROOT,
+    )
+    changed = [p for p in show_proc.stdout.splitlines() if p.strip()]
     assert not any(p.startswith("src/npc/") for p in changed)
 
 

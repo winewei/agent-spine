@@ -1,0 +1,964 @@
+"""spec_pipeline 模块测试（change: spine-spec-writer）。
+
+覆盖范围（对应 tasks.md 2.x-10.x）：
+
+1. 质量门顺序：openspec validate → [spec_review] gate_cmd → LLM 引擎（2.x）。
+2. 评审结果解析与轮次化落盘（3.x）。
+3. 固定轮次上限的 fix 循环，拒绝 stale 检测（4.x）。
+4. spec_write/spec_fix 的 RESULT 契约（5.x，pipeline.RESULT_REQUIRED_KEYS 已扩）。
+5. 不变量 1 的渲染层防护：write 轮不泄漏 rubric；fix 轮只读上一轮已签发 findings（6.x）。
+6. spec_review.round telemetry（7.x）。
+7. 越界修改 / 意外 commit 的确定性拦截（8.2.x）。
+8. v1 恒 in-session + 路由真相源唯一（8.3.x）。
+9. 非目标守护 + 端到端（9.x / 10.x）。
+"""
+
+from __future__ import annotations
+
+import json
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from npc import config as _config
+from npc import pipeline as _pipeline
+from npc import schema as _schema
+from npc import spec_pipeline as _sp
+from npc import telemetry as _telemetry
+
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+SPEC_PIPELINE_SRC = REPO_ROOT / "src" / "npc" / "spec_pipeline.py"
+
+
+# ============================================================
+# Helpers
+# ============================================================
+
+
+def _with_repo(p, repo_root: Path):
+    return type(p)(**{**p.__dict__, "repo_root": repo_root})
+
+
+def _make_change_dir(repo_root: Path, change_id: str, *, valid: bool = True) -> Path:
+    change_dir = repo_root / "openspec" / "changes" / change_id
+    change_dir.mkdir(parents=True, exist_ok=True)
+    (change_dir / "proposal.md").write_text(
+        "## Why\n\nx\n\n## What Changes\n\n- y\n\n## Non-Goals\n\n- z\n", encoding="utf-8"
+    )
+    if valid:
+        (change_dir / "tasks.md").write_text("## 1. x\n\n- [ ] 1.1 do it\n", encoding="utf-8")
+        specs_dir = change_dir / "specs" / "demo"
+        specs_dir.mkdir(parents=True, exist_ok=True)
+        (specs_dir / "spec.md").write_text(
+            "## ADDED Requirements\n\n"
+            "### Requirement: demo\nThe system MUST do X.\n\n"
+            "#### Scenario: ok\n- WHEN x\n- THEN y\n",
+            encoding="utf-8",
+        )
+    else:
+        (change_dir / "tasks.md").write_text("## 1. x\n\n- [ ] 1.1 do it\n", encoding="utf-8")
+        specs_dir = change_dir / "specs" / "demo"
+        specs_dir.mkdir(parents=True, exist_ok=True)
+        (specs_dir / "spec.md").write_text(
+            "## ADDED Requirements\n\n### Requirement: demo\nno modal verb here.\n\n"
+            "#### Scenario: ok\n- WHEN x\n- THEN y\n",
+            encoding="utf-8",
+        )
+    return change_dir
+
+
+
+def _write_gate_cmd_config(fake_repo: Path, argv: list[str]) -> Path:
+    npc_dir = fake_repo / ".npc"
+    npc_dir.mkdir(exist_ok=True)
+    argv_toml = ", ".join(f'"{a}"' for a in argv)
+    (npc_dir / "config.toml").write_text(
+        f"[spec_review]\ngate_cmd = [{argv_toml}]\n", encoding="utf-8"
+    )
+    return npc_dir / "config.toml"
+
+def _fake_validate_runner(returncode: int = 0, stderr: str = ""):
+    def runner(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, returncode, stdout="", stderr=stderr)
+
+    return runner
+
+
+def _fake_gate_runner(stdout: str, returncode: int = 0):
+    calls: list[list[str]] = []
+
+    def runner(cmd, **kwargs):
+        calls.append(list(cmd))
+        return subprocess.CompletedProcess(cmd, returncode, stdout=stdout, stderr="")
+
+    runner.calls = calls
+    return runner
+
+
+def _stub_engine_writes(review_payload: dict, rc: int = 0):
+    calls: list[dict] = []
+
+    def fake(**kwargs):
+        calls.append(kwargs)
+        if rc == 0:
+            kwargs["review_out"].parent.mkdir(parents=True, exist_ok=True)
+            kwargs["review_out"].write_text(json.dumps(review_payload), encoding="utf-8")
+            kwargs["events_out"].parent.mkdir(parents=True, exist_ok=True)
+            kwargs["events_out"].write_text("fake\n", encoding="utf-8")
+        return rc
+
+    fake.calls = calls
+    return fake
+
+
+# ============================================================
+# 1. SPEC_REVIEW_SCHEMA / parse_spec_review（tasks 1.x, 3.x）
+# ============================================================
+
+
+def test_parse_spec_review_blocking_counts_severity_only():
+    review = {
+        "verdict": "changes-requested",
+        "findings": [
+            {"id": "F1", "severity": "critical", "category": "ambiguity", "title": "t",
+             "file": "-", "line_range": "-", "detail": "d", "recommendation": "r"},
+            {"id": "F2", "severity": "high", "category": "untestable", "title": "t",
+             "file": "-", "line_range": "-", "detail": "d", "recommendation": "r"},
+            {"id": "F3", "severity": "medium", "category": "scope-creep", "title": "t",
+             "file": "-", "line_range": "-", "detail": "d", "recommendation": "r"},
+        ],
+    }
+    metrics = _sp.parse_spec_review(review)
+    assert metrics["blocking"] == 2
+    assert metrics["advisory"] == 1
+
+
+def test_parse_spec_review_blocking_categories_dedup():
+    review = {
+        "verdict": "changes-requested",
+        "findings": [
+            {"id": "F1", "severity": "high", "category": "ambiguity", "title": "t",
+             "file": "-", "line_range": "-", "detail": "d", "recommendation": "r"},
+            {"id": "F2", "severity": "critical", "category": "ambiguity", "title": "t",
+             "file": "-", "line_range": "-", "detail": "d", "recommendation": "r"},
+            {"id": "F3", "severity": "high", "category": "untestable", "title": "t",
+             "file": "-", "line_range": "-", "detail": "d", "recommendation": "r"},
+        ],
+    }
+    metrics = _sp.parse_spec_review(review)
+    assert set(metrics["blocking_categories"]) == {"ambiguity", "untestable"}
+
+
+# ============================================================
+# 2. 质量门顺序（tasks 2.1–2.7）
+# ============================================================
+
+
+def test_spec_review_run_openspec_validate_fails_no_llm_call(env_setup, fake_repo, monkeypatch):
+    _make_change_dir(fake_repo, "add-foo")
+    p = _with_repo(env_setup, fake_repo)
+
+    engine_calls: list[dict] = []
+    monkeypatch.setattr(_sp, "_spec_engine_exec", lambda **kw: (engine_calls.append(kw), 0)[1])
+    monkeypatch.setattr(_sp, "_find_openspec_bin", lambda override=None: "/fake/openspec")
+
+    result = _sp.spec_review_run(
+        p, "add-foo", 0,
+        validate_runner=_fake_validate_runner(returncode=1, stderr="Requirement missing SHALL"),
+        gate_runner=_fake_gate_runner(json.dumps({"ok": True, "rule_hits": {}})),
+    )
+    assert result["ok"] is False
+    assert result["gate_failed"] == "openspec_validate"
+    assert engine_calls == []
+    assert not (_sp._spec_base(p, "add-foo") / "round-0.spec-review.json").exists()
+
+
+def test_spec_review_run_gate_cmd_ok_false_no_llm_call(env_setup, fake_repo, monkeypatch):
+    _make_change_dir(fake_repo, "add-foo")
+    config_path = _write_gate_cmd_config(fake_repo, ["stub-gate"])
+    p = _with_repo(env_setup, fake_repo)
+
+    engine_calls: list[dict] = []
+    monkeypatch.setattr(_sp, "_spec_engine_exec", lambda **kw: (engine_calls.append(kw), 0)[1])
+    monkeypatch.setattr(_sp, "_find_openspec_bin", lambda override=None: "/fake/openspec")
+
+    stub_gate = _fake_gate_runner(json.dumps({"ok": False, "rule_hits": {}}))
+    result = _sp.spec_review_run(
+        p, "add-foo", 0,
+        config_path=config_path,
+        validate_runner=_fake_validate_runner(returncode=0),
+        gate_runner=stub_gate,
+    )
+    assert result["ok"] is False
+    assert result["gate_failed"] == "gate_cmd"
+    assert engine_calls == []
+
+
+def test_spec_review_run_gate_cmd_argv_and_shell_false(env_setup, fake_repo, monkeypatch):
+    _make_change_dir(fake_repo, "add-foo")
+    npc_dir = fake_repo / ".npc"
+    npc_dir.mkdir()
+    (npc_dir / "config.toml").write_text(
+        '[spec_review]\ngate_cmd = ["uv", "run", "scripts/check_spec.py"]\n', encoding="utf-8"
+    )
+    p = _with_repo(env_setup, fake_repo)
+
+    monkeypatch.setattr(_sp, "_find_openspec_bin", lambda override=None: "/fake/openspec")
+    monkeypatch.setattr(
+        _sp, "_spec_engine_exec",
+        lambda **kw: (
+            kw["review_out"].write_text(json.dumps({"verdict": "approve", "findings": []})),
+            0,
+        )[1],
+    )
+
+    captured_argv: list[str] = []
+
+    def spy_runner(cmd, **kwargs):
+        captured_argv.extend(cmd)
+        assert kwargs.get("shell") is False
+        return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps({"ok": True, "rule_hits": {}}), stderr="")
+
+    _sp.spec_review_run(
+        p, "my-change", 0,
+        config_path=npc_dir / "config.toml",
+        validate_runner=_fake_validate_runner(returncode=0),
+        gate_runner=spy_runner,
+    )
+    assert captured_argv == ["uv", "run", "scripts/check_spec.py", "--change", "my-change"]
+
+
+def test_spec_review_run_gate_cmd_unconfigured_skips_and_calls_llm(env_setup, fake_repo, monkeypatch):
+    _make_change_dir(fake_repo, "add-foo")
+    p = _with_repo(env_setup, fake_repo)
+    monkeypatch.setattr(_sp, "_find_openspec_bin", lambda override=None: "/fake/openspec")
+
+    engine_calls: list[dict] = []
+
+    def fake_engine(**kw):
+        engine_calls.append(kw)
+        kw["review_out"].parent.mkdir(parents=True, exist_ok=True)
+        kw["review_out"].write_text(json.dumps({"verdict": "approve", "findings": []}))
+        kw["events_out"].parent.mkdir(parents=True, exist_ok=True)
+        kw["events_out"].write_text("x")
+        return 0
+
+    monkeypatch.setattr(_sp, "_spec_engine_exec", fake_engine)
+
+    result = _sp.spec_review_run(
+        p, "add-foo", 0,
+        validate_runner=_fake_validate_runner(returncode=0),
+        gate_runner=subprocess.run,  # 不会被调用（gate_cmd 未配置）
+    )
+    assert result["ok"] is True
+    assert result["gate_skipped"] is True
+    assert result["gate_failed"] is None
+    assert len(engine_calls) == 1
+
+
+def test_spec_review_run_gate_cmd_invalid_json_is_gate_failure(env_setup, fake_repo, monkeypatch):
+    _make_change_dir(fake_repo, "add-foo")
+    npc_dir = fake_repo / ".npc"
+    npc_dir.mkdir()
+    (npc_dir / "config.toml").write_text('[spec_review]\ngate_cmd = ["true"]\n', encoding="utf-8")
+    p = _with_repo(env_setup, fake_repo)
+
+    monkeypatch.setattr(_sp, "_find_openspec_bin", lambda override=None: "/fake/openspec")
+    engine_calls: list[dict] = []
+    monkeypatch.setattr(_sp, "_spec_engine_exec", lambda **kw: (engine_calls.append(kw), 0)[1])
+
+    def bad_json_runner(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 0, stdout="not-json", stderr="")
+
+    result = _sp.spec_review_run(
+        p, "add-foo", 0,
+        config_path=npc_dir / "config.toml",
+        validate_runner=_fake_validate_runner(returncode=0),
+        gate_runner=bad_json_runner,
+    )
+    assert result["ok"] is False
+    assert result["gate_failed"] == "gate_cmd"
+    assert "gate_output_invalid" in result["gate_error"]
+    assert engine_calls == []
+
+
+def test_spec_review_run_gate_cmd_warning_only_continues_to_llm(env_setup, fake_repo, monkeypatch):
+    _make_change_dir(fake_repo, "add-foo")
+    p = _with_repo(env_setup, fake_repo)
+    monkeypatch.setattr(_sp, "_find_openspec_bin", lambda override=None: "/fake/openspec")
+
+    payload = {"verdict": "approve", "findings": []}
+    fake_engine = _stub_engine_writes(payload)
+    monkeypatch.setattr(_sp, "_spec_engine_exec", fake_engine)
+
+    gate_runner = _fake_gate_runner(json.dumps({"ok": True, "rule_hits": {"vague_adverb": 0}}))
+    result = _sp.spec_review_run(
+        p, "add-foo", 0,
+        validate_runner=_fake_validate_runner(returncode=0),
+        gate_runner=gate_runner,
+    )
+    assert result["ok"] is True
+    assert len(fake_engine.calls) == 1
+    review_path = _sp._spec_base(p, "add-foo") / "round-0.spec-review.json"
+    assert review_path.is_file()
+
+
+def test_spec_review_run_source_has_no_rule_name_literals():
+    """边界测试：spec_pipeline.py 不含任何规则名字符串或延迟措辞/含糊副词词表常量。"""
+    src = SPEC_PIPELINE_SRC.read_text(encoding="utf-8")
+    for banned in (
+        "deferred_decision_outside_open_questions",
+        "vague_adverb",
+        "scenario_missing_when_then",
+        "proposal_missing_non_goals",
+    ):
+        assert banned not in src
+
+
+# ============================================================
+# 3. 评审结果轮次化落盘（tasks 3.3）
+# ============================================================
+
+
+def test_spec_review_run_writes_round_n_without_overwriting_round_0(env_setup, fake_repo, monkeypatch):
+    _make_change_dir(fake_repo, "add-foo")
+    p = _with_repo(env_setup, fake_repo)
+    monkeypatch.setattr(_sp, "_find_openspec_bin", lambda override=None: "/fake/openspec")
+
+    base = _sp._spec_base(p, "add-foo")
+    base.mkdir(parents=True, exist_ok=True)
+    (base / "round-0.spec-review.json").write_text(json.dumps({"verdict": "approve", "findings": []}))
+
+    monkeypatch.setattr(_sp, "_spec_engine_exec", _stub_engine_writes({"verdict": "approve", "findings": []}))
+
+    result = _sp.spec_review_run(
+        p, "add-foo", 1,
+        validate_runner=_fake_validate_runner(returncode=0),
+        gate_runner=subprocess.run,
+    )
+    assert result["ok"] is True
+    assert result["pointer"]["spec_review_json"].endswith("round-1.spec-review.json")
+    assert (base / "round-0.spec-review.json").is_file()
+    assert (base / "round-1.spec-review.json").is_file()
+
+
+# ============================================================
+# 4. 固定轮次上限的 fix 循环（tasks 4.1–4.4）
+# ============================================================
+
+
+def test_fix_loop_terminates_clean_when_no_blocking():
+    calls = {"review": 0, "fix": 0}
+
+    def review_fn(round_n):
+        calls["review"] += 1
+        return {"blocking": 0}
+
+    def fix_fn(round_n):
+        calls["fix"] += 1
+
+    result = _sp.run_spec_fix_loop(review_fn, fix_fn, max_rounds=3)
+    assert result["status"] == "clean"
+    assert calls["fix"] == 0
+    assert calls["review"] == 1
+
+
+def test_fix_loop_needs_user_decision_at_max_rounds():
+    calls = {"review": 0, "fix": 0}
+
+    def review_fn(round_n):
+        calls["review"] += 1
+        return {"blocking": 2}
+
+    def fix_fn(round_n):
+        calls["fix"] += 1
+
+    result = _sp.run_spec_fix_loop(review_fn, fix_fn, max_rounds=3)
+    assert calls["fix"] == 3
+    assert calls["review"] == 4
+    assert result["status"] == "needs-user-decision"
+
+
+def test_fix_loop_max_rounds_zero_means_review_only():
+    calls = {"fix": 0}
+
+    def review_fn(round_n):
+        return {"blocking": 5}
+
+    def fix_fn(round_n):
+        calls["fix"] += 1
+
+    result = _sp.run_spec_fix_loop(review_fn, fix_fn, max_rounds=0)
+    assert calls["fix"] == 0
+    assert result["status"] == "needs-user-decision"
+
+
+def test_fix_loop_bouncing_blocking_not_mistaken_for_stale():
+    sequence = [2, 4, 1, 3]
+
+    def review_fn(round_n):
+        return {"blocking": sequence[round_n]}
+
+    def fix_fn(round_n):
+        pass
+
+    result = _sp.run_spec_fix_loop(review_fn, fix_fn, max_rounds=3)
+    assert result["status"] == "needs-user-decision"
+    assert result["fix_calls"] == 3
+
+
+def test_fix_loop_source_has_no_stale_detection_reference():
+    src = SPEC_PIPELINE_SRC.read_text(encoding="utf-8")
+    assert "rounds_since_strict_decrease" not in src
+    assert "from .trend import" not in src
+    assert "import trend" not in src
+
+
+# ============================================================
+# 5. RESULT 契约（tasks 5.1–5.4）
+# ============================================================
+
+
+def test_result_required_keys_spec_write_and_fix_exact():
+    assert _pipeline.RESULT_REQUIRED_KEYS["spec_write"] == frozenset(
+        {"change", "artifacts", "validate", "summary"}
+    )
+    assert _pipeline.RESULT_REQUIRED_KEYS["spec_fix"] == frozenset(
+        {"change", "fixed", "validate", "summary"}
+    )
+
+
+def test_result_required_keys_implement_and_fix_unchanged():
+    assert _pipeline.RESULT_REQUIRED_KEYS["implement"] == frozenset(
+        {"commit", "tasks", "tests", "summary"}
+    )
+    assert _pipeline.RESULT_REQUIRED_KEYS["fix"] == frozenset(
+        {"commit", "fixed", "tests", "summary", "categories_scanned", "regressions_added"}
+    )
+
+
+def test_spec_write_record_missing_validate_key_rejected(env_setup, fake_repo):
+    p = _with_repo(env_setup, fake_repo)
+    line = "RESULT: change=add-foo artifacts=proposal.md summary=/tmp/s.md"
+    result = _sp.spec_write_record(p, "add-foo", line)
+    assert result["ok"] is False
+    assert result["error"] == "result-missing-keys"
+    assert "validate" in result["missing_keys"]
+
+
+def test_spec_write_record_full_result_accepted(env_setup, fake_repo):
+    _make_change_dir(fake_repo, "add-foo")
+    p = _with_repo(env_setup, fake_repo)
+    _sp.spec_write_run(p, "add-foo")  # 建 base + pre_head marker
+    line = "RESULT: change=add-foo artifacts=proposal.md,tasks.md validate=pass summary=/tmp/s.md"
+    result = _sp.spec_write_record(p, "add-foo", line)
+    assert result["ok"] is True
+
+
+# ============================================================
+# 6. 不变量 1 的渲染层防护（tasks 6.1–6.5，本 change 最关键的一组）
+# ============================================================
+
+
+def test_spec_write_prompt_does_not_leak_rubric(env_setup, fake_repo):
+    _make_change_dir(fake_repo, "add-foo")
+    p = _with_repo(env_setup, fake_repo)
+    result = _sp.spec_write_run(p, "add-foo")
+    text = Path(result["prompt_file"]).read_text(encoding="utf-8")
+    assert "scope-creep" not in text
+    assert "implementation-leak" not in text
+    assert "spec-review.json" not in text
+
+
+def test_spec_fix_prompt_contains_prev_round_finding_detail(env_setup, fake_repo):
+    _make_change_dir(fake_repo, "add-foo")
+    p = _with_repo(env_setup, fake_repo)
+    base = _sp._spec_base(p, "add-foo")
+    base.mkdir(parents=True, exist_ok=True)
+    (base / "round-0.spec-review.json").write_text(
+        json.dumps({
+            "verdict": "changes-requested",
+            "findings": [{
+                "id": "F1", "severity": "high", "category": "ambiguity",
+                "title": "t", "file": "specs/demo/spec.md", "line_range": "5",
+                "detail": "UNIQUE_DETAIL_TEXT_ROUND0", "recommendation": "r",
+            }],
+        })
+    )
+    result = _sp.spec_fix_run(p, "add-foo", 1)
+    assert result["ok"] is True
+    text = Path(result["prompt_file"]).read_text(encoding="utf-8")
+    assert "UNIQUE_DETAIL_TEXT_ROUND0" in text
+
+
+def test_spec_fix_prompt_does_not_contain_current_round_finding(env_setup, fake_repo):
+    _make_change_dir(fake_repo, "add-foo")
+    p = _with_repo(env_setup, fake_repo)
+    base = _sp._spec_base(p, "add-foo")
+    base.mkdir(parents=True, exist_ok=True)
+    (base / "round-0.spec-review.json").write_text(
+        json.dumps({
+            "verdict": "changes-requested",
+            "findings": [{
+                "id": "F1", "severity": "high", "category": "ambiguity",
+                "title": "t", "file": "-", "line_range": "-",
+                "detail": "ROUND0_ONLY_DETAIL", "recommendation": "r",
+            }],
+        })
+    )
+    (base / "round-1.spec-review.json").write_text(
+        json.dumps({
+            "verdict": "changes-requested",
+            "findings": [{
+                "id": "F1", "severity": "high", "category": "contradiction",
+                "title": "t", "file": "-", "line_range": "-",
+                "detail": "ROUND1_ONLY_DETAIL", "recommendation": "r",
+            }],
+        })
+    )
+    result = _sp.spec_fix_run(p, "add-foo", 1)
+    text = Path(result["prompt_file"]).read_text(encoding="utf-8")
+    assert "ROUND0_ONLY_DETAIL" in text
+    assert "ROUND1_ONLY_DETAIL" not in text
+
+
+def test_spec_fix_run_missing_prev_review_rejected(env_setup, fake_repo):
+    _make_change_dir(fake_repo, "add-foo")
+    p = _with_repo(env_setup, fake_repo)
+    result = _sp.spec_fix_run(p, "add-foo", 1)
+    assert result["ok"] is False
+    assert result["error"] == "prev_spec_review_missing"
+
+
+def test_implement_prompt_does_not_leak_spec_review_content(env_setup, fake_repo, make_args, capsys, monkeypatch):
+    """跨链负向：round-0.spec-review.json 存在 → npc implement run 渲染的 prompt 不含其内容。"""
+    from npc import state as _state
+    from npc import agent as _agent
+
+    _state.init_run(make_args(plan_order=json.dumps(["add-foo"])))
+    capsys.readouterr()
+    _state.add_change(make_args(seq=1, change_id="add-foo", base=None))
+    capsys.readouterr()
+
+    p = env_setup
+    base = _sp._spec_base(p, "add-foo")
+    base.mkdir(parents=True, exist_ok=True)
+    (base / "round-0.spec-review.json").write_text(
+        json.dumps({
+            "verdict": "changes-requested",
+            "findings": [{
+                "id": "F1", "severity": "high", "category": "untestable",
+                "title": "t", "file": "-", "line_range": "-",
+                "detail": "SPEC_REVIEW_ONLY_DETAIL", "recommendation": "r",
+            }],
+        })
+    )
+
+    _agent.prompt_render(make_args(phase="implement", change_id="add-foo", seq=None, round_n=None, output=None))
+    out = base.parent / "001-add-foo" / "implement.prompt.md"
+    text = out.read_text(encoding="utf-8")
+    assert "untestable" not in text
+    assert "SPEC_REVIEW_ONLY_DETAIL" not in text
+
+
+# ============================================================
+# 7. telemetry（tasks 7.1–7.3, 7.2b）
+# ============================================================
+
+
+def test_emit_spec_review_round_produces_all_contract_fields(isolate_telemetry, monkeypatch):
+    captured: list[dict] = []
+    monkeypatch.setattr(
+        _telemetry, "emit_event", lambda record, **kw: (captured.append(record), True)[1]
+    )
+    _telemetry.emit_spec_review_round(
+        proj_key="demo", run_ts="2026-01-01-0000", change_seq=None, change_id="add-foo",
+        round_n=0, base="/tmp/base", ok=True, engine="codex", verdict="approve",
+        blocking_count=0, blocking_categories=[], duration_ms=10, retry_count=0,
+        outcome_reason=None, gate_failed=None, gate_skipped=False, gate_rule_hits={},
+        state_json=None, run_events=None,
+    )
+    assert len(captured) == 1
+    assert captured[0]["kind"] == "spec_review.round"
+    missing = _telemetry.EMIT_FIELD_CONTRACT["spec_review.round"] - set(captured[0].keys())
+    assert not missing
+
+
+def test_gate_failed_event_has_null_verdict_not_changes_requested(env_setup, fake_repo, monkeypatch, isolate_telemetry):
+    _make_change_dir(fake_repo, "add-foo")
+    config_path = _write_gate_cmd_config(fake_repo, ["stub-gate"])
+    p = _with_repo(env_setup, fake_repo)
+    monkeypatch.setattr(_sp, "_find_openspec_bin", lambda override=None: "/fake/openspec")
+
+    captured: list[dict] = []
+    monkeypatch.setattr(
+        _telemetry, "emit_event", lambda record, **kw: (captured.append(record), True)[1]
+    )
+
+    result = _sp.spec_review_run(
+        p, "add-foo", 0,
+        config_path=config_path,
+        validate_runner=_fake_validate_runner(returncode=0),
+        gate_runner=_fake_gate_runner(json.dumps({"ok": False, "rule_hits": {}})),
+    )
+    assert result["gate_failed"] == "gate_cmd"
+    assert len(captured) == 1
+    assert captured[0]["gate_failed"] == "gate_cmd"
+    assert captured[0]["verdict"] is None
+
+
+def test_review_round_contract_unchanged_no_gate_failed(env_setup):
+    assert "gate_failed" not in _telemetry.EMIT_FIELD_CONTRACT["review.round"]
+    assert "blocking_categories" in _telemetry.EMIT_FIELD_CONTRACT["review.round"]
+    assert "spec_attribution_counts" in _telemetry.EMIT_FIELD_CONTRACT["review.round"]
+
+
+def test_gate_rule_hits_passthrough(env_setup, fake_repo, monkeypatch, isolate_telemetry):
+    _make_change_dir(fake_repo, "add-foo")
+    config_path = _write_gate_cmd_config(fake_repo, ["stub-gate"])
+    p = _with_repo(env_setup, fake_repo)
+    monkeypatch.setattr(_sp, "_find_openspec_bin", lambda override=None: "/fake/openspec")
+    monkeypatch.setattr(_sp, "_spec_engine_exec", _stub_engine_writes({"verdict": "approve", "findings": []}))
+
+    captured: list[dict] = []
+    monkeypatch.setattr(
+        _telemetry, "emit_event", lambda record, **kw: (captured.append(record), True)[1]
+    )
+
+    hits = {"foo_rule": 2, "bar_rule": 0}
+    result = _sp.spec_review_run(
+        p, "add-foo", 0,
+        config_path=config_path,
+        validate_runner=_fake_validate_runner(returncode=0),
+        gate_runner=_fake_gate_runner(json.dumps({"ok": True, "rule_hits": hits})),
+    )
+    assert result["ok"] is True
+    assert captured[0]["gate_rule_hits"] == hits
+
+
+# ============================================================
+# 8. 越界修改 / 意外 commit 的确定性拦截（tasks 8.2.x）
+# ============================================================
+
+
+def test_spec_write_record_rejects_out_of_scope_changes(env_setup, fake_repo):
+    _make_change_dir(fake_repo, "add-foo")
+    p = _with_repo(env_setup, fake_repo)
+    _sp.spec_write_run(p, "add-foo")
+
+    subprocess.run(["git", "add", "-A"], cwd=fake_repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "wip"], cwd=fake_repo, check=True)
+
+    (fake_repo / "src").mkdir(exist_ok=True)
+    (fake_repo / "src" / "npc").mkdir(exist_ok=True)
+    (fake_repo / "src" / "npc" / "cli.py").write_text("# tampered\n")
+
+    line = "RESULT: change=add-foo artifacts=proposal.md validate=pass summary=/tmp/s.md"
+    result = _sp.spec_write_record(p, "add-foo", line)
+    assert result["ok"] is False
+    assert result["error"] == "out_of_scope_changes"
+    assert any("src/npc/cli.py" in pth for pth in result["paths"])
+
+
+def test_spec_write_record_accepts_change_dir_only_edits(env_setup, fake_repo):
+    _make_change_dir(fake_repo, "add-foo")
+    p = _with_repo(env_setup, fake_repo)
+    _sp.spec_write_run(p, "add-foo")
+
+    (fake_repo / "openspec" / "changes" / "add-foo" / "design.md").write_text("# design\n")
+
+    line = "RESULT: change=add-foo artifacts=design.md validate=pass summary=/tmp/s.md"
+    result = _sp.spec_write_record(p, "add-foo", line)
+    assert result["ok"] is True
+
+
+def test_spec_write_record_rejects_unexpected_commit(env_setup, fake_repo):
+    _make_change_dir(fake_repo, "add-foo")
+    p = _with_repo(env_setup, fake_repo)
+    _sp.spec_write_run(p, "add-foo")
+
+    subprocess.run(["git", "add", "-A"], cwd=fake_repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "unexpected"], cwd=fake_repo, check=True)
+
+    line = "RESULT: change=add-foo artifacts=proposal.md validate=pass summary=/tmp/s.md"
+    result = _sp.spec_write_record(p, "add-foo", line)
+    assert result["ok"] is False
+    assert result["error"] == "unexpected_commit"
+
+
+# ============================================================
+# 9. v1 恒 in-session + 路由真相源唯一（tasks 8.3.x）
+# ============================================================
+
+
+def test_spec_write_run_always_deferred(env_setup, fake_repo):
+    _make_change_dir(fake_repo, "add-foo")
+    p = _with_repo(env_setup, fake_repo)
+    result = _sp.spec_write_run(p, "add-foo")
+    assert result["ok"] is True
+    assert result["deferred"] is True
+    assert "spawn_prompt" in result
+    assert "prompt_file" in result
+
+
+def test_spec_write_run_rejects_mimo_backend(env_setup, fake_repo):
+    _make_change_dir(fake_repo, "add-foo")
+    npc_dir = fake_repo / ".npc"
+    npc_dir.mkdir()
+    (npc_dir / "config.toml").write_text('[spec_writer]\nbackend = "mimo"\n', encoding="utf-8")
+    p = _with_repo(env_setup, fake_repo)
+
+    result = _sp.spec_write_run(p, "add-foo", config_path=npc_dir / "config.toml")
+    assert result["ok"] is False
+    assert result["error"] == "spec_routing_violation"
+    rules = {v["rule"] for v in result["violations"]}
+    assert "spec_mimo_in_session" in rules
+    assert not (_sp._spec_base(p, "add-foo") / "spec-write.prompt.md").exists()
+
+
+def test_spec_write_run_rejects_non_orthogonal_writer_review(env_setup, fake_repo):
+    _make_change_dir(fake_repo, "add-foo")
+    npc_dir = fake_repo / ".npc"
+    npc_dir.mkdir()
+    (npc_dir / "config.toml").write_text(
+        '[spec_writer]\nbackend = "codex"\n\n[spec_review]\nengine = "codex"\n', encoding="utf-8"
+    )
+    p = _with_repo(env_setup, fake_repo)
+
+    engine_calls: list[dict] = []
+    result = _sp.spec_write_run(p, "add-foo", config_path=npc_dir / "config.toml")
+    assert result["ok"] is False
+    rules = {v["rule"] for v in result["violations"]}
+    assert "spec_gen_not_orthogonal" in rules
+    assert engine_calls == []
+
+
+def test_spec_pipeline_source_has_no_independent_backend_whitelist():
+    src = SPEC_PIPELINE_SRC.read_text(encoding="utf-8")
+    assert "SUPPORTED_SPEC_" not in src
+    assert "spec_writer_backend_unsupported" not in src
+
+
+def test_agent_timeout_budget_by_change_positive(env_setup, make_args):
+    from npc import agent as _agent
+
+    result_ns = make_args(seq=None, change_id="add-foo", phase="spec_write", base=None, mult=None, max_sec=None)
+    import io
+    import contextlib
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        _agent.timeout_budget(result_ns)
+    out = json.loads(buf.getvalue())
+    assert out["ok"] is True
+    assert out["timeout_sec"] > 0
+
+
+# ============================================================
+# 10. 非目标守护（tasks 9.1–9.3）
+# ============================================================
+
+
+def test_spine_run_command_not_modified_to_spawn_spec_writer():
+    text = (REPO_ROOT / "plugins" / "agent-spine" / "commands" / "spine-run.md").read_text(encoding="utf-8")
+    assert "spine-spec-writer" not in text
+
+
+def test_auto_decide_valid_triggers_unchanged():
+    from npc import auto_decide as _auto_decide
+
+    assert not any(t.startswith("spec-") for t in _auto_decide.VALID_TRIGGERS)
+
+
+def test_no_spec_attributable_blocking_rate_gate_in_spec_pipeline():
+    src = SPEC_PIPELINE_SRC.read_text(encoding="utf-8")
+    assert "spec_attributable_blocking_rate" not in src
+
+
+# ============================================================
+# 11. 端到端（tasks 10.1 / 10.1b）
+# ============================================================
+
+
+def test_e2e_gate_cmd_stub_failure_stops_before_llm(env_setup, fake_repo, monkeypatch, tmp_path):
+    _make_change_dir(fake_repo, "add-foo")
+    stub = tmp_path / "stub_gate.py"
+    stub.write_text(
+        "#!/usr/bin/env python3\nimport json\nprint(json.dumps({'ok': False, 'rule_hits': {}}))\n",
+        encoding="utf-8",
+    )
+    stub.chmod(0o755)
+
+    npc_dir = fake_repo / ".npc"
+    npc_dir.mkdir()
+    (npc_dir / "config.toml").write_text(
+        f'[spec_review]\ngate_cmd = ["python3", "{stub}"]\n', encoding="utf-8"
+    )
+    p = _with_repo(env_setup, fake_repo)
+    monkeypatch.setattr(_sp, "_find_openspec_bin", lambda override=None: "/fake/openspec")
+
+    engine_calls: list[dict] = []
+    monkeypatch.setattr(_sp, "_spec_engine_exec", lambda **kw: (engine_calls.append(kw), 0)[1])
+
+    result = _sp.spec_review_run(
+        p, "add-foo", 0,
+        config_path=npc_dir / "config.toml",
+        validate_runner=_fake_validate_runner(returncode=0),
+    )
+    assert result["ok"] is False
+    assert result["gate_failed"] == "gate_cmd"
+    assert engine_calls == []
+
+
+@pytest.mark.skipif(
+    __import__("shutil").which("openspec") is None or __import__("shutil").which("uv") is None,
+    reason="需要真实 openspec/uv 二进制",
+)
+def test_e2e_real_check_spec_rule_hits_passthrough_and_continues_to_llm(
+    env_setup, fake_repo, monkeypatch
+):
+    archived = (
+        REPO_ROOT / "openspec" / "changes" / "archive" / "2026-07-03-parallel-dag-scheduling"
+    )
+    if not archived.is_dir():
+        pytest.skip("archived fixture 不存在")
+
+    change_dir = fake_repo / "openspec" / "changes" / "e2e-real-gate"
+    change_dir.mkdir(parents=True, exist_ok=True)
+    import shutil as _shutil
+
+    for name in ("proposal.md", "tasks.md", "design.md"):
+        src = archived / name
+        if src.is_file():
+            _shutil.copy(src, change_dir / name)
+    specs_src = archived / "specs"
+    if specs_src.is_dir():
+        _shutil.copytree(specs_src, change_dir / "specs")
+
+    npc_dir = fake_repo / ".npc"
+    npc_dir.mkdir()
+    check_spec_script = REPO_ROOT / "scripts" / "check_spec.py"
+    (npc_dir / "config.toml").write_text(
+        f'[spec_review]\ngate_cmd = ["uv", "run", "--project", "{REPO_ROOT}", "python3", "{check_spec_script}"]\n',
+        encoding="utf-8",
+    )
+    p = _with_repo(env_setup, fake_repo)
+
+    engine_calls: list[dict] = []
+    monkeypatch.setattr(_sp, "_spec_engine_exec", _stub_engine_writes({"verdict": "approve", "findings": []}))
+
+    result = _sp.spec_review_run(
+        p, "e2e-real-gate", 0,
+        config_path=npc_dir / "config.toml",
+    )
+    assert result["ok"] is True
+    assert result["gate_failed"] is None
+    assert result["gate_rule_hits"]["deferred_decision_outside_open_questions"] == 2
+
+
+def test_e2e_spec_write_to_clean_review_emits_telemetry(env_setup, fake_repo, monkeypatch, isolate_telemetry):
+    """端到端（干净 change，mock 引擎）：write → write record → review run → status=clean，且 telemetry 被 emit。"""
+    _make_change_dir(fake_repo, "add-foo")
+    p = _with_repo(env_setup, fake_repo)
+    monkeypatch.setattr(_sp, "_find_openspec_bin", lambda override=None: "/fake/openspec")
+
+    write_result = _sp.spec_write_run(p, "add-foo")
+    assert write_result["ok"] is True
+
+    (fake_repo / "openspec" / "changes" / "add-foo" / "design.md").write_text("# design\n")
+    record_line = "RESULT: change=add-foo artifacts=design.md validate=pass summary=/tmp/s.md"
+    record_result = _sp.spec_write_record(p, "add-foo", record_line)
+    assert record_result["ok"] is True
+
+    captured: list[dict] = []
+    monkeypatch.setattr(
+        _telemetry, "emit_event", lambda record, **kw: (captured.append(record), True)[1]
+    )
+    monkeypatch.setattr(_sp, "_spec_engine_exec", _stub_engine_writes({"verdict": "approve", "findings": []}))
+
+    review_result = _sp.spec_review_run(
+        p, "add-foo", 0,
+        validate_runner=_fake_validate_runner(returncode=0),
+        gate_runner=subprocess.run,
+    )
+    assert review_result["ok"] is True
+    assert review_result["blocking"] == 0
+
+    loop = _sp.run_spec_fix_loop(
+        lambda round_n: review_result if round_n == 0 else {"blocking": 0}, lambda round_n: None, max_rounds=3
+    )
+    assert loop["status"] == "clean"
+    assert any(rec["kind"] == "spec_review.round" for rec in captured)
+
+
+# ============================================================
+# 12. 跨链负向：spec write run 不泄漏 code review 内容（tasks 6.4b / 6.5）
+# ============================================================
+
+
+def test_spec_write_prompt_does_not_leak_code_review_spec_attribution(env_setup, fake_repo):
+    """round-0.review.json 的 finding 含 spec_attribution 时，spec write run 的 prompt 不泄漏。"""
+    _make_change_dir(fake_repo, "add-foo")
+    p = _with_repo(env_setup, fake_repo)
+
+    # 放一份 code review round.json 在别处（implement 流水线的 base，不是 spec 的 base）
+    code_review_base = p.run_dir / "001-add-foo"
+    code_review_base.mkdir(parents=True, exist_ok=True)
+    (code_review_base / "round-0.review.json").write_text(
+        json.dumps({
+            "verdict": "changes-requested",
+            "findings": [{
+                "id": "F1", "severity": "high", "category": "validation", "title": "t",
+                "file": "-", "line_range": "-", "detail": "CODE_REVIEW_ONLY_DETAIL",
+                "recommendation": "r", "in_scope": True, "spec_attribution": "spec-ambiguous",
+            }],
+        })
+    )
+
+    result = _sp.spec_write_run(p, "add-foo")
+    text = Path(result["prompt_file"]).read_text(encoding="utf-8")
+    assert "spec_attribution" not in text
+    assert "spec_attributable_blocking_rate" not in text
+    for val in ("spec-silent", "spec-ambiguous", "spec-contradicted", "impl-deviation"):
+        assert val not in text
+    assert "CODE_REVIEW_ONLY_DETAIL" not in text
+
+
+def test_spec_write_prompt_does_not_leak_code_review_findings(env_setup, fake_repo):
+    """code round-N.review.json 存在 → spec write run 的 prompt 不含其 findings 原文。"""
+    _make_change_dir(fake_repo, "add-foo")
+    p = _with_repo(env_setup, fake_repo)
+
+    code_review_base = p.run_dir / "001-add-foo"
+    code_review_base.mkdir(parents=True, exist_ok=True)
+    (code_review_base / "round-0.review.json").write_text(
+        json.dumps({
+            "verdict": "changes-requested",
+            "findings": [{
+                "id": "F1", "severity": "critical", "category": "security", "title": "leak-title",
+                "file": "-", "line_range": "-", "detail": "ANOTHER_CODE_FINDING_DETAIL",
+                "recommendation": "r", "in_scope": True, "spec_attribution": "impl-deviation",
+            }],
+        })
+    )
+
+    result = _sp.spec_write_run(p, "add-foo")
+    text = Path(result["prompt_file"]).read_text(encoding="utf-8")
+    assert "ANOTHER_CODE_FINDING_DETAIL" not in text
+
+
+# ============================================================
+# 13. subagent 契约内容（tasks 8.5）
+# ============================================================
+
+
+def test_spine_spec_writer_agent_md_contains_result_schema_and_read_instruction():
+    text = (
+        REPO_ROOT / "plugins" / "agent-spine" / "agents" / "spine-spec-writer.md"
+    ).read_text(encoding="utf-8")
+    assert "change=" in text and "artifacts=" in text and "validate=" in text
+    assert "fixed=" in text
+    assert "Read" in text
+    assert "git commit" in text

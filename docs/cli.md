@@ -951,6 +951,92 @@ npc telemetry hotspots [--top N=5] [--since DUR]
 
 ---
 
+## 8d. Spec 生成 + 独立语义评审（`spine-spec-writer`，1.7+）
+
+`/spine-spec` 独立入口用的三件套，与 implement/fix/review 结构同构，但**与 STATE_JSON.progress 解耦**（spec 先于 change 被纳入任何 run 的 progress 数组）：不接受 `--seq`，只接受 `--change <id>`，产物落在 `<run_dir>/spec-<change_id>/`。
+
+**与相邻的三个「spec」命令族的职责边界（避免混淆）**：
+
+| 命令 | 职责 | 是否本节内容 |
+|---|---|---|
+| `npc spec analyze --change <id>` | 实现前闸门：spec↔tasks 漂移/覆盖检查（既有，`spec_analyze.py`） | 否，见既有实现 |
+| `npc spec-report render --seq <N>` | change 交付后的确定性收尾回执（§8c） | 否 |
+| `scripts/check_spec.py --change <id>`（仓库本地资产，非 `npc` 子命令） | 静态语义 lint（四条 warning-only 规则），由 `[spec_review] gate_cmd` 调用 | 作为 gate_cmd 被本节的 `npc spec review run` 调用，但 npc 本身不持有其规则语义 |
+| `npc spec write\|fix\|review`（本节） | 一句话目标 → openspec change artifact → 强制独立语义评审 + 固定轮次 fix 循环 | 是 |
+
+### `npc spec write run --change <id> [--config PATH]`
+
+渲染 write 轮 prompt（`<base>/spec-write.prompt.md`）。渲染前先调 `check_routing(cfg)`；`spec_` 前缀 violation 立即以 `spec_routing_violation` 拒绝，**不渲染任何 prompt 文件**。恒返回 `.deferred == true`（v1 只支持 in-session，由编排者 spawn `spine-spec-writer` subagent）。
+
+prompt 正文 **MUST NOT** 含任何 `SPEC_REVIEW_SCHEMA` 的 `category` 枚举、评分 rubric 细则或任何 `round-*.spec-review.json` 的 findings 原文——write 轮生成侧不得预知本轮评判标准（不变量 1，时点边界）。
+
+**stdout（成功）**：
+
+```json
+{"ok": true, "change": "add-foo", "deferred": true,
+ "spawn_prompt": "请先用 Read 工具读取...", "prompt_file": "/.../spec-add-foo/spec-write.prompt.md"}
+```
+
+### `npc spec write record --change <id> --result "<RESULT行>"`
+
+装订 `spine-spec-writer` 回报的 RESULT 行。必需键：`change`/`artifacts`/`validate`/`summary`（无 `commit`/`tests`——spec writer 的产物是 artifact 文件，不是代码 commit）。
+
+装订前的**确定性越界拦截**（不依赖 prompt 文案）：
+
+1. `git status --porcelain --untracked-files=all` 取变更集；任何路径不在 `openspec/changes/<id>/` 前缀下 → `out_of_scope_changes`，越界路径列表随错误一并返回。
+2. 比对 render 时记下的基线 HEAD 与当前 HEAD；不一致（`spine-spec-writer` 产生了 git commit）→ `unexpected_commit`。
+
+两项任一命中 → `.ok == false`，不装订。
+
+### `npc spec fix run --change <id> --round N [--config PATH]`
+
+渲染 fix 轮 prompt（`<base>/round-N.spec-fix.prompt.md`），只注入**上一轮已签发**（`round-(N-1).spec-review.json`）的 blocking findings 原文——不注入本轮或更晚轮次的内容。`round-(N-1).spec-review.json` 不存在 → `.ok == false`，`prev_spec_review_missing`，不静默降级为「无 findings」。路由前置校验与 `spec write run` 同构。
+
+### `npc spec fix record --change <id> --round N --result "<RESULT行>"`
+
+必需键：`change`/`fixed`/`validate`/`summary`。越界/意外 commit 拦截同 `spec write record`。
+
+### `npc spec review run --change <id> --round N [--engine codex|claude] [--timeout SEC] [--retries N] [--config PATH]`
+
+跑完整一轮 spec 语义评审，门顺序**按成本递增**：
+
+1. `openspec validate <id> --type change --strict` 失败 → `.gate_failed == "openspec_validate"`，不产生任何 LLM 子进程调用。
+2. `[spec_review] gate_cmd`（argv 数组，npc 追加 `--change <id>` 两个元素并以 `shell=False` 执行；未配置 → `.gate_skipped == true` 直接进下一步；返回 `ok == false` 或 stdout 非法 JSON → `.gate_failed == "gate_cmd"`）。npc **只**读其 stdout 的 `ok`/`rule_hits` 两个键，`rule_hits` 原样透传进 telemetry 的 `gate_rule_hits`，不解读任何规则名/语义。
+3. 前两道门都过 → 调 LLM 引擎（codex/claude，同 `npc review run` 的引擎抽象），产物写入**轮次化路径** `<base>/round-N.spec-review.json`（不写无轮次的 `spec-review.json`，因为同一路径存不下多轮）。
+
+**任一门失败均 emit 一条 `spec_review.round` telemetry 事件**（`gate_failed` 非空、`verdict` 为 `null`——未跑评审即无 verdict，不得伪装成判定结果）。
+
+`blocking` 只看 `severity ∈ {critical, high}`（spec finding 无 `in_scope` 概念）。`blocking_categories` 为本轮 blocking findings 的 `category` 去重集合。`SPEC_REVIEW_SCHEMA.category` 枚举为 `ambiguity`/`missing-scenario`/`implementation-leak`/`untestable`/`deferred-decision`/`contradiction`/`scope-creep`，与 code review 的 category 语义不交叠、独立 schema。
+
+**stdout（成功）**：
+
+```json
+{"ok": true, "change": "add-foo", "round": 0, "verdict": "changes-requested",
+ "blocking": 2, "advisory": 1, "blocking_categories": ["ambiguity", "untestable"],
+ "gate_failed": null, "gate_skipped": false, "gate_rule_hits": {"vague_adverb": 0},
+ "pointer": {"spec_review_json": "/.../spec-add-foo/round-0.spec-review.json"}}
+```
+
+**fix 循环终止条件**（由编排者驱动，非 `npc` 自身跑循环）：`[spec_review] max_rounds = N` 表示「最多 `N` 次 spec fix」（review 轮次 `0..N`，共 `N+1` 次 review），默认 `3`。`blocking == 0` → `status=clean`；达 `max_rounds` 仍有 blocking → `status=needs-user-decision`，**绝不自动 archive**。**不复用** `npc review` 的 `rounds_since_strict_decrease` stale 检测——spec 的 ambiguity/scope-creep 可能在改写后反弹，反弹不等于卡死。
+
+### `.npc/config.toml` 新增配置项
+
+```toml
+[spec_writer]
+backend = "claude"        # claude | mimo | codex；默认 claude；mimo 会被 check_routing 拒绝（spec 生成恒 in-session）
+
+[spec_review]
+engine = "codex"           # codex | claude；默认 codex
+gate_cmd = ["uv", "run", "scripts/check_spec.py"]  # argv 数组；省略则跳过该门（gate_skipped=true）
+max_rounds = 3             # 最多 N 次 spec fix；N=0 表示只审不修
+```
+
+### 超时预算：`npc agent timeout-budget|record-timeout --change <id> --phase spec_write|spec_fix-rN`
+
+复用既有四件套算法（渐进退避：base 1800s / mult 1.2 / max 3600s）。与 implement/fix 的 `--seq` 路径并列：`--change` 路径把 retries 计数落在 `<run_dir>/spec-<change_id>/timeout_state.json`（因为 spec phase 尚未纳入 STATE_JSON.progress），`--seq`/`--change` 二选一，`--seq` 优先。
+
+---
+
 ## 9. 收尾
 
 ### `npc summary render`
