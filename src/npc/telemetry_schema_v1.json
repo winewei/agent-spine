@@ -21,6 +21,7 @@
       "enum": [
         "phase.exit",
         "review.round",
+        "spec_review.round",
         "archive.done",
         "agent.spawn",
         "agent.timeout",
@@ -31,7 +32,7 @@
         "auto_decide.decision",
         "run.finalize"
       ],
-      "description": "事件类型；phase.exit 用于 implement/fix/archive 等通用 phase 结束，review.round 是 pipeline.run_review_round 的高层信号；merge_* 是并行 merge queue 事件"
+      "description": "事件类型；phase.exit 用于 implement/fix/archive 等通用 phase 结束，review.round 是 pipeline.run_review_round 的高层信号，spec_review.round 是 spec_pipeline.spec_review_run 每轮结束（成功/门失败/引擎失败均 emit 一次，见 change spine-spec-writer）；merge_* 是并行 merge queue 事件"
     },
     "proj_key": {
       "type": "string",
@@ -78,7 +79,12 @@
     },
     "verdict": {
       "type": ["string", "null"],
-      "enum": ["pass", "should-fix", "must-fix", null]
+      "enum": [
+        "pass", "should-fix", "must-fix",
+        "approve", "passed-with-advisory", "changes-requested",
+        null
+      ],
+      "description": "pass/should-fix/must-fix 为 code review（review.round）判定；approve/passed-with-advisory/changes-requested 为 spec review（spec_review.round）判定，见 SPEC_REVIEW_SCHEMA"
     },
     "blocking_count": {
       "type": ["integer", "null"],
@@ -142,6 +148,20 @@
       "type": ["integer", "null"],
       "minimum": 0
     },
+    "gate_failed": {
+      "type": ["string", "null"],
+      "enum": ["openspec_validate", "gate_cmd", null],
+      "description": "spec_review.round 专有：门失败时标识失败的门（openspec_validate / gate_cmd）；未失败或非 spec review 事件为 null"
+    },
+    "gate_skipped": {
+      "type": ["boolean", "null"],
+      "description": "spec_review.round 专有：[spec_review].gate_cmd 未配置时为 true（该门跳过，非失败）"
+    },
+    "gate_rule_hits": {
+      "type": ["object", "null"],
+      "description": "spec_review.round 专有：gate_cmd stdout JSON 的 rule_hits 透传，npc 不持有其规则语义",
+      "additionalProperties": true
+    },
     "pointer": {
       "type": ["object", "null"],
       "description": "给 meta-agent 反查的指针（绝对路径）",
@@ -152,6 +172,7 @@
         "per_change_events": {"type": ["string", "null"]},
         "summary_md": {"type": ["string", "null"]},
         "review_json": {"type": ["string", "null"]},
+        "spec_review_json": {"type": ["string", "null"]},
         "focus_md": {"type": ["string", "null"]},
         "prompt_md": {"type": ["string", "null"]}
       }

@@ -807,20 +807,21 @@ RESULT: commit=<hash> fixed=<n> tests=<pass|fail> summary=<path> categories_scan
 |---|---|---|
 | `schema_version` | int | 固定 `1` |
 | `ts` | ISO 8601 | 含本地时区偏移 |
-| `kind` | enum | `phase.exit` / `review.round` / `archive.done` / `agent.spawn` / `agent.timeout` |
+| `kind` | enum | `phase.exit` / `review.round` / `spec_review.round` / `archive.done` / `agent.spawn` / `agent.timeout` |
 | `proj_key` | string | 工程 mangle key |
 | `run_ts` | string \| null | YYYY-MM-DD-HHMM |
 | `change_seq`, `change_id`, `phase` | 可空 | |
 | `status` | enum | `done` / `failed` |
 | `duration_ms` | int \| null | |
 | `tokens` | object \| null | `{prompt_bytes, output_bytes, est_input_tokens, est_output_tokens, method}`；估算法默认 `bytes_div_4` |
-| `verdict` | enum | review.round 专用：`pass` / `should-fix` / `must-fix` |
-| `blocking_count`, `blocking_categories` | review.round 专用 | |
-| `engine` | string | review.round 专用：`codex` / `claude` |
+| `verdict` | enum | review.round 专用：`pass` / `should-fix` / `must-fix`；spec_review.round 专用：`approve` / `passed-with-advisory` / `changes-requested` |
+| `blocking_count`, `blocking_categories` | review.round / spec_review.round 专用 | |
+| `engine` | string | review.round / spec_review.round 专用：`codex` / `claude` |
 | `retry_count` | int | review codex 重试次数 |
 | `outcome_reason` | string \| null | failed 时的 reason |
+| `gate_failed`, `gate_skipped`, `gate_rule_hits` | spec_review.round 专用 | 门失败标识 / 门是否跳过 / gate_cmd stdout 的 `rule_hits` 原样透传 |
 | `archive_commit`, `total_rounds` | archive.done 专用 | |
-| `pointer` | object | `{state_json, run_events, per_change_events, summary_md, review_json, focus_md, prompt_md}` 绝对路径 |
+| `pointer` | object | `{state_json, run_events, per_change_events, summary_md, review_json, spec_review_json, focus_md, prompt_md}` 绝对路径 |
 
 完整 JSON Schema：`src/agent_spine/npc/telemetry_schema_v1.json`（与首次写入时拷出的 `_telemetry/schema-v1.json` 内容一致）。
 

@@ -19,6 +19,7 @@ import json
 import subprocess
 from pathlib import Path
 
+import jsonschema
 import pytest
 
 from npc import config as _config
@@ -30,6 +31,7 @@ from npc import telemetry as _telemetry
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SPEC_PIPELINE_SRC = REPO_ROOT / "src" / "npc" / "spec_pipeline.py"
+TELEMETRY_SCHEMA_V1_PATH = REPO_ROOT / "src" / "npc" / "telemetry_schema_v1.json"
 
 
 # ============================================================
@@ -586,6 +588,56 @@ def test_emit_spec_review_round_produces_all_contract_fields(isolate_telemetry, 
     assert not missing
 
 
+def test_emit_spec_review_round_record_validates_against_packaged_schema(isolate_telemetry, monkeypatch):
+    """回归测试 F2：真实 emit_spec_review_round 产出的 record 必须能通过
+    ``telemetry_schema_v1.json``（生产环境实际拷贝给消费者的那份 schema 文件）
+    校验，而不仅是 EMIT_FIELD_CONTRACT 的字段名集合断言。覆盖 approve 判定 +
+    gate_failed/gate_skipped/gate_rule_hits 三个 spec 侧专有字段 + kind 枚举。
+    """
+    captured: list[dict] = []
+    monkeypatch.setattr(
+        _telemetry, "emit_event", lambda record, **kw: (captured.append(record), True)[1]
+    )
+    _telemetry.emit_spec_review_round(
+        proj_key="demo", run_ts="2026-01-01-0000", change_seq=None, change_id="add-foo",
+        round_n=0, base="/tmp/base", ok=True, engine="codex", verdict="approve",
+        blocking_count=0, blocking_categories=[], duration_ms=10, retry_count=0,
+        outcome_reason=None, gate_failed=None, gate_skipped=False, gate_rule_hits={},
+        state_json="/tmp/state.json", run_events="/tmp/run.events.jsonl",
+    )
+    assert len(captured) == 1
+    record = dict(captured[0])
+    record.setdefault("schema_version", 1)
+    record.setdefault("ts", "2026-01-01T00:00:00+08:00")
+
+    schema = json.loads(TELEMETRY_SCHEMA_V1_PATH.read_text(encoding="utf-8"))
+    jsonschema.validate(record, schema)  # 不抛即通过
+
+
+def test_emit_spec_review_round_changes_requested_record_validates_against_packaged_schema(
+    isolate_telemetry, monkeypatch
+):
+    """回归测试 F2：changes-requested 判定 + gate_cmd 门失败场景同样要能通过 schema。"""
+    captured: list[dict] = []
+    monkeypatch.setattr(
+        _telemetry, "emit_event", lambda record, **kw: (captured.append(record), True)[1]
+    )
+    _telemetry.emit_spec_review_round(
+        proj_key="demo", run_ts="2026-01-01-0000", change_seq=None, change_id="add-foo",
+        round_n=1, base="/tmp/base", ok=False, engine=None, verdict=None,
+        blocking_count=None, blocking_categories=None, duration_ms=5, retry_count=0,
+        outcome_reason="gate_cmd_failed", gate_failed="gate_cmd", gate_skipped=False,
+        gate_rule_hits={"rule-a": 2}, state_json="/tmp/state.json", run_events="/tmp/run.events.jsonl",
+    )
+    assert len(captured) == 1
+    record = dict(captured[0])
+    record.setdefault("schema_version", 1)
+    record.setdefault("ts", "2026-01-01T00:00:00+08:00")
+
+    schema = json.loads(TELEMETRY_SCHEMA_V1_PATH.read_text(encoding="utf-8"))
+    jsonschema.validate(record, schema)  # 不抛即通过
+
+
 def test_gate_failed_event_has_null_verdict_not_changes_requested(env_setup, fake_repo, monkeypatch, isolate_telemetry):
     _make_change_dir(fake_repo, "add-foo")
     config_path = _write_gate_cmd_config(fake_repo, ["stub-gate"])
@@ -733,6 +785,82 @@ def test_spec_write_run_rejects_non_orthogonal_writer_review(env_setup, fake_rep
     rules = {v["rule"] for v in result["violations"]}
     assert "spec_gen_not_orthogonal" in rules
     assert engine_calls == []
+
+
+def test_spec_review_run_rejects_engine_name_cli_override_same_source(
+    env_setup, fake_repo, monkeypatch
+):
+    """回归测试 F1：spec_writer.backend=codex，spec_review.engine=claude 通过配置层
+    路由校验，但 CLI ``--engine codex`` 覆盖后 spec_review 实际执行身份变为 codex，
+    与 spec_writer 同源（both_codex）→ 守卫必须用实际执行 engine 校验，拒绝执行，
+    LLM 引擎零调用。
+    """
+    _make_change_dir(fake_repo, "add-foo")
+    npc_dir = fake_repo / ".npc"
+    npc_dir.mkdir()
+    (npc_dir / "config.toml").write_text(
+        '[spec_writer]\nbackend = "codex"\n\n[spec_review]\nengine = "claude"\n',
+        encoding="utf-8",
+    )
+    p = _with_repo(env_setup, fake_repo)
+
+    engine_calls: list[dict] = []
+    monkeypatch.setattr(_sp, "_spec_engine_exec", lambda **kw: (engine_calls.append(kw), 0)[1])
+    monkeypatch.setattr(_sp, "_find_openspec_bin", lambda override=None: "/fake/openspec")
+
+    result = _sp.spec_review_run(
+        p, "add-foo", 0,
+        engine_name="codex",
+        config_path=npc_dir / "config.toml",
+        validate_runner=_fake_validate_runner(returncode=0),
+        gate_runner=_fake_gate_runner(json.dumps({"ok": True, "rule_hits": {}})),
+    )
+    assert result["ok"] is False
+    assert result["error"] == "spec_routing_violation"
+    rules = {v["rule"] for v in result["violations"]}
+    assert "spec_gen_not_orthogonal" in rules
+    assert engine_calls == []
+
+
+def test_spec_review_run_allows_engine_name_cli_override_different_source(
+    env_setup, fake_repo, monkeypatch
+):
+    """回归测试 F1 正向场景：spec_writer.backend=claude，spec_review.engine=codex，
+    CLI ``--engine claude`` 覆盖后 spec_review 变为 claude，但与 spec_writer 的
+    bin/model 不同源 → 合法覆盖不应被误拒，LLM 引擎正常被调用。
+    """
+    _make_change_dir(fake_repo, "add-foo")
+    npc_dir = fake_repo / ".npc"
+    npc_dir.mkdir()
+    (npc_dir / "config.toml").write_text(
+        '[spec_writer]\nbackend = "claude"\nbin = "claude"\nmodel = "claude-sonnet-4-5"\n\n'
+        '[spec_review]\nengine = "codex"\nclaude_bin = "claude"\nclaude_model = "claude-opus-4-8"\n',
+        encoding="utf-8",
+    )
+    p = _with_repo(env_setup, fake_repo)
+
+    engine_calls: list[dict] = []
+
+    def fake_engine(**kw):
+        engine_calls.append(kw)
+        kw["review_out"].parent.mkdir(parents=True, exist_ok=True)
+        kw["review_out"].write_text(json.dumps({"verdict": "approve", "findings": []}))
+        kw["events_out"].parent.mkdir(parents=True, exist_ok=True)
+        kw["events_out"].write_text("x")
+        return 0
+
+    monkeypatch.setattr(_sp, "_spec_engine_exec", fake_engine)
+    monkeypatch.setattr(_sp, "_find_openspec_bin", lambda override=None: "/fake/openspec")
+
+    result = _sp.spec_review_run(
+        p, "add-foo", 0,
+        engine_name="claude",
+        config_path=npc_dir / "config.toml",
+        validate_runner=_fake_validate_runner(returncode=0),
+        gate_runner=_fake_gate_runner(json.dumps({"ok": True, "rule_hits": {}})),
+    )
+    assert result.get("error") != "spec_routing_violation"
+    assert len(engine_calls) == 1
 
 
 def test_spec_pipeline_source_has_no_independent_backend_whitelist():
