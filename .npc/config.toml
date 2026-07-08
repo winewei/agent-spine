@@ -1,0 +1,3 @@
+# npc 项目级运行配置。本仓库是 uv 项目，测试须经 uv 解释器（系统 python3 无 pytest）。
+[verify]
+test = "uv run pytest -q"
