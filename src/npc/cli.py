@@ -733,6 +733,21 @@ def _build_parser() -> argparse.ArgumentParser:
         _cmd_path="telemetry cages",
     )
 
+    # ===== spec-report =====
+    p_spec_rep = sub.add_parser(
+        "spec-report",
+        help="单 change archived 后派生「工作 agent 表现」收尾回执（md + json + telemetry）",
+    )
+    sub_spec_rep = p_spec_rep.add_subparsers(dest="spec_report_cmd", required=True)
+    p_spec_rep_render = sub_spec_rep.add_parser(
+        "render",
+        help="从 STATE_JSON + _telemetry + git 派生三产物（仅限 archived 终态）",
+    )
+    p_spec_rep_render.add_argument("--seq", type=int, required=True)
+    p_spec_rep_render.set_defaults(
+        handler=_make_handler("spec_report", "render"), _cmd_path="spec-report render"
+    )
+
     return parser
 
 

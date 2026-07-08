@@ -439,6 +439,12 @@ printf '%s' "$ARCH" | jq -r '{ok, archive_commit, total_rounds, error}'
 ```
 失败（commit-chain / validate / archive / git）→ 进 3d 决策点。
 
+archived 成功后（`.ok == true`），**非阻塞**派生单-change 收尾回执（三产物：`spec-report.json` / `spec-report.md` / `spec.report` telemetry 事件）——即使返回 `ok:false` 也不回滚已提交的 archive、不重跑、不进 3d：
+
+```bash
+npc spec-report render --seq $SEQ >/dev/null 2>&1 || true
+```
+
 ### 3d. 决策点（卡死 / implement 失败 / archive 失败时）
 
 **auto 档**：按场景选真实合法的 trigger 值（`npc auto-decide` 只接受 `auto_decide.VALID_TRIGGERS` 中的词，别的值一律 `invalid_trigger` exit 2）：

@@ -907,6 +907,50 @@ npc telemetry hotspots [--top N=5] [--since DUR]
 
 ---
 
+## 8c. Spec Report：单 change 收尾回执（1.6+）
+
+`spec-report`：每交付一个 change（**成功 archived** 后）从「工作 agent 表现」视角派生一份单-change 收尾回执。纯确定性派生，不新增采集、不 spawn agent。
+
+### `npc spec-report render --seq <N>`
+
+从 `STATE_JSON` + `_telemetry` + git 派生该 change 的三份同源产物：
+
+- `<base>/spec-report.json`：审计契约源，字段齐全（commit chain、review/fix 轮数、blocking_trend、one_shot、category 分布、各 phase 与总耗时、`estimated_tokens_by_backend`、自报核验、叙事）。
+- `<base>/spec-report.md`：人读简报，含固定标题段（终态 / 收敛 / 返工 / 耗时 / 资源 / 自报核验 / 叙事），行数不超过 `spec_report.MD_LINE_LIMIT`（80），不含任何 `*.summary.md` 原文。
+- 一条 `kind=spec.report` 的 telemetry 事件：`common_metrics` 子集（`final_status` / `review_rounds` / `fix_rounds` / `blocking_trend` / `total_duration_ms` / `estimated_tokens_total` / `self_report_summary_verdict`）+ pointer，不复制全量报告。
+
+`common_metrics` 在三视图中取值保证一致（同一 `common_metrics()` 函数产出）。
+
+**自报核验（C，确定性，不调 LLM）**：
+
+- `regressions_added`：按该 fix 轮 commit range 的 `git diff --name-only` 判定是否触及测试文件（路径含 `test`/`spec` 通用启发式）。未声明 → `ok`；声明了且命中测试文件 → `ok`；声明了但未命中 → `warn`；缺 commit/字段 → `unverifiable`。
+- `categories_scanned`：整个 change 聚合后与 `categories_seen`（观测源）对照；覆盖全部 → `ok`；有遗漏 → `warn`；自报缺失 → `unverifiable`。
+- 汇总结论优先级：`warn` > `unverifiable` > `ok`（缺数据不误报 `warn`）。
+
+**非法输入**（`--seq` 不存在 / 目标非 `archived` 终态 / state 损坏）→ 单行 `ok:false` + 稳定 error code，不产半成品：
+
+| error code | 场景 |
+|---|---|
+| `env_missing` | 找不到当前 run |
+| `state_not_found` / `state_invalid` | STATE_JSON 缺失/解析失败 |
+| `seq_out_of_range` | `--seq` 超出 progress 长度 |
+| `not_archived` | 目标 change 非 `archived` 终态 |
+
+**产物落盘 / telemetry 写入失败**（磁盘不可写等）属于 best-effort 容错，不属于上表非法输入：返回 `ok:false` 但不抛栈，`errors` 字段列出具体失败项；调用方（spine-run 主循环）以非阻塞方式调用，即使失败也不回滚已提交的 archive。
+
+**stdout（成功）**：
+
+```json
+{"ok": true, "seq": 2, "change_id": "add-thing",
+ "spec_report_json": "/.../002-add-thing/spec-report.json",
+ "spec_report_md": "/.../002-add-thing/spec-report.md",
+ "telemetry_emitted": true}
+```
+
+主循环调用时机：archive 成功（`npc archive run` 返回 `ok:true`）后立即调用一次，见 spine-run.md Step 3c。
+
+---
+
 ## 9. 收尾
 
 ### `npc summary render`
