@@ -241,6 +241,49 @@ def _do_phase_enter(p: _paths.Paths, seq: int, phase: str) -> dict:
     return {"base": captured["base"], "change_id": captured["change_id"], "started_at": started_at}
 
 
+# ============================================================
+# _do_phase_exit 调用点 handoff 契约（结构不变量 R1，第二层）
+# ============================================================
+#
+# 背景缺陷（已复发多次）：record_implement / record_fix 把 tests_verified 等已算出的字段
+# 写进 `extra={...}` 传给 _do_phase_exit，但 _do_phase_exit 转发给 telemetry.emit_phase_exit
+# 时曾经只透传 `engine`，导致这些字段在调用点被静默丢弃、telemetry 侧永远看不到。
+#
+# PHASE_EXIT_EXTRA_CONTRACT：声明每个 phase family 中，已算出并写入 `extra` 的字段
+# MUST 被 _do_phase_exit 透传给 telemetry。
+#
+# PHASE_EXIT_EXTRA_LOCAL_ONLY：显式登记"已算出但故意只落 state phase record、不透传
+# telemetry"的字段（如 commit/summary 路径——已有更合适的落点，透传只会重复 payload）。
+#
+# 每个出现在 record_implement / record_fix 的 `_do_phase_exit(..., extra={...})` 字面量里
+# 的字段名，MUST 属于二者之一，否则 `tests/test_structural_invariants.py` 的 AST 扫描会 fail
+# （防止新增已算出字段既不透传也不登记、悄悄被丢）。
+PHASE_EXIT_EXTRA_CONTRACT: dict[str, frozenset[str]] = {
+    "implement": frozenset({"tests_verified"}),
+    "fix": frozenset({"tests_verified"}),
+}
+
+PHASE_EXIT_EXTRA_LOCAL_ONLY: dict[str, frozenset[str]] = {
+    "implement": frozenset({
+        "commit", "tasks", "tests", "summary", "reason", "notes",
+        "rerun_tail", "missing_keys",
+    }),
+    "fix": frozenset({
+        "commit", "fixed", "tests", "summary", "categories_scanned",
+        "regressions_added", "reason", "notes", "rerun_tail", "missing_keys",
+    }),
+}
+
+
+def _phase_family(phase: str) -> str:
+    """把具体 phase（如 fix-r2）折叠为 handoff 契约的 family key（fix）。"""
+    if phase == "implement":
+        return "implement"
+    if phase.startswith("fix-r"):
+        return "fix"
+    return phase
+
+
 def _do_phase_exit(
     p: _paths.Paths,
     seq: int,
@@ -307,6 +350,16 @@ def _do_phase_exit(
     )
     # telemetry：高层 review-rN / archive-done 走专用 emit；其余统一走 phase.exit
     if not (phase.startswith("review-r") or (phase == "archive" and status == "done")):
+        # handoff 透传：PHASE_EXIT_EXTRA_CONTRACT 声明的、本次 extra 中已算出的字段
+        # 必须一并透给 telemetry（不能像历史缺陷那样只透 engine，把 tests_verified 等丢在调用点）。
+        telemetry_extra: dict[str, Any] = {}
+        if isinstance(extra, dict):
+            if extra.get("engine"):
+                telemetry_extra["engine"] = extra["engine"]
+            handoff_fields = PHASE_EXIT_EXTRA_CONTRACT.get(_phase_family(phase), frozenset())
+            for field in handoff_fields:
+                if field in extra:
+                    telemetry_extra[field] = extra[field]
         _telemetry.emit_phase_exit(
             proj_key=p.proj_key,
             canonical_proj_key=p.canonical_proj_key,
@@ -320,7 +373,7 @@ def _do_phase_exit(
             state_json=p.state_json,
             run_events=p.run_events,
             outcome_reason=extra.get("reason") if isinstance(extra, dict) else None,
-            extra={"engine": extra.get("engine")} if isinstance(extra, dict) and extra.get("engine") else None,
+            extra=telemetry_extra or None,
         )
     return {
         "change_id": captured["change_id"],
@@ -1103,6 +1156,29 @@ def run_archive(
 # ============================================================
 
 
+# RESULT 行必需键 —— 单一事实源（结构不变量 R2）。
+#
+# 背景缺陷：历史上 `_parse_result_line(text, keys)` 接收 `keys` 参数却从不校验，
+# 直接把解析出的字典原样返回；缺键的 RESULT 行会被静默当作合法输入处理（往往在下游
+# `.get(key, 默认值)` 处产生误导性默认值，而不是快速失败并指明缺了什么）。
+#
+# `record_implement` / `record_fix` MUST 引用本常量，通过 `_missing_required_keys()`
+# 显式校验，缺任一键时返回 `ok:false` 并指明缺失键（而非静默兜底）。
+RESULT_REQUIRED_KEYS: dict[str, frozenset[str]] = {
+    "implement": frozenset({"commit", "tasks", "tests", "summary"}),
+    "fix": frozenset({
+        "commit", "fixed", "tests", "summary",
+        "categories_scanned", "regressions_added",
+    }),
+}
+
+
+def _missing_required_keys(parsed: dict, phase: str) -> list[str]:
+    """返回 parsed 中缺失的 RESULT_REQUIRED_KEYS[phase] 键（升序，输出确定性）。"""
+    required = RESULT_REQUIRED_KEYS.get(phase, frozenset())
+    return sorted(k for k in required if k not in parsed)
+
+
 def _parse_result_line(text: str, keys: list[str]) -> dict | None:
     """从 sub-agent message 末尾抽 RESULT 行。
 
@@ -1148,7 +1224,7 @@ def record_implement(
     change_id = entry["change_id"]
     base = Path(entry.get("base") or _paths.base_for(p, seq, change_id))
 
-    parsed = _parse_result_line(result_line, ["commit", "tasks", "tests", "summary"])
+    parsed = _parse_result_line(result_line, list(RESULT_REQUIRED_KEYS["implement"]))
     if parsed is None:
         _do_phase_exit(
             p, seq, "implement",
@@ -1157,6 +1233,21 @@ def record_implement(
             progress_updates={"status": "failed", "reason": "implementer"},
         )
         return {"ok": False, "seq": seq, "error": "result-line-missing"}
+
+    missing_keys = _missing_required_keys(parsed, "implement")
+    if missing_keys:
+        _do_phase_exit(
+            p, seq, "implement",
+            status="failed",
+            extra={"reason": "result-missing-keys", "missing_keys": missing_keys},
+            progress_updates={"status": "failed", "reason": "implementer"},
+        )
+        return {
+            "ok": False,
+            "seq": seq,
+            "error": "result-missing-keys",
+            "missing_keys": missing_keys,
+        }
 
     commit = parsed.get("commit", "-")
     tests = parsed.get("tests", "fail")
@@ -1297,7 +1388,7 @@ def record_fix(
 
     parsed = _parse_result_line(
         result_line,
-        ["commit", "fixed", "tests", "summary", "categories_scanned", "regressions_added"],
+        list(RESULT_REQUIRED_KEYS["fix"]),
     )
     if parsed is None:
         _do_phase_exit(
@@ -1307,6 +1398,22 @@ def record_fix(
             progress_updates={"status": "needs-user-decision", "reason": f"fixer-failed-r{round_n}"},
         )
         return {"ok": False, "seq": seq, "round": round_n, "error": "result-line-missing"}
+
+    missing_keys = _missing_required_keys(parsed, "fix")
+    if missing_keys:
+        _do_phase_exit(
+            p, seq, phase,
+            status="failed",
+            extra={"reason": "result-missing-keys", "missing_keys": missing_keys},
+            progress_updates={"status": "needs-user-decision", "reason": f"fixer-failed-r{round_n}"},
+        )
+        return {
+            "ok": False,
+            "seq": seq,
+            "round": round_n,
+            "error": "result-missing-keys",
+            "missing_keys": missing_keys,
+        }
 
     commit = parsed.get("commit", "-")
     tests = parsed.get("tests", "fail")

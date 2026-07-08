@@ -44,6 +44,37 @@ EVENTS_FILENAME = "events.ndjson"
 SCHEMA_FILENAME = "schema-v1.json"
 AGG_DIRNAME = "aggregates"
 
+# ============================================================
+# emit 输出字段契约（结构不变量 R1，第一层：单一事实源，近各 emit_* 函数）
+# ============================================================
+#
+# 每个 telemetry kind 的事件"必须携带"的字段名集合（存在即可，值可为 None）。
+# `tests/test_structural_invariants.py` 会：
+#   1. monkeypatch emit_event 捕获各 emit_* 函数产出的真实事件，断言含此处登记的全部字段；
+#   2. AST 扫描本文件所有 emit_* 函数字面量声明的 "kind"，断言均已在此登记（防止新增 kind 漏登记）。
+#
+# 新增一个 emit_* kind 时，MUST 在此登记其字段契约，否则结构测试 fail。
+EMIT_FIELD_CONTRACT: dict[str, frozenset[str]] = {
+    "phase.exit": frozenset({
+        "proj_key", "canonical_proj_key", "run_ts", "change_seq", "change_id",
+        "phase", "status", "duration_ms", "outcome_reason", "pointer",
+    }),
+    "review.round": frozenset({
+        "proj_key", "canonical_proj_key", "run_ts", "change_seq", "change_id",
+        "phase", "round", "status", "duration_ms", "verdict", "blocking_count",
+        "blocking_categories", "engine", "retry_count", "outcome_reason",
+        "tokens", "pointer",
+    }),
+    "archive.done": frozenset({
+        "proj_key", "canonical_proj_key", "run_ts", "change_seq", "change_id",
+        "phase", "status", "duration_ms", "archive_commit", "total_rounds", "pointer",
+    }),
+    "agent.spawn": frozenset({
+        "proj_key", "canonical_proj_key", "run_ts", "change_seq", "change_id",
+        "phase", "round", "tokens", "pointer",
+    }),
+}
+
 # token 估算系数：bytes / 4 ≈ tokens（OpenAI/Anthropic tokenizer 在中英混合文本上的中位数）。
 # 故意不引 tiktoken，避免冷启动开销 + 第三方依赖污染。
 TOKEN_BYTES_PER = 4
