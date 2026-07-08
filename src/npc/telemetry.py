@@ -292,6 +292,7 @@ def aggregate(
         "kinds": defaultdict(int),
         "reasons": defaultdict(int),
         "verdicts": defaultdict(int),
+        "blocking_categories": defaultdict(int),
     })
 
     for ev in events:
@@ -337,6 +338,9 @@ def aggregate(
         verdict = ev.get("verdict")
         if verdict:
             b["verdicts"][verdict] += 1
+        for cat in ev.get("blocking_categories") or []:
+            if cat:
+                b["blocking_categories"][cat] += 1
 
     out: dict[str, dict] = {}
     for k, b in buckets.items():
@@ -360,6 +364,7 @@ def aggregate(
             "kinds": dict(b["kinds"]),
             "reasons": dict(b["reasons"]),
             "verdicts": dict(b["verdicts"]),
+            "top_blocking_categories": _top_n_dict(b["blocking_categories"], 5),
         }
     return out
 
@@ -389,6 +394,7 @@ def hotspots(events: Iterable[dict], top: int = 5) -> list[dict]:
                 "retry_count_sum": retries,
                 "top_reasons": _top_n_dict(stats["reasons"], 3),
                 "top_verdicts": _top_n_dict(stats["verdicts"], 3),
+                "top_blocking_categories": stats["top_blocking_categories"],
             }
         )
     scored.sort(key=lambda x: x["score"], reverse=True)

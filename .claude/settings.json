@@ -19,6 +19,7 @@
       "Bash(make *)",
       "Bash(cargo *)",
       "Bash(go *)"
-    ]
+    ],
+    "defaultMode": "acceptEdits"
   }
 }
