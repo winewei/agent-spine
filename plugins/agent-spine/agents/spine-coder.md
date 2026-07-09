@@ -62,7 +62,7 @@ RESULT: commit=- tasks=<已完成数> tests=fail summary=<路径或-> notes=<关
 
 - **先 Read prompt 文件再动手**，不要凭引导语猜任务。
 - **改动最小、聚焦当前 change**；不顺手重构无关代码。
-- **commit 与 summary.md 缺一不可**——主 session 的 `npc record` 会校验两者存在，缺了会判你失败。
+- **commit 与 summary.md 缺一不可**——主 session 的 `npc implement record` / `npc fix record` 会校验两者存在，缺了会判你失败。
 - **tests 如实填**：通过填 `pass`，失败填 `fail` 并在 notes/summary 写清原因，**绝不谎报**。
 - **卡住就如实失败回报**（commit=- tests=fail + 清晰 notes），不要假装完成——主 session 会据此走决策点，比你硬撑更安全。
 - **RESULT 行必须是最后一行**，且严格遵守 schema——主 session 只解析这一行，格式错会导致装订失败。

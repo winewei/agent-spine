@@ -563,7 +563,7 @@ Recommendation: 添加 len(username) > 256 的判定...
 SPAWN=$(npc agent spawn-prompt --phase implement --change-id add-foo)
 PROMPT_TEXT=$(printf '%s' "$SPAWN" | jq -r '.prompt')
 # 主 session 直接调用 Agent 工具：
-# Agent(subagent_type="senior-code-developer", description="Implement add-foo", prompt=$PROMPT_TEXT)
+# Agent(subagent_type="spine-coder", description="Implement add-foo", prompt=$PROMPT_TEXT)
 ```
 
 **exit**：`0` 成功；`2` 用法错（缺 round / 互斥参数同时给）；`3` prompt_file 或 extension 文件不存在
@@ -1117,7 +1117,7 @@ for SEQ in 1 2 3; do
   npc agent prompt render --phase implement --change-id "$CID"
   SPAWN=$(npc agent spawn-prompt --phase implement --change-id "$CID")
   PROMPT_TEXT=$(printf '%s' "$SPAWN" | jq -r '.prompt')
-  # 主 session: Agent(subagent_type="senior-code-developer", prompt=$PROMPT_TEXT)
+  # 主 session: Agent(subagent_type="spine-coder", prompt=$PROMPT_TEXT)
   # sub-agent 返回 RESULT 行后：
   IMPL=$(npc implement record --seq $SEQ --result "$RESULT_LINE")
   [ "$(printf '%s' "$IMPL" | jq -r '.ok')" = "true" ] || continue
@@ -1133,7 +1133,7 @@ for SEQ in 1 2 3; do
     npc agent prompt render --phase fix --change-id "$CID" --round $N
     SPAWN=$(npc agent spawn-prompt --phase fix --change-id "$CID" --round $N)
     PROMPT_TEXT=$(printf '%s' "$SPAWN" | jq -r '.prompt')
-    # 主 session: Agent(subagent_type="senior-code-developer", prompt=$PROMPT_TEXT)
+    # 主 session: Agent(subagent_type="spine-coder", prompt=$PROMPT_TEXT)
     FIX=$(npc fix record --seq $SEQ --round $N --result "$FIX_RESULT_LINE")
     [ "$(printf '%s' "$FIX" | jq -r '.ok')" = "true" ] || break
     R=$(npc review run --seq $SEQ --round $N)

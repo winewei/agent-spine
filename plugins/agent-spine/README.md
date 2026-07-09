@@ -1,6 +1,6 @@
 # agent-spine plugin
 
-本地自主 **harness**，跑在 Claude Code 进程内——无服务、无容器、无常驻进程。把"长时运行 + 自主决策 + 反复 review 打磨"的编排做成纯 markdown skill，确定性动作全部委托给 [`npc` CLI](https://github.com/winewei/agent-spine)。
+本地自主 **harness**，跑在 Claude Code 进程内——无服务、无容器、无常驻进程。把"长时运行 + 自主决策 + 反复 review 打磨"的编排做成纯 markdown plugin commands，确定性动作全部委托给 [`npc` CLI](https://github.com/winewei/agent-spine)。
 
 ## 三层职责
 

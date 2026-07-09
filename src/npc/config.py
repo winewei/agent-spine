@@ -86,7 +86,7 @@ class ReviewEngineConfig:
 
 @dataclass(frozen=True)
 class CoderConfig:
-    """coder（执行体）后端配置。成本路由：coder 默认走廉价层（mimo），但 review/决策恒留 premium。
+    """coder（执行体）后端配置。成本路由：coder 默认 claude，可显式配置走廉价层（mimo）；review/决策恒留 premium。
 
     backend 取值见 :data:`SUPPORTED_CODER_BACKENDS`：
     - ``claude``：headless ``claude -p``（用 Claude 订阅 / 当前 session provider）

@@ -12,7 +12,7 @@
 ## 测试
 
 ```bash
-uv run pytest -q                 # 全量（60+ 文件，1200+ 测试）
+uv run pytest -q                 # 全量（1200+ 测试）
 uv run pytest tests/test_pipeline.py -v
 uv run pytest --cov=npc          # 覆盖率（包名是 npc）
 ```

@@ -181,7 +181,7 @@ npc agent prompt render --phase implement --change-id add-foo
 # 2. 取薄引导语；主 session 用它作为 Agent.prompt 字段
 SPAWN=$(npc agent spawn-prompt --phase implement --change-id add-foo)
 PROMPT_TEXT=$(echo "$SPAWN" | jq -r '.prompt')
-# 主 session：Agent(subagent_type="senior-code-developer", prompt="$PROMPT_TEXT")
+# 主 session：Agent(subagent_type="spine-coder", prompt="$PROMPT_TEXT")
 ```
 
 Fix 阶段额外做的事：自动从 `$BASE/round-(N-1).review.json` 抽 blocking findings、从 state 取 `categories_seen` / `blocking_trend` / `implement_commit`，全部注入到模板，调用方无需先跑 `npc fixer findings`。
@@ -320,7 +320,7 @@ for SEQ in 1 2 3; do
   npc state add-change $SEQ "$CID"
 
   # 4.1 Implement — sub-agent 跑完后把 RESULT 行喂回
-  # 主 session 写 prompt → Agent(senior-code-developer) → 拿 RESULT 行
+  # 主 session 写 prompt → Agent(spine-coder) → 拿 RESULT 行
   IMPL=$(npc implement record --seq $SEQ --result "$RESULT_LINE")
   [ "$(echo "$IMPL" | jq -r '.ok')" = "true" ] || continue
 
@@ -331,7 +331,7 @@ for SEQ in 1 2 3; do
      && [ "$(echo "$R" | jq -r '.stale')" = "false" ] \
      && [ $N -lt 20 ]; do
     N=$((N+1))
-    # LLM 写 fix.prompt（基于 R.findings_path）→ Agent(senior-code-developer)
+    # LLM 写 fix.prompt（基于 R.findings_path）→ Agent(spine-coder)
     FIX=$(npc fix record --seq $SEQ --round $N --result "$FIX_RESULT_LINE")
     [ "$(echo "$FIX" | jq -r '.ok')" = "true" ] || break
     R=$(npc review run --seq $SEQ --round $N)
@@ -422,7 +422,7 @@ agent-spine/
 │   ├── verify.py / doctor.py / status.py / cost.py / clean.py    # 质量门、体检、运维
 │   ├── telemetry.py / summary.py / auto_decide.py                # 跨 run 指标、收尾、--auto 决策器
 │   └── ...
-└── tests/                      # pytest 套件：60+ 文件、1200+ 测试，与 src/npc 模块一一对应
+└── tests/                      # pytest 套件：1200+ 测试，与 src/npc 模块一一对应
 ```
 
 ---
@@ -430,7 +430,7 @@ agent-spine/
 ## 测试
 
 ```bash
-uv run pytest -q                          # 跑全部（60+ 文件，1200+ 测试）
+uv run pytest -q                          # 跑全部（1200+ 测试）
 uv run pytest tests/test_pipeline.py -v   # 跑 pipeline 模块
 uv run pytest tests/test_agent.py -v      # 跑 agent prompt 模块
 uv run pytest -k phase --tb=short         # 按名称过滤

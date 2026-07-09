@@ -27,9 +27,9 @@ npc --version          # 应输出当前版本（见 pyproject.toml）
 /plugin install agent-spine@agent-spine
 ```
 
-装完得到三个能力：`/spine-run`、`/spine-analyze`、`spine-coder`（subagent）。
+装完得到 5 个能力：commands `/spine-run`、`/spine-spec`、`/spine-analyze` + agents `spine-coder`、`spine-spec-writer`。
 
-> CLI 与 plugin 版本应保持一致；升级 CLI（`uv tool upgrade agent-spine`）后建议同步 `/plugin update agent-spine@agent-spine`。
+> CLI 与 plugin 版本应保持一致；升级 CLI（`uv tool upgrade npc`，tool 名是 npc）后建议同步 `/plugin update agent-spine@agent-spine`。
 
 ---
 

@@ -91,7 +91,7 @@ openspec list --json    # 确认 change 存在
 
 **B. 自由目标 → 拆解**
 1. 把目标拆成一个或多个**单一职责**的 change（每个 change 一件可独立 implement+review+archive 的事）。
-2. 为每个 change 起 kebab-case 名，逐个 `openspec new change "<name>"` 生成脚手架，并补齐 implement 所需 artifact（参照工程内 openspec schema：proposal / specs / design / tasks）。可借助 `/opsx:ff` 思路批量生成。
+2. 为每个 change 起 kebab-case 名，逐个 `openspec new change "<name>"` 生成脚手架，并补齐 implement 所需 artifact（参照工程内 openspec schema：proposal / specs / design / tasks）。可借助 `/opsx:propose` 批量生成。
 3. 排好 plan_order。
 
 **C. 空输入** → AskUserQuestion 开放式问"要做什么"，再走 B。
