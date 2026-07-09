@@ -22,7 +22,7 @@
 
 ## 前置依赖
 
-- **`npc` CLI**（必需，内置 `src/npc`；亦作独立仓库 [cmzz/npc](https://github.com/cmzz/npc) 发布供复用）：
+- **`npc` CLI**（必需，内置 `src/npc`）：
   在 agent-spine 仓库根 `uv tool install --force --from . npc`
 - **`git`**、**`openspec`**（archive + 目标拆解需要）
 - **`codex`**（默认 review 引擎；可经 `.npc/config.toml` 切 `claude` 引擎）
@@ -39,6 +39,7 @@
 ```text
 /spine-run 给认证模块加限流 --auto      # 自由目标 → 自动拆解 → 全自主跑完
 /spine-run add-rate-limit               # 已有 openspec change → 交互档跑
+/spine-spec "给认证模块加限流"           # 只产 spec：撰写 + 强制语义评审，产出喂给 /spine-run
 /spine-analyze                          # 跑几个 run 后分析、迭代 harness 自身
 ```
 

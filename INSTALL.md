@@ -2,7 +2,7 @@
 
 本指南给 **执行安装的 agent（如 Claude Code）** 用。下面是一句话安装 + 每步验证 + 失败处置，便于 agent 自检与排错。
 
-> spine agent = `npc` CLI（确定性执行层，内置 `src/npc`）+ harness plugin（`/spine-run`、`/spine-analyze`、`spine-coder`）。
+> spine agent = `npc` CLI（确定性执行层，内置 `src/npc`）+ harness plugin（`/spine-run`、`/spine-spec`、`/spine-analyze`、`spine-coder`、`spine-spec-writer`）。
 
 ## 一句话安装
 
@@ -12,7 +12,7 @@
 uv tool install --force --from . npc && claude plugin marketplace add "$(pwd)" && claude plugin install agent-spine@agent-spine --scope user
 ```
 
-装完 **重启 Claude Code** 加载 `/spine-run`、`/spine-analyze`、`spine-coder`，再 `npc doctor` 体检。
+装完 **重启 Claude Code** 加载 `/spine-run`、`/spine-spec`、`/spine-analyze`、`spine-coder`、`spine-spec-writer`，再 `npc doctor` 体检。
 无 `claude` CLI 时只跑前半句装 npc，plugin 改在 Claude Code 内 `/plugin` 手动装。若要逐步执行 / 排错，按下面来。
 
 ---
@@ -30,12 +30,12 @@ command -v git && command -v uv && echo OK
 ```bash
 test -f pyproject.toml && test -d src/npc && echo "src/npc OK"
 ```
-- npc 已内置在本仓库（`src/npc`），无需子模块。同一套 npc 亦作独立仓库 [cmzz/npc](https://github.com/cmzz/npc) 发布供其它项目复用。
+- npc 已内置在本仓库（`src/npc`），无需子模块。
 
 ### 2. 装 npc CLI（内置 src/npc）
 ```bash
 uv tool install --force --from . npc
-npc --version          # 期望：npc 1.3.0
+npc --version          # 期望：与 pyproject.toml 中 version 一致
 ```
 验证：`npc --version` 有输出即成功。`--force` 必需（覆盖旧版）。
 
@@ -45,7 +45,7 @@ claude plugin marketplace add "$(pwd)"
 claude plugin install agent-spine@agent-spine --scope user
 claude plugin list | grep agent-spine
 ```
-- **装完必须重启 Claude Code** 才加载 `/spine-run`、`/spine-analyze`、`spine-coder`。
+- **装完必须重启 Claude Code** 才加载 `/spine-run`、`/spine-spec`、`/spine-analyze`、`spine-coder`、`spine-spec-writer`。
 - 已装过 → `claude plugin update agent-spine@agent-spine`。
 
 ### 4. 环境体检

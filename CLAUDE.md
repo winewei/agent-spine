@@ -2,6 +2,23 @@
 
 本仓库的 harness CLI 是 **`npc`**（`~/.local/bin/npc`，Python + uv）。
 
+## 布局速览
+
+- `src/npc/` —— 确定性执行层（Python 包名就是 `npc`，entry `npc.cli:main`；**不是** `agent_spine`）
+- `plugins/agent-spine/` —— 智能层 plugin：commands（`/spine-run` `/spine-spec` `/spine-analyze`）+ agents（`spine-coder`、`spine-spec-writer`）+ hooks
+- `docs/cli.md` —— npc 完整契约；`docs/principles.md` —— 4 条不变量
+- 运行轨迹全部落 `~/task_log/<PROJ_KEY>/`，工程内零侵入
+
+## 测试
+
+```bash
+uv run pytest -q                 # 全量（60+ 文件，1200+ 测试）
+uv run pytest tests/test_pipeline.py -v
+uv run pytest --cov=npc          # 覆盖率（包名是 npc）
+```
+
+改 `src/npc/` 任何行为，对应 `tests/test_*.py` 必须同步补测试。
+
 ## 用 npc，不要自己写脚本
 
 任何涉及 spine 生命周期、telemetry、state、run 索引、cost、status 的操作，**先跑 `npc --help` 和 `npc <cmd> --help`** 看有没有现成子命令，再决定是否需要新写代码。**不要为了做一次性检查就写临时 py/sh 脚本**——npc 已经封装了这一层。

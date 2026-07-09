@@ -6,12 +6,11 @@
 
 ## 层 1：装 `npc` CLI（机器级，所有 Claude Code session 共享）
 
-`npc` 内置在本仓库（`src/npc`），直接从仓库根安装；同一套 npc 亦作独立仓库 [cmzz/npc](https://github.com/cmzz/npc) 发布供其它项目复用：
+`npc` 内置在本仓库（`src/npc`），直接从仓库根安装：
 
 ```bash
 uv tool install --force --from . npc              # 从仓库根（内置 src/npc）装 CLI
-npc --version          # 应输出 npc 1.3.0
-# 或从独立仓库装：uv tool install --from git+https://github.com/cmzz/npc.git npc
+npc --version          # 应输出当前版本（见 pyproject.toml）
 ```
 
 首次在某工程内 `npc init` 时会自举 `~/task_log/.new-plan-review-schema.json` 与 `~/.local/bin/portable-timeout`。

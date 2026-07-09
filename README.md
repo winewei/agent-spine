@@ -4,10 +4,10 @@
 >
 > 主 session 调度、spine-coder 执行、确定性动作委托给内置的 `npc` 执行层（`src/npc`）。
 
-本仓库是 **harness 的上层**（plugin + skill + 宪法），并**内置完整的确定性执行层 `npc`**（`src/npc`）。同一套 `npc` 工具也以**独立仓库 [cmzz/npc](https://github.com/cmzz/npc)** 发布，供 aidevos 等其它项目复用。
+本仓库是 **harness 的上层**（plugin + skill + 宪法），并**内置完整的确定性执行层 `npc`**（`src/npc`，Python 包名即 `npc`）。
 
-- **智能层**：[`/spine-run`](plugins/agent-spine/commands/spine-run.md) 编排 plan→implement→review→fix→archive；[`/spine-analyze`](plugins/agent-spine/commands/spine-analyze.md) 自迭代。
-- **执行层**：[`spine-coder`](plugins/agent-spine/agents/spine-coder.md) subagent。
+- **智能层**：[`/spine-run`](plugins/agent-spine/commands/spine-run.md) 编排 plan→implement→review→fix→archive；[`/spine-spec`](plugins/agent-spine/commands/spine-spec.md) 编排独立的 spec 生成 + 强制语义评审循环；[`/spine-analyze`](plugins/agent-spine/commands/spine-analyze.md) 读跨 run 指标做自迭代。
+- **执行层**：[`spine-coder`](plugins/agent-spine/agents/spine-coder.md)（实现/修复）与 [`spine-spec-writer`](plugins/agent-spine/agents/spine-spec-writer.md)（spec 撰写）两个 subagent。
 - **底座**：内置 `npc` CLI（`src/npc`）。
 - **宪法**：[docs/principles.md](docs/principles.md) 4 条不变量。
 
@@ -16,15 +16,15 @@
 ## 安装
 
 ```bash
-git clone https://github.com/cmzz/agent-spine.git
+git clone https://github.com/winewei/agent-spine.git
 cd agent-spine
 
 # 1) 装 npc CLI（内置 src/npc，从仓库根安装）
 uv tool install --force --from . npc
-npc --version          # npc 1.3.0
+npc --version          # 应输出当前版本（见 pyproject.toml）
 
 # 2) 装 harness plugin（Claude Code 内）
-#   /plugin marketplace add <本仓库路径或 cmzz/agent-spine>
+#   /plugin marketplace add <本仓库路径或 winewei/agent-spine>
 #   /plugin install agent-spine@agent-spine
 ```
 
@@ -42,13 +42,13 @@ uv tool install --force --from . npc && claude plugin marketplace add "$(pwd)" &
 
 ```text
 # 在 Claude Code 中执行：
-/plugin marketplace add <本仓库绝对路径>   # 或 cmzz/agent-spine
+/plugin marketplace add <本仓库绝对路径>   # 或 winewei/agent-spine
 /plugin install agent-spine@agent-spine
 ```
 
-装完得到 `/spine-run`、`/spine-analyze`、`spine-coder`（**重启 Claude Code 后生效**）。Plugin 升级 `/plugin update agent-spine@agent-spine`。
+装完得到 `/spine-run`、`/spine-spec`、`/spine-analyze` 三个 command 与 `spine-coder`、`spine-spec-writer` 两个 agent（**重启 Claude Code 后生效**）。Plugin 升级 `/plugin update agent-spine@agent-spine`。
 
-> npc CLI（内置 `src/npc`）与 plugin 相互独立：CLI 机器级装一次，plugin 用户级装一次。`npc` 的命令速查/契约见 [docs/cli.md](docs/cli.md)；npc 亦作独立仓库 [cmzz/npc](https://github.com/cmzz/npc) 发布供其它项目复用。
+> npc CLI（内置 `src/npc`）与 plugin 相互独立：CLI 机器级装一次，plugin 用户级装一次。`npc` 的命令速查/契约见 [docs/cli.md](docs/cli.md)。
 
 ### 系统依赖
 
@@ -205,6 +205,22 @@ Fix 阶段额外做的事：自动从 `$BASE/round-(N-1).review.json` 抽 blocki
 | `npc telemetry emit --kind K [...]` | 手动追加 record（排错；正常由 pipeline/events/agent 自动 emit） |
 
 埋点已嵌入 `events.phase_exit` / `events.phase_rotate` / `pipeline._do_phase_exit` / `pipeline.run_review_round` / `pipeline.run_archive` / `agent.spawn_prompt`，全部 best-effort——失败 swallow，主流程零影响。主 session 永远只读 `aggregates/*.json` 与 `hotspots` 输出，不读 events.ndjson 原文。
+
+### SDD 门、运维与对外动作（1.4+）
+
+| 命令 | 职责 |
+|---|---|
+| `npc status` | 当前 run 进度一览（只读） |
+| `npc verify` | 质量门 + 路由不变量校验（不放具体项目业务校验） |
+| `npc doctor` | 环境前置体检（git / openspec / codex / claude / mimo.env / …） |
+| `npc plan` | 阶段前置门 + change 脚手架 |
+| `npc spec` | spec 一致性分析 + spec 生成/评审流水线（`/spine-spec` 的底座） |
+| `npc spec-report` | 单 change archived 后派生「工作 agent 表现」收尾回执（md + json + telemetry） |
+| `npc git` | SDD git 卫生（分支 / 脏树 / commit） |
+| `npc deliver` | push 当前分支到远程（对外动作） |
+| `npc pr` | PR 操作（对外动作） |
+| `npc cost` | 按后端拆 token 成本（Claude vs MiMo …） |
+| `npc clean` | 清理陈旧 / 已中止 run 目录（默认 dry-run） |
 
 完整契约（参数、stdout JSON schema、exit code）见 [docs/cli.md](docs/cli.md)。
 
@@ -376,68 +392,37 @@ npc index append
 ```
 agent-spine/
 ├── README.md
-├── pyproject.toml              # uv 管理；scripts: npc -> agent_spine.npc.cli:main
-├── uv.lock
+├── CLAUDE.md                   # 项目级 agent 指引（npc 边界 / spec 纪律）
+├── INSTALL.md                  # 面向 agent 的逐步安装指南
+├── pyproject.toml              # uv 管理；scripts: npc -> npc.cli:main
 ├── .claude-plugin/
-│   └── marketplace.json        # Claude Code marketplace 元数据（仓库根 = 一个 marketplace）
-├── plugins/
-│   └── agent-spine/            # 唯一 plugin
-│       ├── .claude-plugin/
-│       │   └── plugin.json
-│       ├── README.md
-│       └── commands/
-│           └── new-plan-changes-v2.md  # 配套 slash command；/plugin install 后 /new-plan-changes-v2 可用
+│   └── marketplace.json        # 仓库根 = 一个 Claude Code marketplace
+├── plugins/agent-spine/        # 唯一 plugin（智能层）
+│   ├── .claude-plugin/plugin.json
+│   ├── commands/               # spine-run.md / spine-spec.md / spine-analyze.md
+│   ├── agents/                 # spine-coder.md / spine-spec-writer.md
+│   ├── hooks/                  # hooks.json + verify-subagent-result.sh
+│   └── scripts/                # spine-coder-mimo.sh（coder 路由到 MiMo 廉价层）
 ├── docs/
 │   ├── design.md               # 总体方案 + 设计决策记录
-│   ├── cli.md                  # CLI 契约
-│   └── usage.md                # 推荐用法：CLI + skill + CLAUDE.md 三层配置
-├── src/agent_spine/
-│   ├── __init__.py
-│   └── npc/
-│       ├── __init__.py
-│       ├── cli.py              # argparse dispatcher + 惰性导入 handler
-│       ├── _io.py              # 输出 JSON / stderr / 时间戳工具
-│       ├── paths.py            # 路径计算 + run.json/active.json + load_paths
-│       ├── state.py            # STATE_JSON 读写 + STATE_MD 渲染 + 原子替换
-│       ├── events.py           # phase 计时 + 双流事件追加
-│       ├── review.py           # review.json 派生指标
-│       ├── trend.py            # blocking_trend + stale 检测
-│       ├── focus.py            # codex focus 文本模板渲染
-│       ├── fixer.py            # Fixer findings 片段抽取
-│       ├── session.py          # Claude Code session_id 三路径识别
-│       ├── resume.py           # 续跑断点判定
-│       ├── git_chain.py        # commit chain 校验
-│       ├── schema.py           # review output-schema 自举
-│       ├── summary.py          # run-summary.md + index.jsonl
-│       ├── init_cmd.py         # npc init 整合入口
-│       ├── pipeline.py         # 高层 pipeline：review run / archive run / record
-│       ├── templates.py        # §A Implementer / §B Fixer prompt 模板
-│       ├── agent.py            # agent prompt render / spawn-prompt handler
-│       ├── config.py           # review 引擎配置加载（codex|claude，TOML）
-│       ├── engines.py          # review 引擎抽象：codex exec / claude -p
-│       ├── auto_decide.py      # npc auto-decide：--auto 模式决策器
-│       └── repair.py           # npc state repair：HEAD/state 漂移自愈
-└── tests/                      # pytest 测试套件（212 个测试）
-    ├── conftest.py
-    ├── test_paths.py
-    ├── test_state.py
-    ├── test_events.py
-    ├── test_review.py
-    ├── test_trend.py
-    ├── test_focus.py
-    ├── test_fixer.py
-    ├── test_session.py
-    ├── test_resume.py
-    ├── test_git_chain.py
-    ├── test_schema.py
-    ├── test_summary.py
-    ├── test_init_cmd.py
-    ├── test_pipeline.py        # review run / archive run / record
-    ├── test_templates.py       # §A / §B prompt 模板
-    ├── test_agent.py           # agent prompt render / spawn-prompt
-    ├── test_config.py          # review 引擎配置
-    ├── test_engines.py         # review 引擎抽象
-    └── test_v11_features.py    # auto-decide / state repair 等特性
+│   ├── principles.md           # 宪法：4 条不变量
+│   ├── cli.md                  # npc CLI 完整契约
+│   ├── usage.md                # 推荐用法：CLI + plugin + CLAUDE.md 三层配置
+│   └── optimization-proposals/ # /spine-analyze 产出的自迭代建议
+├── openspec/                   # 本仓库自身的 SDD change 流（harness 改动一律走 spec）
+├── src/npc/                    # 确定性执行层（Python 包名即 npc）
+│   ├── cli.py                  # argparse dispatcher + 惰性导入 handler
+│   ├── paths.py / state.py / events.py / resume.py / repair.py   # run 上下文与状态
+│   ├── pipeline.py             # 高层 pipeline：review run / archive run / record
+│   ├── plan.py / spec_analyze.py / spec_pipeline.py / spec_report.py  # SDD 门与 spec 流水线
+│   ├── coder.py / agent.py / templates.py / focus.py / fixer.py  # sub-agent prompt 与调度
+│   ├── review.py / trend.py / schema.py                          # review 派生指标与 stale 检测
+│   ├── config.py / engines.py / settings_auth.py                 # review 引擎（codex|claude）与路由
+│   ├── git_ops.py / git_chain.py / merge_queue.py / deliver.py   # git 卫生、commit chain、合并队列、对外动作
+│   ├── verify.py / doctor.py / status.py / cost.py / clean.py    # 质量门、体检、运维
+│   ├── telemetry.py / summary.py / auto_decide.py                # 跨 run 指标、收尾、--auto 决策器
+│   └── ...
+└── tests/                      # pytest 套件：60+ 文件、1200+ 测试，与 src/npc 模块一一对应
 ```
 
 ---
@@ -445,11 +430,11 @@ agent-spine/
 ## 测试
 
 ```bash
-uv run pytest -q                          # 跑全部（212 个）
+uv run pytest -q                          # 跑全部（60+ 文件，1200+ 测试）
 uv run pytest tests/test_pipeline.py -v   # 跑 pipeline 模块
 uv run pytest tests/test_agent.py -v      # 跑 agent prompt 模块
 uv run pytest -k phase --tb=short         # 按名称过滤
-uv run pytest --cov=agent_spine          # 覆盖率
+uv run pytest --cov=npc                   # 覆盖率（包名是 npc）
 ```
 
 所有测试用 `tmp_path` + monkeypatch 隔离，不污染真实 `~/task_log` 或 `~/.claude`。`codex` / `openspec` 子进程在测试中通过 monkeypatch 替换为 fake。
