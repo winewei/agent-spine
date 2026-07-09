@@ -185,6 +185,14 @@ def load_project_context(
 SPEC_ATTRIBUTION_ENUM_SEMANTICS = """spec_attribution 四选一，用于判断该 finding 的根因是否可归因于 spec 文档本身：spec-silent = spec 未规定该行为；spec-ambiguous = spec 有规定但存在多种合理解读；spec-contradicted = 实现与 spec 明文相悖；impl-deviation = spec 明确无歧义，实现未照做。"""
 
 
+# reviewer 侧「反 stub / 反删测」的 blocking 判据单一来源。
+# 放进 _output_requirements_block() 供 Round 0 / Round N（及对抗式 pass）共享，
+# 避免两份模板各自维护导致判据漂移或缺失（参照 SPEC_ATTRIBUTION_ENUM_SEMANTICS 先例）。
+# 守不变量 1：本常量文案（尤其「多段注释自我辩护」这一启发式）属 reviewer 侧判据，
+# MUST NOT 回流进 coder 侧的 SELFCHECK_RUBRIC_MD / implement / fix prompt。
+STUB_AND_TEST_TAMPERING_BLOCKING = """stub / 占位实现（空函数体、恒定返回值、未覆盖核心逻辑的简化分支）MUST 视为 blocking；既有测试被删除、注释掉、skip 或断言被弱化（如断言范围被放宽、关键分支被跳过）以换取测试通过，同样 MUST 视为 blocking；需要多段注释自我辩护的实现视为可疑信号，需核实是否掩盖 stub 或测试弱化，而非直接认定合规。"""
+
+
 def _output_requirements_block(authority_disclaimer: bool = True) -> str:
     """「输出要求」文案的参数化单一来源，含 spec_attribution 四值语义。
 
@@ -210,6 +218,7 @@ def _output_requirements_block(authority_disclaimer: bool = True) -> str:
   - 每条 finding 必须包含 id / severity / category / title / file / line_range / detail / recommendation / in_scope / spec_attribution。
   - in_scope=true 表示与本 change diff 直接相关；diff 之外的既有问题或越界建议必须 in_scope=false，不计入 blocking。
   - {SPEC_ATTRIBUTION_ENUM_SEMANTICS}{disclaimer_line}
+- 反 stub / 反删测判据：{STUB_AND_TEST_TAMPERING_BLOCKING}
 - 不要返回 markdown 包裹、不要返回散文、不要返回额外字段。"""
 
 

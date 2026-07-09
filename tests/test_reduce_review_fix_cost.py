@@ -32,6 +32,40 @@ from npc import templates as _templates
 from npc import telemetry as _telemetry
 
 
+_SPINE_CODER_MD = (
+    Path(__file__).parent.parent
+    / "plugins" / "agent-spine" / "agents" / "spine-coder.md"
+)
+
+
+class TestSpineCoderGuardrails:
+    """Req: coder 契约显式禁止 stub 充数与删测换 pass（change coder-no-stub-guardrails）。"""
+
+    def _guardrails_section(self) -> str:
+        text = _SPINE_CODER_MD.read_text(encoding="utf-8")
+        idx = text.index("## Guardrails")
+        return text[idx:]
+
+    def test_guardrails_forbids_stub_placeholder(self):
+        """Scenario: Guardrails 含禁止 stub 充数勾选 task 的规则。"""
+        g = self._guardrails_section()
+        assert "stub" in g or "占位" in g
+        assert "勾" in g or "task" in g
+
+    def test_guardrails_forbids_deleting_existing_tests(self):
+        """Scenario: Guardrails 含禁止删除/注释/skip 既有测试换 pass 的规则。"""
+        g = self._guardrails_section()
+        assert "既有测试" in g
+        assert "删除" in g and ("注释" in g or "skip" in g)
+        assert "tests=pass" in g
+
+    def test_guardrails_forbids_weakening_existing_tests(self):
+        """Scenario: Guardrails 含禁止放宽断言/移除覆盖点/跳过分支弱化测试的规则。"""
+        g = self._guardrails_section()
+        assert "弱化" in g
+        assert "放宽" in g or "覆盖点" in g or "跳过" in g
+
+
 # ============================================================
 # 1. implement-selfcheck-rubric
 # ============================================================
@@ -122,6 +156,55 @@ class TestSelfcheckRubric:
         rubric = _templates.SELFCHECK_RUBRIC_MD
         # 应有"不含 per-change 文本"或"类目层级"的说明
         assert "通用" in rubric or "类目" in rubric
+
+    def test_selfcheck_categories_contains_no_stub(self):
+        """task 2.1 / Scenario 自检清单含反 stub 类目：SELFCHECK_CATEGORIES 含 no-stub。"""
+        assert "no-stub" in _templates.SELFCHECK_CATEGORIES
+
+    def test_selfcheck_categories_preserve_existing_seven_order(self):
+        """task 5.3：既有 7 类目文本与顺序不变，no-stub 仅追加在末尾。"""
+        cats = _templates.SELFCHECK_CATEGORIES
+        assert cats[:7] == (
+            "validation", "partial-failure", "locking", "test-coverage",
+            "edge-case", "telemetry", "concurrency",
+        )
+        assert cats[7] == "no-stub"
+
+    def test_no_stub_rubric_row_mentions_both_risks(self):
+        """task 2.2 / Scenario：no-stub 行同时提及占位实现与测试被删除/弱化两类风险。"""
+        rubric = _templates.SELFCHECK_RUBRIC_MD
+        # 取出 no-stub 所在行
+        no_stub_line = next(
+            (ln for ln in rubric.splitlines() if ln.strip().startswith("| no-stub")),
+            None,
+        )
+        assert no_stub_line is not None, "SELFCHECK_RUBRIC_MD 缺少 no-stub 行"
+        assert "占位" in no_stub_line or "空函数体" in no_stub_line
+        assert ("测试" in no_stub_line) and (
+            "删除" in no_stub_line or "弱化" in no_stub_line
+            or "放宽" in no_stub_line or "skip" in no_stub_line
+        )
+
+    def test_no_stub_row_not_leak_reviewer_heuristic(self):
+        """task 4.2 / Scenario：no-stub 自查要点不含 reviewer 侧「多段注释自我辩护」启发式，
+        且与 focus.py 判据常量不逐字相同（类目名可同源，细则不共享，守不变量 1）。"""
+        from npc import focus as _focus
+
+        rubric = _templates.SELFCHECK_RUBRIC_MD
+        assert "自我辩护" not in rubric
+        assert _focus.STUB_AND_TEST_TAMPERING_BLOCKING not in rubric
+
+    def test_impl_fix_prompt_not_leak_reviewer_stub_heuristic(self):
+        """task 4.1 / 不变量 1 负向：implement / fix prompt 不含 focus.py 判据常量的
+        「多段注释自我辩护」这一 reviewer 侧具体措辞。"""
+        from npc import focus as _focus
+
+        impl = _templates.render_implementer("c", "/b", "/r")
+        fix = _templates.render_fixer("c", 1, "x", "/b", "/r", "F1\n", [], [])
+        assert "自我辩护" not in impl
+        assert "自我辩护" not in fix
+        assert _focus.STUB_AND_TEST_TAMPERING_BLOCKING not in impl
+        assert _focus.STUB_AND_TEST_TAMPERING_BLOCKING not in fix
 
 
 # ============================================================

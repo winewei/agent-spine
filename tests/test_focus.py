@@ -233,6 +233,28 @@ def test_output_requirements_block_disclaimer_toggle():
     assert _focus._output_requirements_block() == with_disclaimer
 
 
+def test_output_requirements_block_contains_stub_blocking_criteria():
+    """task 3.1/3.2/3.3：输出要求块含 stub / 删测为 blocking 及自我辩护可疑信号判据。"""
+    block = _focus._output_requirements_block()
+    const = _focus.STUB_AND_TEST_TAMPERING_BLOCKING
+    assert const in block
+    # 三条判据要点齐备
+    assert "stub" in const and "blocking" in const
+    assert "占位实现" in const
+    assert ("删除" in const or "注释" in const or "skip" in const) and "测试" in const
+    assert "断言被弱化" in const or "断言范围被放宽" in const
+    assert "多段注释自我辩护" in const
+
+
+def test_round_0_and_round_n_share_stub_criteria_verbatim():
+    """task 3.4 / Scenario 两轮判据同源不漂移：round 0 与 round N 渲染均逐字含同一判据常量。"""
+    const = _focus.STUB_AND_TEST_TAMPERING_BLOCKING
+    r0 = _focus._round_0_template("add-foo", "CTX")
+    rn = _focus._round_n_template("add-foo", 2, "abc1234", "CTX")
+    assert const in r0
+    assert const in rn
+
+
 def test_render_round_n_includes_history_hints(env_setup, capsys, make_args, tmp_path):
     out = tmp_path / "f.md"
     _focus.render(

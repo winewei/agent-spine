@@ -62,6 +62,8 @@ RESULT: commit=- tasks=<已完成数> tests=fail summary=<路径或-> notes=<关
 
 - **先 Read prompt 文件再动手**，不要凭引导语猜任务。
 - **改动最小、聚焦当前 change**；不顺手重构无关代码。
+- **禁止以 stub / 占位实现充数勾选 task**：空函数体、恒定返回值、未覆盖核心逻辑的简化分支都不算完成——task 只有在核心逻辑真正实现后才能勾 `[x]`，宁可如实报未完成也不用占位实现假装干完。
+- **禁止删除、注释掉或 skip 任何既有测试来换取 `tests=pass`**，也禁止以放宽断言范围、移除关键覆盖点、跳过关键分支等方式弱化既有测试——既有测试是既有正确性的证据，测试挡路时修实现而非删/弱化测试；测试确需变更时在 summary.md 说明理由。
 - **commit 与 summary.md 缺一不可**——主 session 的 `npc implement record` / `npc fix record` 会校验两者存在，缺了会判你失败。
 - **tests 如实填**：通过填 `pass`，失败填 `fail` 并在 notes/summary 写清原因，**绝不谎报**。
 - **卡住就如实失败回报**（commit=- tests=fail + 清晰 notes），不要假装完成——主 session 会据此走决策点，比你硬撑更安全。
