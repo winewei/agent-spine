@@ -184,6 +184,7 @@ def test_run_review_round_with_blocking_renders_findings(
                 "detail": "no validation",
                 "recommendation": "add check",
                 "in_scope": True,
+                "spec_attribution": "impl-deviation",
             }
         ],
     }
@@ -573,6 +574,90 @@ def test_run_review_round1_single_call_no_adversarial(
     assert all("adversarial" not in n for n in calls["names"])
     base = Path(result["review_json"]).parent
     assert not list(base.glob("*.adversarial.*"))
+    assert captured[-1]["adversarial_pass_ran"] is False
+    assert captured[-1]["adversarial_blocking_count"] is None
+
+
+# ------------------------------------------------------------
+# pass2 产出合法 JSON 但非法 REVIEW_SCHEMA → MUST 降级（不当作成功）
+# 覆盖 finding F1（category=validation）：合法 JSON 语法 != 合法 review 结构。
+# ------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "bad_pass2, why",
+    [
+        ({"verdict": "approve"}, "缺 findings 必填字段"),
+        ({"verdict": "approve", "findings": "nope"}, "findings 非数组"),
+        (
+            {
+                "verdict": "changes-requested",
+                "findings": [{"id": "F1", "severity": "high", "title": "t"}],
+            },
+            "finding 缺必填字段（category/file/... 缺失）",
+        ),
+    ],
+)
+def test_run_review_round0_pass2_invalid_schema_degrades(
+    env_setup, make_args, capsys, monkeypatch, fake_repo: Path, bad_pass2, why
+):
+    """pass2 返回合法 JSON 但非法 schema → 重试耗尽后降级 pass1-only。
+
+    回归 F1：旧代码只 json.loads 不校验 schema，非法 schema 会走成功路径
+    （被 merge 成空 pass2 并 adversarial_pass_ran=True，或让 merge/parse 抛 ValueError
+    绕过降级）。修复后应等价情形 2：ok=True、pass1-only、adversarial_pass_ran=False/count=None。
+    """
+    _bootstrap_run(env_setup, make_args, capsys, "add-foo")
+    fake, calls = _stub_dispatch_by_path(
+        {"verdict": "changes-requested",
+         "findings": [_adv_finding(file="a.py", cat="validation")]},
+        pass2_payload=bad_pass2,
+    )
+    monkeypatch.setattr(_pipeline, "_codex_exec", fake)
+    monkeypatch.setattr(_pipeline, "_find_codex_bin", lambda override=None: "/fake/codex")
+    monkeypatch.setattr(_pipeline, "_portable_timeout_bin", lambda override=None: Path("/fake/pt"))
+    captured = _capture_emit_review_round(monkeypatch)
+
+    p = env_setup
+    p_with_repo = type(p)(**{**p.__dict__, "repo_root": fake_repo})
+    result = _pipeline.run_review_round(p_with_repo, 1, 0, retries=1)
+
+    assert result["ok"] is True, why
+    assert result["blocking"] == 1  # 等价 pass1-only（pass2 被降级为空替身）
+    base = Path(result["review_json"]).parent
+    merged = json.loads((base / "round-0.review.json").read_text())
+    assert len(merged["findings"]) == 1
+    # pass2 校验失败耗尽 retries → 每次都重试（retries=1 → 2 次 pass2 调用）
+    assert sum(1 for n in calls["names"] if "pass2.adversarial" in n) == 2
+    assert captured[-1]["adversarial_pass_ran"] is False
+    assert captured[-1]["adversarial_blocking_count"] is None
+
+
+def test_run_review_round0_pass1_invalid_schema_no_pass2(
+    env_setup, make_args, capsys, monkeypatch, fake_repo: Path
+):
+    """pass1 返回合法 JSON 但非法 schema → 整轮失败、pass2 MUST NOT 执行。
+
+    回归 F1 的第二面：旧代码 pass1 非法 schema 时仍会执行 pass2、直到 parse_review
+    才失败，违反"pass1 失败则 pass2 不执行"。修复后 pass1 schema 校验失败即耗尽 retries
+    走既有 ok=False 路径，pass2 从未被调用。
+    """
+    _bootstrap_run(env_setup, make_args, capsys, "add-foo")
+    fake, calls = _stub_dispatch_by_path(
+        {"verdict": "approve"},  # 合法 JSON，缺 findings → 非法 schema
+    )
+    monkeypatch.setattr(_pipeline, "_codex_exec", fake)
+    monkeypatch.setattr(_pipeline, "_find_codex_bin", lambda override=None: "/fake/codex")
+    monkeypatch.setattr(_pipeline, "_portable_timeout_bin", lambda override=None: Path("/fake/pt"))
+    captured = _capture_emit_review_round(monkeypatch)
+
+    p = env_setup
+    p_with_repo = type(p)(**{**p.__dict__, "repo_root": fake_repo})
+    result = _pipeline.run_review_round(p_with_repo, 1, 0, retries=1)
+
+    assert result["ok"] is False
+    assert result["error"] == "codex-exec-failed"
+    assert all("pass2.adversarial" not in n for n in calls["names"])  # pass2 从未执行
     assert captured[-1]["adversarial_pass_ran"] is False
     assert captured[-1]["adversarial_blocking_count"] is None
 

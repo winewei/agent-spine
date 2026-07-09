@@ -23,6 +23,8 @@ from typing import Any, Callable
 
 from datetime import datetime
 
+import jsonschema
+
 from . import (
     _io,
     events as _events,
@@ -30,6 +32,7 @@ from . import (
     focus as _focus,
     paths as _paths,
     review as _review,
+    schema as _schema,
     state as _state,
     telemetry as _telemetry,
     verify as _verify,
@@ -552,6 +555,18 @@ def _classify_bad_review_output(raw: str, err: json.JSONDecodeError) -> str:
     return f"invalid_json:{err}"
 
 
+def _classify_bad_review_schema(err: jsonschema.ValidationError) -> str:
+    """引擎产出合法 JSON 但不符合 ``REVIEW_SCHEMA`` 时的可诊断失败原因。
+
+    与 ``_classify_bad_review_output`` 同级：合法 JSON 语法不代表合法 review 结构
+    （缺 ``verdict``/``findings`` 必填字段、``findings`` 非数组、finding 缺必填字段、
+    枚举越界等）。这类输出 MUST NOT 被当作成功——否则 pass2 会以空替身静默"成功"、
+    pass1 会在执行 pass2 后才在 ``parse_review`` 处炸掉，绕过降级与 telemetry 语义。
+    """
+    loc = "/".join(str(p) for p in err.absolute_path) or "(root)"
+    return f"invalid_review_schema:{loc}:{err.message}"
+
+
 def _render_focus(
     p: _paths.Paths,
     change_id: str,
@@ -635,11 +650,23 @@ def _execute_review_pass(
         if rc == 0 and review_out.is_file():
             raw = review_out.read_text(encoding="utf-8")
             try:
-                review_data = json.loads(raw)
-                break
+                parsed = json.loads(raw)
             except json.JSONDecodeError as e:
                 last_error = _classify_bad_review_output(raw, e)
                 review_data = None
+                continue
+            # 合法 JSON 语法不等于合法 review 结构：MUST 按 REVIEW_SCHEMA 校验完整
+            # 结构，否则非法 schema（缺 verdict/findings、findings 非数组、finding 字段
+            # 缺失等）会被当作成功，绕过 pass2 降级与 telemetry 语义（见 change
+            # review-r0-adversarial-pass D6：pass2 只有产出合法 REVIEW_SCHEMA JSON 才算成功）。
+            try:
+                jsonschema.validate(parsed, _schema.REVIEW_SCHEMA)
+            except jsonschema.ValidationError as e:
+                last_error = _classify_bad_review_schema(e)
+                review_data = None
+                continue
+            review_data = parsed
+            break
         else:
             last_error = (
                 f"exit_code={rc}"
