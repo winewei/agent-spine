@@ -52,6 +52,13 @@ from .verify import check_routing
 BLOCKING_SEVERITIES = {"critical", "high"}
 SPEC_SCHEMA_FILENAME = ".new-plan-spec-review-schema.json"
 
+# 模式盘问产物（change: spec-writer-pattern-interrogation）的三个必需 H2 标题。
+# 顺序即 record / write gate 报告缺失标题时的规范顺序（二者共用同一实现，
+# MUST NOT 出现"record 通过但 write gate 拒绝"的判定分歧）。
+PATTERN_INTERROGATION_FILENAME = "pattern-interrogation.md"
+PATTERN_INTERROGATION_REQUIRED_SECTIONS = ("## Analogs", "## Assumptions", "## Open Questions")
+_USER_DECISIONS_HEADING = "## User Decisions (Interactive)"
+
 
 # ============================================================
 # 路径
@@ -297,6 +304,202 @@ def _scope_guard_violation(
 
 
 # ============================================================
+# 模式盘问 pattern-interrogation.md 的 H2 段落定界（共享辅助，D3）
+# ============================================================
+#
+# `spec_interrogate_record` 用它统计 `## Open Questions` 的顶层 bullet 数；
+# `spec_write_run` 的硬门用它检查三个必需标题是否存在——**同一实现，两处调用**，
+# 不分裂为两套解析逻辑（tasks 3.7）。刻意不 import `scripts/check_spec.py`：
+# 后者是仓库本地资产，`spec_pipeline.py` 属 npc，两者边界不能破，故在此独立实现
+# 一份等价的最小段落定界逻辑（design D3）。
+
+
+def _h2_section_bullets(text: str, heading: str) -> tuple[bool, int]:
+    """给定一个完整 H2 标题（如 ``## Open Questions``），返回 ``(present, bullet_count)``：
+
+    - ``present``：该 H2 标题是否作为独立标题行存在（精确匹配整行去空白后的文本）。
+    - ``bullet_count``：该标题之下、下一个 ``## `` 标题之前，匹配 ``- `` 的顶层
+      bullet 行数（缩进的子 bullet 不计；标题不存在时恒为 0）。
+
+    只认恰好两个 ``#`` 的标题（``##``），与 ``check_spec.section_of_line`` 同款定界口径。
+    """
+    want = heading.strip()
+    lines = text.split("\n")
+    in_section = False
+    present = False
+    count = 0
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("## ") and not stripped.startswith("### "):
+            if stripped == want:
+                present = True
+                in_section = True
+                continue
+            # 遇到任意其它 H2 标题即结束当前段落
+            if in_section:
+                in_section = False
+            continue
+        if in_section:
+            # 顶层 bullet：行首（无缩进）以 "- " 开头
+            if line.startswith("- "):
+                count += 1
+    return present, count
+
+
+def _missing_pattern_sections(text: str) -> list[str]:
+    """返回 ``pattern-interrogation.md`` 正文缺失的必需 H2 标题（规范顺序）。
+
+    ``record`` 与 ``write gate`` 共用本函数，保证二者对同一 fixture 给出**完全相同**
+    的缺失标题集合（无判定分歧）。
+    """
+    return [
+        h for h in PATTERN_INTERROGATION_REQUIRED_SECTIONS if not _h2_section_bullets(text, h)[0]
+    ]
+
+
+def _pattern_interrogation_path(repo_root: Path, change_id: str) -> Path:
+    return _change_dir(repo_root, change_id) / PATTERN_INTERROGATION_FILENAME
+
+
+# ============================================================
+# npc spec interrogate run|record|decide（change: spec-writer-pattern-interrogation）
+# ============================================================
+
+
+def spec_interrogate_run(
+    p: _paths.Paths,
+    change_id: str,
+    *,
+    config_path: Path | None = None,
+    goal: str | None = None,
+) -> dict:
+    """渲染 interrogate 轮 prompt，恒 in-session（``deferred=true``）。
+
+    与 :func:`spec_write_run`/:func:`spec_fix_run` 复用**同一套** routing 检查
+    （``_spec_routing_violations``），不引入第二套后端白名单（D8）。
+
+    ``goal``：来自 ``/spine-spec`` 的用户一句话原始目标，原文透传给
+    ``render_spec_interrogator``；为 ``None``/空串时不渲染目标段落。
+    """
+    try:
+        cfg = load_config(p.repo_root, override_path=config_path)
+    except ConfigError as e:
+        raise ValueError(str(e)) from e
+
+    violations = _spec_routing_violations(cfg)
+    if violations:
+        return {"ok": False, "error": "spec_routing_violation", "violations": violations}
+
+    base = _spec_base(p, change_id)
+    base.mkdir(parents=True, exist_ok=True)
+    _write_pre_head_marker(p, base, "pre_head.interrogate.txt")
+
+    prompt_file = base / "pattern-interrogation.prompt.md"
+    text = templates.render_spec_interrogator(
+        change_id=change_id,
+        base=str(base),
+        repo_root=str(p.repo_root),
+        goal=goal or None,
+    )
+    prompt_file.write_text(text, encoding="utf-8")
+
+    spawn_text = templates.render_spawn_prompt(
+        phase="spec_interrogate", change_id=change_id, prompt_file=str(prompt_file)
+    )
+
+    return {
+        "ok": True,
+        "change": change_id,
+        "deferred": True,
+        "spawn_prompt": spawn_text,
+        "prompt_file": str(prompt_file),
+    }
+
+
+def spec_interrogate_record(p: _paths.Paths, change_id: str, result_line: str) -> dict:
+    """装订 interrogate 轮 RESULT，并**独立**解析 ``## Open Questions`` 的 bullet 数。
+
+    顺序（tasks 3.7a）：解析 + 校验 RESULT 必需键 → 越界/意外 commit 拦截 →
+    读磁盘 ``pattern-interrogation.md`` → 三个必需标题存在性 → 统计 Open Questions。
+    ``.open_questions`` 由 npc 独立数出，**不采信** writer 自报（不变量 2）。
+    """
+    parsed, missing = _parse_and_validate_result_line(result_line, "spec_interrogate")
+    if parsed is None:
+        return {"ok": False, "change": change_id, "error": "result-line-missing"}
+    if missing:
+        return {
+            "ok": False,
+            "change": change_id,
+            "error": "result-missing-keys",
+            "missing_keys": missing,
+        }
+
+    base = _spec_base(p, change_id)
+    violation = _scope_guard_violation(p, change_id, base, "pre_head.interrogate.txt")
+    if violation is not None:
+        return {"ok": False, "change": change_id, **violation}
+
+    art_path = _pattern_interrogation_path(p.repo_root, change_id)
+    if not art_path.is_file():
+        return {
+            "ok": False,
+            "change": change_id,
+            "error": "pattern_interrogation_missing",
+            "detail": f"{art_path} 不存在（interrogate 轮 MUST 产出 pattern-interrogation.md）",
+        }
+
+    text = art_path.read_text(encoding="utf-8")
+    missing_sections = _missing_pattern_sections(text)
+    if missing_sections:
+        return {
+            "ok": False,
+            "change": change_id,
+            "error": "pattern_interrogation_missing_section",
+            "missing_sections": missing_sections,
+        }
+
+    _present, open_questions = _h2_section_bullets(text, "## Open Questions")
+    return {
+        "ok": True,
+        "change": change_id,
+        "artifacts": parsed.get("artifacts", "-"),
+        "summary": parsed.get("summary", "-"),
+        "open_questions": open_questions,
+    }
+
+
+def spec_interrogate_decide(p: _paths.Paths, change_id: str, decisions_md: str) -> dict:
+    """纯机械文本追加：把用户对 Open Questions 的裁决原文追加进
+    ``pattern-interrogation.md`` 的 ``## User Decisions (Interactive)`` 段（D4）。
+
+    一次性、不覆盖：文件已含该段落时以 ``decisions_already_recorded`` 拒绝，逐字节
+    不改动文件。npc **不解析、不改写、不做语义判断** ``decisions_md`` 的内容。
+    """
+    art_path = _pattern_interrogation_path(p.repo_root, change_id)
+    if not art_path.is_file():
+        return {
+            "ok": False,
+            "change": change_id,
+            "error": "pattern_interrogation_missing",
+            "detail": f"{art_path} 不存在",
+        }
+
+    text = art_path.read_text(encoding="utf-8")
+    present, _count = _h2_section_bullets(text, _USER_DECISIONS_HEADING)
+    if present:
+        return {
+            "ok": False,
+            "change": change_id,
+            "error": "decisions_already_recorded",
+        }
+
+    art_path.write_text(
+        text + f"\n\n{_USER_DECISIONS_HEADING}\n\n{decisions_md}\n", encoding="utf-8"
+    )
+    return {"ok": True, "change": change_id}
+
+
+# ============================================================
 # npc spec write run|record
 # ============================================================
 
@@ -324,6 +527,27 @@ def spec_write_run(
     violations = _spec_routing_violations(cfg)
     if violations:
         return {"ok": False, "error": "spec_routing_violation", "violations": violations}
+
+    # 模式盘问硬前置门（D2，change: spec-writer-pattern-interrogation）：
+    # 排在 routing 校验**之后**——routing 违规恒短路，两道门错误标识永不冲突。
+    # 上游产物缺失/结构缺陷时下游拒绝渲染，MUST NOT 写出任何 write prompt 文件。
+    # 分支 A（--goal 透传）与分支 B（补全既有 change）一视同仁地前置。
+    art_path = _pattern_interrogation_path(p.repo_root, change_id)
+    if not art_path.is_file():
+        return {
+            "ok": False,
+            "change": change_id,
+            "error": "pattern_interrogation_missing",
+            "detail": f"{art_path} 不存在（write 轮前必须先完成 npc spec interrogate）",
+        }
+    missing_sections = _missing_pattern_sections(art_path.read_text(encoding="utf-8"))
+    if missing_sections:
+        return {
+            "ok": False,
+            "change": change_id,
+            "error": "pattern_interrogation_missing_section",
+            "missing_sections": missing_sections,
+        }
 
     base = _spec_base(p, change_id)
     base.mkdir(parents=True, exist_ok=True)
@@ -975,6 +1199,45 @@ def cli_spec_write_record(args: argparse.Namespace) -> None:
         _io.emit_error("env_missing", str(e), exit_code=3)
         return
     result = spec_write_record(p, args.change_id, args.result)
+    _emit_and_exit(result)
+
+
+def cli_spec_interrogate_run(args: argparse.Namespace) -> None:
+    try:
+        p = _paths.load_paths(args)
+    except _paths.PathsError as e:
+        _io.emit_error("env_missing", str(e), exit_code=3)
+        return
+    try:
+        result = spec_interrogate_run(
+            p,
+            args.change_id,
+            config_path=Path(args.config) if getattr(args, "config", None) else None,
+            goal=getattr(args, "goal", None),
+        )
+    except ValueError as e:
+        _io.emit_error("invalid_args", str(e), exit_code=2)
+        return
+    _emit_and_exit(result)
+
+
+def cli_spec_interrogate_record(args: argparse.Namespace) -> None:
+    try:
+        p = _paths.load_paths(args)
+    except _paths.PathsError as e:
+        _io.emit_error("env_missing", str(e), exit_code=3)
+        return
+    result = spec_interrogate_record(p, args.change_id, args.result)
+    _emit_and_exit(result)
+
+
+def cli_spec_interrogate_decide(args: argparse.Namespace) -> None:
+    try:
+        p = _paths.load_paths(args)
+    except _paths.PathsError as e:
+        _io.emit_error("env_missing", str(e), exit_code=3)
+        return
+    result = spec_interrogate_decide(p, args.change_id, args.decisions_md)
     _emit_and_exit(result)
 
 

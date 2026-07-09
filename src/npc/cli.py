@@ -450,6 +450,46 @@ def _build_parser() -> argparse.ArgumentParser:
         _cmd_path="spec write record",
     )
 
+    # ----- spec interrogate（change: spec-writer-pattern-interrogation） -----
+    p_spec_int = sub_spec.add_parser(
+        "interrogate", help="模式盘问阶段（write 轮前的硬前置：枚举仓库内 analog + 假设 + 开放问题）"
+    )
+    sub_spec_int = p_spec_int.add_subparsers(dest="spec_interrogate_cmd", required=True)
+    p_si_run = sub_spec_int.add_parser(
+        "run", help="渲染 pattern-interrogation prompt，恒 in-session（deferred=true）"
+    )
+    p_si_run.add_argument("--change", dest="change_id", required=True)
+    p_si_run.add_argument(
+        "--goal",
+        default=None,
+        help="用户一句话原始目标原文（来自 /spine-spec 自由目标参数），原样嵌入盘问 prompt；补全场景可省略",
+    )
+    p_si_run.add_argument("--config", default=None, help="显式 TOML 配置路径")
+    p_si_run.set_defaults(
+        handler=_make_handler("spec_pipeline", "cli_spec_interrogate_run"),
+        _cmd_path="spec interrogate run",
+    )
+    p_si_rec = sub_spec_int.add_parser(
+        "record",
+        help="装订 spec interrogate 的 RESULT 行，并独立解析 ## Open Questions 的 bullet 数",
+    )
+    p_si_rec.add_argument("--change", dest="change_id", required=True)
+    p_si_rec.add_argument("--result", required=True)
+    p_si_rec.set_defaults(
+        handler=_make_handler("spec_pipeline", "cli_spec_interrogate_record"),
+        _cmd_path="spec interrogate record",
+    )
+    p_si_dec = sub_spec_int.add_parser(
+        "decide",
+        help="纯机械追加：把用户裁决原文追加进 pattern-interrogation.md 的 ## User Decisions (Interactive) 段",
+    )
+    p_si_dec.add_argument("--change", dest="change_id", required=True)
+    p_si_dec.add_argument("--decisions-md", dest="decisions_md", required=True)
+    p_si_dec.set_defaults(
+        handler=_make_handler("spec_pipeline", "cli_spec_interrogate_decide"),
+        _cmd_path="spec interrogate decide",
+    )
+
     # ----- spec fix（change: spine-spec-writer） -----
     p_spec_fix = sub_spec.add_parser("fix", help="spec fix 阶段（渲染 prompt / 装订 RESULT）")
     sub_spec_fix = p_spec_fix.add_subparsers(dest="spec_fix_cmd", required=True)

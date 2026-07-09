@@ -587,3 +587,99 @@ def test_does_not_reimplement_capability_no_spec_orphan_spec_no_tasks():
 def test_invalid_change_id_detail_matches_value(tmp_path, value):
     detail = check_spec.validate_change_id(value)
     assert detail is not None
+
+
+# ============================================================
+# 9. 规则 5：touchpoint_list_missing_search_command
+# ============================================================
+
+RULE_TP = "touchpoint_list_missing_search_command"
+
+
+def _write_tasks(change_dir: Path, body: str) -> None:
+    (change_dir / "tasks.md").write_text(body, encoding="utf-8")
+
+
+def test_touchpoint_list_missing_search_command_hits(tmp_path):
+    change_dir = _make_change_dir(tmp_path)
+    _write_tasks(
+        change_dir,
+        "## 1. 落点\n\n"
+        "- [ ] 改 `src/npc/cli.py`\n"
+        "- [ ] 改 `src/npc/templates.py`\n"
+        "- [ ] 改 `scripts/check_spec.py`\n",
+    )
+    result = check_spec.lint_change(None, str(change_dir))
+    assert any(w["rule"] == RULE_TP for w in result["warnings"])
+    assert result["ok"] is True
+    hit = next(w for w in result["warnings"] if w["rule"] == RULE_TP)
+    assert "落点" in hit["detail"]
+
+
+def test_touchpoint_list_with_search_command_not_hit(tmp_path):
+    change_dir = _make_change_dir(tmp_path)
+    _write_tasks(
+        change_dir,
+        "## 1. 落点\n\n"
+        "```bash\ngrep -rn \"foo\" src/\n```\n\n"
+        "- [ ] 改 `src/npc/cli.py`\n"
+        "- [ ] 改 `src/npc/templates.py`\n"
+        "- [ ] 改 `scripts/check_spec.py`\n",
+    )
+    result = check_spec.lint_change(None, str(change_dir))
+    assert result["rule_hits"][RULE_TP] == 0
+
+
+def test_touchpoint_list_below_threshold_not_hit(tmp_path):
+    change_dir = _make_change_dir(tmp_path)
+    _write_tasks(
+        change_dir,
+        "## 1. 落点\n\n"
+        "- [ ] 改 `src/npc/cli.py`\n"
+        "- [ ] 改 `src/npc/templates.py`\n",
+    )
+    result = check_spec.lint_change(None, str(change_dir))
+    assert result["rule_hits"][RULE_TP] == 0
+
+
+def test_all_rule_names_length_five_and_includes_touchpoint():
+    assert len(check_spec.ALL_RULE_NAMES) == 5
+    assert RULE_TP in check_spec.ALL_RULE_NAMES
+
+
+def test_rule_hits_keys_include_all_five_rules(tmp_path):
+    change_dir = _make_change_dir(tmp_path)
+    result = check_spec.lint_change(None, str(change_dir))
+    assert set(result["rule_hits"].keys()) == set(check_spec.ALL_RULE_NAMES)
+    assert len(result["rule_hits"]) == 5
+
+
+def test_existing_four_rules_unaffected_by_new_rule(tmp_path):
+    change_dir = _make_change_dir(tmp_path)
+    (change_dir / "design.md").write_text(
+        "## Decisions\n\n实施时定\n", encoding="utf-8"
+    )
+    result = check_spec.lint_change(None, str(change_dir))
+    assert result["rule_hits"][check_spec.RULE_DEFERRED_DECISION] == 1
+    # 其余既有规则在 --dir 模式下按既有语义为 0（无 tasks.md → touchpoint 也为 0）
+    assert result["rule_hits"][check_spec.RULE_SCENARIO_MISSING_WHEN_THEN] == 0
+    assert result["rule_hits"][check_spec.RULE_VAGUE_ADVERB] == 0
+    assert result["rule_hits"][RULE_TP] == 0
+
+
+def test_touchpoint_rule_not_skipped_in_dir_mode(tmp_path):
+    change_dir = _make_change_dir(tmp_path)
+    _write_tasks(
+        change_dir,
+        "## 1. 落点\n\n"
+        "- [ ] `a/x.py`\n- [ ] `b/y.py`\n- [ ] `c/z.py`\n",
+    )
+    result = check_spec.lint_change(None, str(change_dir))
+    assert result["rule_hits"][RULE_TP] == 1
+
+
+def test_touchpoint_rule_skipped_when_tasks_absent(tmp_path):
+    change_dir = _make_change_dir(tmp_path)
+    result = check_spec.lint_change(None, str(change_dir))
+    assert not any(w["rule"] == RULE_TP for w in result["warnings"])
+    assert result["rule_hits"][RULE_TP] == 0

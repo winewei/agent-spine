@@ -1309,6 +1309,11 @@ RESULT_REQUIRED_KEYS: dict[str, frozenset[str]] = {
     # commit/tests，故不会被 `_is_failure_schema` 误判为失败态覆盖。
     "spec_write": frozenset({"change", "artifacts", "validate", "summary"}),
     "spec_fix": frozenset({"change", "fixed", "validate", "summary"}),
+    # spec_interrogate 的产物是 pattern-interrogation.md（模式盘问），不是 openspec
+    # validate 认识的 artifact 类型，故 RESULT 不含 validate 键（见 change
+    # spec-writer-pattern-interrogation proposal「新增 phase spec_interrogate 的
+    # RESULT 必需键集合」）。
+    "spec_interrogate": frozenset({"change", "artifacts", "summary"}),
 }
 
 

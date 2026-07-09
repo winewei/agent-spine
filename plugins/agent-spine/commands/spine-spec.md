@@ -9,6 +9,10 @@ tags: [harness, openspec, spec-review, autonomous]
 
 **输入（`/spine-spec` 后的参数）**：一句话目标（如 `给认证模块加限流`），或一个已存在但需要补全/修复的 change-id。
 
+**模式标志（与 `/spine-run` 同构）**：参数含 `--auto` → 全自主档；否则 → 交互档（关键闸口调用 `AskUserQuestion` 问用户）。判断逻辑与 `plugins/agent-spine/commands/spine-run.md` 完全一致——参数含 `--auto` → 全自主档，否则 → 交互档，两处保持字面一致，用户不必记两套心智模型。
+
+**`--auto` 的硬规则**：auto 档下你**绝不调用 `AskUserQuestion`**，也**绝不调用 `npc spec interrogate decide`**——即便模式盘问产出的开放问题数 `.open_questions > 0`，也跳过用户裁决步骤，直接进入 write 轮（write 轮读到未裁决的开放问题后按指令原样序列化进 design.md）。
+
 ---
 
 ## 与 `/spine-run` 的关系（非目标边界）
@@ -55,7 +59,37 @@ if [ -n "$WORKTREE_ROOT" ]; then cd "$WORKTREE_ROOT"; fi
   - `CHANGE_ID` = 该参数原文。
   - `GOAL` 留空（不强行编造目标文本；已有草稿本身就是上下文，`spine-spec-writer` 会读 `openspec/changes/<id>/` 下现有文件）。
 
-## Step 3 — spec write（round 0 前置）
+## Step 3 — 模式盘问（先于 spec write，硬前置）
+
+**这一步必须在 Step 4（spec write）之前完成**。核心编排顺序恒为：`npc spec interrogate run` → spawn `spine-spec-writer` 撰写 `pattern-interrogation.md` → `npc spec interrogate record` → 依据 `.open_questions` 分支裁决 → 才进入 `npc spec write run`。原因：后一步有一道硬前置门——`openspec/changes/<id>/pattern-interrogation.md` 不存在（或缺三个必需 H2 段落）时，`npc spec write run` 会直接 `ok=false`、拒绝渲染 write prompt。因此 **MUST NOT** 有任何在 `npc spec interrogate run`/`record` 完成前直接调用 `npc spec write run` 的路径。
+
+```bash
+if [ -n "$GOAL" ]; then
+  INTERROGATE=$(npc spec interrogate run --change "$CHANGE_ID" --goal "$GOAL")
+else
+  INTERROGATE=$(npc spec interrogate run --change "$CHANGE_ID")
+fi
+```
+
+- `.ok == false` 且含 `spec_routing_violation` → 停止，把 `violations` 报告用户（同 write 轮的路由处理，路由真相源唯一）。
+- `.ok == true`：`.deferred == true` 恒成立。取 `.spawn_prompt` 与 `.prompt_file`，用 `Agent` 工具以 `spine-spec-writer` 身份 spawn 一次撰写 `pattern-interrogation.md`。超时预算复用既有四件套：`npc agent timeout-budget --change "$CHANGE_ID" --phase spec_interrogate`（超时则 `npc agent record-timeout --change "$CHANGE_ID" --phase spec_interrogate` 后重试，直到 `.exhausted`）。
+
+subagent 结束后拿其 RESULT 行装订，并读出独立解析的开放问题数：
+
+```bash
+REC=$(npc spec interrogate record --change "$CHANGE_ID" --result "$RESULT_LINE")
+# .ok == false：out_of_scope_changes / unexpected_commit → 越界，停止报告用户；
+#   pattern_interrogation_missing / pattern_interrogation_missing_section → 盘问产物缺失或缺段，重试一次或停止。
+OPEN_QUESTIONS=$(printf '%s' "$REC" | jq -r '.open_questions // 0')
+```
+
+**依据 `.open_questions` 与模式标志分支裁决**：
+
+- **交互档（未传 `--auto`）且 `.open_questions > 0`**：先用 `AskUserQuestion` 把 `pattern-interrogation.md` 的每条开放问题摆给用户裁决，再把裁决原文（问题 + 用户选择/输入）拼装成一段文本，调用 `npc spec interrogate decide --change "$CHANGE_ID" --decisions-md "<裁决原文>"` 把它追加进 `pattern-interrogation.md` 的 `## User Decisions (Interactive)` 段，**然后才**进入 Step 4（write 轮）。
+- **交互档且 `.open_questions == 0`**：MUST NOT 调用 `AskUserQuestion` 或 `npc spec interrogate decide`，直接进入 Step 4。
+- **`--auto` 档**：无论 `.open_questions` 是否 `> 0`，MUST NOT 调用 `AskUserQuestion` 或 `npc spec interrogate decide`；在 interrogate 阶段（`run` + `record`）完成后直接进入 Step 4。
+
+## Step 4 — spec write（round 0 前置）
 
 ```bash
 if [ -n "$GOAL" ]; then
@@ -64,6 +98,8 @@ else
   WRITE=$(npc spec write run --change "$CHANGE_ID")
 fi
 ```
+
+- `.ok == false` 且含 `pattern_interrogation_missing`/`pattern_interrogation_missing_section` → 不应发生（Step 3 刚完成盘问），若发生则说明盘问产物有结构缺陷，回到 Step 3 排查。
 
 `--goal`（分支 A 才传）把 `GOAL` 原文透传进 `spec-write.prompt.md`，使 `spine-spec-writer` 在撰写 artifact 时能看到用户的原始一句话目标，而不仅仅是一个 `CHANGE_ID` 字符串。
 
@@ -87,7 +123,7 @@ npc spec write record --change "$CHANGE_ID" --result "$RESULT_LINE"
 - `out_of_scope_changes` / `unexpected_commit` → 这是 `spine-spec-writer` 违反了职责边界，停止并把违规详情报告用户（不要自动重试掩盖）。
 - 其它（`result-missing-keys` 等）→ 视情况重试一次或停止询问用户。
 
-## Step 4 — spec review + fix 循环（固定轮次上限）
+## Step 5 — spec review + fix 循环（固定轮次上限）
 
 ```bash
 ROUND=0
@@ -134,7 +170,7 @@ while true; do
   NEXT_ROUND=$((ROUND + 1))
   FIX=$(npc spec fix run --change "$CHANGE_ID" --round "$NEXT_ROUND")
   # .ok == false 且含 prev_spec_review_missing → 不应发生（本轮刚跑完 review），若发生则停止排查
-  # 否则同 Step 3：spawn spine-spec-writer（spawn_prompt/prompt_file），record 后进入下一轮
+  # 否则同 Step 4：spawn spine-spec-writer（spawn_prompt/prompt_file），record 后进入下一轮
   ROUND=$NEXT_ROUND
 done
 ```
@@ -145,7 +181,7 @@ done
 - 达到 `max_rounds` 仍有 blocking → 报告用户 `needs-user-decision`，**绝不自动 archive**。
 - fix 轮的 prompt 只含**上一轮已签发**的 blocking findings；你不需要、也不应该向 `spine-spec-writer` 转述本轮 review 的 rubric 或 category 枚举。
 
-## Step 5 — 收尾
+## Step 6 — 收尾
 
 跑完后按最终状态分三种情况报告给用户，并附上 `openspec/changes/<id>/` 路径：
 

@@ -301,6 +301,105 @@ RESULT: commit=- fixed=0 tests=fail summary=<path or -> categories_scanned=- reg
 """
 
 
+def render_spec_interrogator(
+    change_id: str,
+    base: str,
+    repo_root: str,
+    goal: str | None = None,
+) -> str:
+    """渲染 interrogate 轮 prompt（对应 change ``spec-writer-pattern-interrogation``）。
+
+    盘问轮**先于**任何 write/fix 轮执行：要求 ``spine-spec-writer`` 在动笔撰写
+    任何 artifact 之前，先枚举「仓库里已经有哪些与本次改动最相似的实现」，把关键
+    假设摆出来，并列出开放问题——产物落到
+    ``openspec/changes/<id>/pattern-interrogation.md``。
+
+    硬边界（不变量 1，与 :func:`render_spec_writer`/:func:`render_spec_fixer` 同约束）：
+    本函数 MUST NOT 引用 ``SPEC_REVIEW_SCHEMA`` 的 category 枚举、任何 spec-review 的
+    rubric 细则，或任何 ``round-*.spec-review.json`` 的 findings 原文——盘问轮讨论的是
+    仓库内已有的近似实现，不是本轮怎么被打分。
+
+    ``goal``：来自 ``/spine-spec`` 的用户一句话原始目标，原文透传，不做任何改写/摘要。
+    为 ``None``（或空串）时不渲染该段落（已存在 change-id 补全/修复分支）。
+    """
+    summary_path = f"{base}/pattern-interrogation.summary.md"
+    interrogation_path = f"openspec/changes/{change_id}/pattern-interrogation.md"
+    goal_section = (
+        f"""
+## 用户原始目标（原文保留，作为本次 change 的语义锚点）
+
+{goal}
+"""
+        if goal
+        else ""
+    )
+    return f"""你是 OpenSpec change 撰写专家。在为 change `{change_id}` 撰写任何 artifact 之前，请先完成一次**模式盘问**：枚举仓库里已有的最近似实现、摆出你的关键假设、列出开放问题。
+
+## Runtime Variables（npc 已注入；prompt 内引用变量名）
+
+- REPO_ROOT={repo_root}
+- LOG_BASE={base}
+- CHANGE_ID={change_id}
+- SUMMARY_PATH={summary_path}
+{goal_section}
+## 必读输入（按需自取）
+
+- openspec/changes/{change_id}/ 下已存在的任何草稿（如有）
+- 仓库源码：用 `Grep`/`Glob`/`Read` 主动搜索与本次改动最相似的既有实现（函数、模块、命令），**读到文件+函数级**再动笔
+- openspec/AGENTS.md / openspec/project.md（写作规范与项目背景）
+- 项目根 CLAUDE.md
+
+## 你的产物：`pattern-interrogation.md`（结构化盘问，先于序列化）
+
+用 `Write` 工具创建 `{interrogation_path}`，MUST 含以下三个 H2 段落（缺任一段，`npc spec interrogate record` 会以 `pattern_interrogation_missing_section` 拒绝装订）：
+
+```markdown
+## Analogs
+
+- 逐条列出仓库里与本次改动最近似的既有实现，**每条都给文件路径 + 函数/符号名级引用**
+  （例如 `src/npc/spec_pipeline.py::spec_write_run` 处理 routing→marker→render→return 的形态）。
+  盘问的价值就在这里：动笔前先确认"仓库里已经怎么做同类事"，而不是等语义评审才发现漏读。
+
+## Assumptions
+
+- 逐条列出你为本次 change 所做的关键假设（数据流、既有 schema、调用点边界等），
+  每条都可被人或后续评审单独挑战。
+
+## Open Questions
+
+- 逐条以顶层 `- ` bullet 列出需要用户拍板的开放问题；确无开放问题则保留本段标题、其下留空。
+  （npc 会独立解析本段顶层 bullet 数决定是否要问用户，不采信你自报的任何数字。）
+```
+
+## 职责边界（MUST，确定性校验；不是口头约束）
+
+- 只写 / 改 `openspec/changes/{change_id}/` 目录下的文件；MUST NOT 修改该目录之外的任何文件
+- MUST NOT 运行 `git commit`（本 phase 的 RESULT 契约不含 `commit` 键，自报的 commit 无处安放）
+- 本轮**只**产出 `pattern-interrogation.md`（盘问），MUST NOT 提前撰写 proposal/design/tasks/specs——那些留给后续 write 轮
+
+## 双产物契约（缺一视为失败）
+
+(1) 用 Write 工具创建摘要到 `{summary_path}`（≤ 80 行）：
+
+```markdown
+# Pattern Interrogation Summary — {change_id}
+
+Artifacts: pattern-interrogation.md
+Analogs Found: <条数与一句话概述>
+Open Questions: <条数>
+Summary: <一段话：本次 change 与哪些既有实现最像、最关键的假设是什么>
+```
+
+(2) 最终 message **最后一行**严格输出：
+
+```
+RESULT: change={change_id} artifacts={interrogation_path} summary={summary_path}
+```
+
+两条产物缺一不可：`pattern-interrogation.md` 与 summary 文件必须真的 Write，RESULT 行必须出现在 message 最后一行。
+"""
+
+
 def render_spec_writer(
     change_id: str,
     base: str,
@@ -358,9 +457,23 @@ fixer 自报字段，不含任何 reviewer 产出）。**仅供参考**：你可
 {goal_section}{lessons_section}
 ## 必读输入（按需自取）
 
+- openspec/changes/{change_id}/pattern-interrogation.md（**本轮之前已完成的模式盘问产物**，必读）
 - openspec/changes/{change_id}/ 下已存在的任何草稿（如有）
 - openspec/AGENTS.md / openspec/project.md（写作规范与项目背景）
 - 项目根 CLAUDE.md
+
+## 消费模式盘问产物 `pattern-interrogation.md`（MUST）
+
+判据是一个**纯字符串存在性检查**：`pattern-interrogation.md` 是否含 `## User Decisions (Interactive)` 这一 H2 标题。**MUST NOT** 逐条揣测某个 Open Question 的语义状态——只看标题在不在：
+
+- 若含 `## User Decisions (Interactive)` 标题：把 `## Open Questions` + `## User Decisions (Interactive)` 段原样写入 design.md 的 `## Pattern Mapping` 段。
+- 若不含该标题：把 `## Open Questions` + `## Assumptions` 段原样写入 design.md 的 `## Pattern Mapping` 与 `## Assumptions` 段。
+
+无论哪个分支，`## Open Questions` 段若为空（无 bullet）也按"该段为空"原样处理，不跳过整个指令。`## Analogs` 段的 analog 引用应指导你在 design.md 的 `## Pattern Mapping` 里说明本次实现沿用/偏离了哪些既有实现。
+
+## 落点清单的确定性枚举（MUST）
+
+若本 change 的 tasks.md 需要列出涉及 ≥2 处调用点/文件的落点清单，MUST 先执行确定性搜索命令（`grep`/`rg`/`git grep`）枚举涉及 ≥2 处调用点/文件的落点清单，并把命令原文与匹配计数写入 tasks.md 对应段落——使覆盖率判据从"reviewer 觉得全了"变成"清单能对着一条确定性命令逐项勾完"。
 
 ## 职责边界（MUST，确定性校验；不是口头约束）
 
@@ -462,6 +575,8 @@ def render_spawn_prompt(
     """
     if phase == "implement":
         action_phrase = f"实施 OpenSpec change `{change_id}`"
+    elif phase == "spec_interrogate":
+        action_phrase = f"为 OpenSpec change `{change_id}` 撰写模式盘问 pattern-interrogation.md"
     elif phase == "spec_write":
         action_phrase = f"撰写 OpenSpec change `{change_id}` 的 artifact"
     elif phase == "spec_fix":

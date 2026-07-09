@@ -43,9 +43,40 @@ def _with_repo(p, repo_root: Path):
     return type(p)(**{**p.__dict__, "repo_root": repo_root})
 
 
-def _make_change_dir(repo_root: Path, change_id: str, *, valid: bool = True) -> Path:
+_PI_SECTION_BODIES = {
+    "## Analogs": "- `src/npc/spec_pipeline.py::spec_write_run` 处理 routing→marker→render→return 的形态\n",
+    "## Assumptions": "- 既有 routing 真相源单一，不新增第二套白名单\n",
+    "## Open Questions": "",
+}
+
+
+def _write_pattern_interrogation(
+    repo_root: Path, change_id: str, *, sections=("## Analogs", "## Assumptions", "## Open Questions"),
+    open_questions_bullets: int = 0,
+) -> Path:
+    """写一份 pattern-interrogation.md 到 change 目录。
+
+    ``sections``：要包含的必需 H2 标题子集（默认三个齐全）；省略某个即模拟结构缺陷。
+    ``open_questions_bullets``：``## Open Questions`` 段落下的顶层 bullet 条数。
+    """
     change_dir = repo_root / "openspec" / "changes" / change_id
     change_dir.mkdir(parents=True, exist_ok=True)
+    parts: list[str] = []
+    for h in sections:
+        body = _PI_SECTION_BODIES.get(h, "")
+        if h == "## Open Questions" and open_questions_bullets:
+            body = "".join(f"- open question {i}\n" for i in range(open_questions_bullets))
+        parts.append(f"{h}\n\n{body}")
+    path = change_dir / "pattern-interrogation.md"
+    path.write_text("\n".join(parts), encoding="utf-8")
+    return path
+
+
+def _make_change_dir(repo_root: Path, change_id: str, *, valid: bool = True, interrogated: bool = True) -> Path:
+    change_dir = repo_root / "openspec" / "changes" / change_id
+    change_dir.mkdir(parents=True, exist_ok=True)
+    if interrogated:
+        _write_pattern_interrogation(repo_root, change_id)
     (change_dir / "proposal.md").write_text(
         "## Why\n\nx\n\n## What Changes\n\n- y\n\n## Non-Goals\n\n- z\n", encoding="utf-8"
     )
@@ -1306,3 +1337,456 @@ def test_spine_spec_writer_agent_md_contains_result_schema_and_read_instruction(
     assert "fixed=" in text
     assert "Read" in text
     assert "git commit" in text
+
+
+# ============================================================
+# 14. change: spec-writer-pattern-interrogation
+# ============================================================
+
+from npc import templates as _templates  # noqa: E402
+
+SPEC_REVIEW_CATEGORY_ENUM = (
+    "ambiguity", "missing-scenario", "implementation-leak",
+    "untestable", "deferred-decision", "contradiction", "scope-creep",
+)
+
+
+# ----- 1. RESULT 契约扩展 -----
+
+
+def test_result_required_keys_spec_interrogate_exact():
+    assert _pipeline.RESULT_REQUIRED_KEYS["spec_interrogate"] == frozenset(
+        {"change", "artifacts", "summary"}
+    )
+
+
+def test_result_required_keys_spec_write_and_fix_still_intact():
+    assert _pipeline.RESULT_REQUIRED_KEYS["spec_write"] == frozenset(
+        {"change", "artifacts", "validate", "summary"}
+    )
+    assert _pipeline.RESULT_REQUIRED_KEYS["spec_fix"] == frozenset(
+        {"change", "fixed", "validate", "summary"}
+    )
+
+
+def test_interrogate_record_missing_summary_key_rejected(env_setup, fake_repo):
+    _write_pattern_interrogation(fake_repo, "add-foo")
+    p = _with_repo(env_setup, fake_repo)
+    line = "RESULT: change=add-foo artifacts=openspec/changes/add-foo/pattern-interrogation.md"
+    result = _sp.spec_interrogate_record(p, "add-foo", line)
+    assert result["ok"] is False
+    assert result["error"] == "result-missing-keys"
+    assert "summary" in result["missing_keys"]
+
+
+# ----- 2. npc spec interrogate run -----
+
+
+def _valid_interrogate_result(change_id="add-foo"):
+    return (
+        f"RESULT: change={change_id} "
+        f"artifacts=openspec/changes/{change_id}/pattern-interrogation.md summary=/tmp/s.md"
+    )
+
+
+def test_interrogate_run_always_deferred_with_prompt_file(env_setup, fake_repo):
+    _make_change_dir(fake_repo, "add-foo")
+    p = _with_repo(env_setup, fake_repo)
+    result = _sp.spec_interrogate_run(p, "add-foo")
+    assert result["ok"] is True
+    assert result["deferred"] is True
+    assert "spawn_prompt" in result
+    assert result["prompt_file"].endswith("pattern-interrogation.prompt.md")
+
+
+def test_interrogate_run_rejects_mimo_backend_no_prompt(env_setup, fake_repo):
+    _make_change_dir(fake_repo, "add-foo")
+    npc_dir = fake_repo / ".npc"
+    npc_dir.mkdir()
+    (npc_dir / "config.toml").write_text('[spec_writer]\nbackend = "mimo"\n', encoding="utf-8")
+    p = _with_repo(env_setup, fake_repo)
+    result = _sp.spec_interrogate_run(p, "add-foo", config_path=npc_dir / "config.toml")
+    assert result["ok"] is False
+    assert result["error"] == "spec_routing_violation"
+    rules = {v["rule"] for v in result["violations"]}
+    assert "spec_mimo_in_session" in rules
+    assert not (_sp._spec_base(p, "add-foo") / "pattern-interrogation.prompt.md").exists()
+
+
+def test_interrogate_run_goal_passthrough(env_setup, fake_repo):
+    _make_change_dir(fake_repo, "add-foo")
+    p = _with_repo(env_setup, fake_repo)
+    result = _sp.spec_interrogate_run(p, "add-foo", goal="给认证模块加限流")
+    text = Path(result["prompt_file"]).read_text(encoding="utf-8")
+    assert "给认证模块加限流" in text
+
+
+def test_interrogate_prompt_does_not_leak_rubric(env_setup, fake_repo):
+    _make_change_dir(fake_repo, "add-foo")
+    p = _with_repo(env_setup, fake_repo)
+    result = _sp.spec_interrogate_run(p, "add-foo")
+    text = Path(result["prompt_file"]).read_text(encoding="utf-8")
+    assert "scope-creep" not in text
+    assert "implementation-leak" not in text
+    for cat in SPEC_REVIEW_CATEGORY_ENUM:
+        assert cat not in text
+    assert "spec-review.json" not in text
+
+
+def test_interrogate_prompt_requires_three_sections():
+    text = _templates.render_spec_interrogator(
+        change_id="add-foo", base="/tmp/b", repo_root="/tmp/r"
+    )
+    assert "## Analogs" in text
+    assert "## Assumptions" in text
+    assert "## Open Questions" in text
+    assert "pattern-interrogation.md" in text
+
+
+def test_interrogate_run_timeout_budget_phase(env_setup, fake_repo, make_args, capsys):
+    from npc import agent as _agent
+
+    _make_change_dir(fake_repo, "add-foo")
+    _with_repo(env_setup, fake_repo)
+    _agent.timeout_budget(
+        make_args(seq=None, change_id="add-foo", phase="spec_interrogate",
+                  base=None, mult=None, max_sec=None)
+    )
+    out = json.loads(capsys.readouterr().out.strip())
+    assert out["ok"] is True
+    assert isinstance(out["timeout_sec"], int) and out["timeout_sec"] > 0
+
+
+# ----- 3. npc spec interrogate record + open_questions 计数 -----
+
+
+def test_interrogate_record_counts_open_questions(env_setup, fake_repo):
+    _write_pattern_interrogation(fake_repo, "add-foo", open_questions_bullets=3)
+    p = _with_repo(env_setup, fake_repo)
+    result = _sp.spec_interrogate_record(p, "add-foo", _valid_interrogate_result())
+    assert result["ok"] is True
+    assert result["open_questions"] == 3
+
+
+def test_interrogate_record_missing_file(env_setup, fake_repo):
+    (fake_repo / "openspec" / "changes" / "add-foo").mkdir(parents=True)
+    p = _with_repo(env_setup, fake_repo)
+    result = _sp.spec_interrogate_record(p, "add-foo", _valid_interrogate_result())
+    assert result["ok"] is False
+    assert result["error"] == "pattern_interrogation_missing"
+
+
+def test_interrogate_record_missing_open_questions_section(env_setup, fake_repo):
+    _write_pattern_interrogation(fake_repo, "add-foo", sections=("## Analogs", "## Assumptions"))
+    p = _with_repo(env_setup, fake_repo)
+    result = _sp.spec_interrogate_record(p, "add-foo", _valid_interrogate_result())
+    assert result["ok"] is False
+    assert result["error"] == "pattern_interrogation_missing_section"
+    assert "## Open Questions" in result["missing_sections"]
+
+
+def test_interrogate_record_empty_open_questions_is_zero(env_setup, fake_repo):
+    _write_pattern_interrogation(fake_repo, "add-foo", open_questions_bullets=0)
+    p = _with_repo(env_setup, fake_repo)
+    result = _sp.spec_interrogate_record(p, "add-foo", _valid_interrogate_result())
+    assert result["ok"] is True
+    assert result["open_questions"] == 0
+
+
+def test_interrogate_record_rejects_out_of_scope(env_setup, fake_repo):
+    _make_change_dir(fake_repo, "add-foo")
+    p = _with_repo(env_setup, fake_repo)
+    _sp.spec_interrogate_run(p, "add-foo")  # 建 base + pre_head marker
+    subprocess.run(["git", "add", "-A"], cwd=fake_repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "wip"], cwd=fake_repo, check=True)
+    (fake_repo / "src").mkdir(exist_ok=True)
+    (fake_repo / "src" / "npc").mkdir(exist_ok=True)
+    (fake_repo / "src" / "npc" / "templates.py").write_text("# tampered\n")
+    result = _sp.spec_interrogate_record(p, "add-foo", _valid_interrogate_result())
+    assert result["ok"] is False
+    assert result["error"] == "out_of_scope_changes"
+
+
+def test_interrogate_record_rejects_unexpected_commit(env_setup, fake_repo):
+    _make_change_dir(fake_repo, "add-foo")
+    p = _with_repo(env_setup, fake_repo)
+    _sp.spec_interrogate_run(p, "add-foo")
+    subprocess.run(["git", "add", "-A"], cwd=fake_repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "unexpected"], cwd=fake_repo, check=True)
+    result = _sp.spec_interrogate_record(p, "add-foo", _valid_interrogate_result())
+    assert result["ok"] is False
+    assert result["error"] == "unexpected_commit"
+
+
+# ----- 4. npc spec write run 的硬前置门 -----
+
+
+def test_write_run_rejected_when_interrogation_missing(env_setup, fake_repo):
+    _make_change_dir(fake_repo, "add-foo", interrogated=False)
+    p = _with_repo(env_setup, fake_repo)
+    result = _sp.spec_write_run(p, "add-foo")
+    assert result["ok"] is False
+    assert result["error"] == "pattern_interrogation_missing"
+    assert not (_sp._spec_base(p, "add-foo") / "spec-write.prompt.md").exists()
+
+
+def test_write_run_ok_when_three_sections_present(env_setup, fake_repo):
+    _make_change_dir(fake_repo, "add-foo")
+    p = _with_repo(env_setup, fake_repo)
+    result = _sp.spec_write_run(p, "add-foo")
+    assert result["ok"] is True
+    assert result["deferred"] is True
+    assert "spawn_prompt" in result
+    assert "prompt_file" in result
+
+
+def test_write_run_rejected_when_missing_assumptions(env_setup, fake_repo):
+    _make_change_dir(fake_repo, "add-foo", interrogated=False)
+    _write_pattern_interrogation(fake_repo, "add-foo", sections=("## Analogs", "## Open Questions"))
+    p = _with_repo(env_setup, fake_repo)
+    result = _sp.spec_write_run(p, "add-foo")
+    assert result["ok"] is False
+    assert result["error"] == "pattern_interrogation_missing_section"
+    assert "## Assumptions" in result["missing_sections"]
+    assert not (_sp._spec_base(p, "add-foo") / "spec-write.prompt.md").exists()
+
+
+@pytest.mark.parametrize(
+    "missing,present",
+    [
+        ("## Analogs", ("## Assumptions", "## Open Questions")),
+        ("## Open Questions", ("## Analogs", "## Assumptions")),
+    ],
+)
+def test_write_run_rejected_each_missing_section(env_setup, fake_repo, missing, present):
+    _make_change_dir(fake_repo, "add-foo", interrogated=False)
+    _write_pattern_interrogation(fake_repo, "add-foo", sections=present)
+    p = _with_repo(env_setup, fake_repo)
+    result = _sp.spec_write_run(p, "add-foo")
+    assert result["ok"] is False
+    assert result["error"] == "pattern_interrogation_missing_section"
+    assert missing in result["missing_sections"]
+
+
+def test_write_run_gate_applies_to_branch_b_no_goal(env_setup, fake_repo):
+    # 分支 B：proposal 已存在但 pattern-interrogation.md 不存在
+    change_dir = fake_repo / "openspec" / "changes" / "add-foo"
+    change_dir.mkdir(parents=True)
+    (change_dir / "proposal.md").write_text("## Why\n\nx\n", encoding="utf-8")
+    p = _with_repo(env_setup, fake_repo)
+    result = _sp.spec_write_run(p, "add-foo")
+    assert result["ok"] is False
+    assert result["error"] == "pattern_interrogation_missing"
+
+
+def test_routing_violation_precedes_interrogation_gate(env_setup, fake_repo):
+    # mimo + 缺 pattern-interrogation.md：错误标识恒为 spec_routing_violation
+    change_dir = fake_repo / "openspec" / "changes" / "add-foo"
+    change_dir.mkdir(parents=True)
+    npc_dir = fake_repo / ".npc"
+    npc_dir.mkdir()
+    (npc_dir / "config.toml").write_text('[spec_writer]\nbackend = "mimo"\n', encoding="utf-8")
+    p = _with_repo(env_setup, fake_repo)
+    result = _sp.spec_write_run(p, "add-foo", config_path=npc_dir / "config.toml")
+    assert result["ok"] is False
+    assert result["error"] == "spec_routing_violation"
+
+
+# ----- 5. record 与 write gate 判定一致（同一判据、无分歧）-----
+
+
+@pytest.mark.parametrize(
+    "present,expected_missing",
+    [
+        (("## Assumptions", "## Open Questions"), "## Analogs"),
+        (("## Analogs", "## Open Questions"), "## Assumptions"),
+        (("## Analogs", "## Assumptions"), "## Open Questions"),
+    ],
+)
+def test_record_and_write_gate_agree_on_missing_sections(env_setup, fake_repo, present, expected_missing):
+    _write_pattern_interrogation(fake_repo, "add-foo", sections=present)
+    p = _with_repo(env_setup, fake_repo)
+    rec = _sp.spec_interrogate_record(p, "add-foo", _valid_interrogate_result())
+    wr = _sp.spec_write_run(p, "add-foo")
+    assert rec["ok"] is False and wr["ok"] is False
+    assert rec["error"] == "pattern_interrogation_missing_section"
+    assert wr["error"] == "pattern_interrogation_missing_section"
+    assert set(rec["missing_sections"]) == set(wr["missing_sections"])
+    assert expected_missing in rec["missing_sections"]
+
+
+# ----- 6. render_spec_writer 扩写 -----
+
+
+def _write_prompt_text(env_setup, fake_repo):
+    _make_change_dir(fake_repo, "add-foo")
+    p = _with_repo(env_setup, fake_repo)
+    result = _sp.spec_write_run(p, "add-foo")
+    return Path(result["prompt_file"]).read_text(encoding="utf-8")
+
+
+def test_write_prompt_lists_pattern_interrogation_input(env_setup, fake_repo):
+    text = _write_prompt_text(env_setup, fake_repo)
+    assert "pattern-interrogation.md" in text
+
+
+def test_write_prompt_mechanical_criterion_not_semantic(env_setup, fake_repo):
+    text = _write_prompt_text(env_setup, fake_repo)
+    assert "## User Decisions (Interactive)" in text
+    assert "已被回应" not in text
+    assert "resolved" not in text
+
+
+def test_write_prompt_user_decisions_branch_instruction(env_setup, fake_repo):
+    text = _write_prompt_text(env_setup, fake_repo)
+    assert "把 `## Open Questions` + `## User Decisions (Interactive)` 段原样写入 design.md 的 `## Pattern Mapping` 段" in text
+
+
+def test_write_prompt_no_user_decisions_branch_instruction(env_setup, fake_repo):
+    text = _write_prompt_text(env_setup, fake_repo)
+    assert "把 `## Open Questions` + `## Assumptions` 段原样写入 design.md 的 `## Pattern Mapping` 与 `## Assumptions` 段" in text
+
+
+def test_write_prompt_touchpoint_search_command_instruction(env_setup, fake_repo):
+    text = _write_prompt_text(env_setup, fake_repo)
+    assert "确定性搜索命令" in text
+    assert "grep" in text and "rg" in text and "git grep" in text
+    assert "tasks.md" in text
+
+
+def test_write_prompt_still_no_rubric_after_extension(env_setup, fake_repo):
+    text = _write_prompt_text(env_setup, fake_repo)
+    assert "scope-creep" not in text
+    assert "implementation-leak" not in text
+    for cat in SPEC_REVIEW_CATEGORY_ENUM:
+        assert cat not in text
+
+
+# ----- 6b. npc spec interrogate decide -----
+
+
+def test_decide_missing_file(env_setup, fake_repo):
+    (fake_repo / "openspec" / "changes" / "add-foo").mkdir(parents=True)
+    p = _with_repo(env_setup, fake_repo)
+    result = _sp.spec_interrogate_decide(p, "add-foo", "Q1: 用户选择方案 A")
+    assert result["ok"] is False
+    assert result["error"] == "pattern_interrogation_missing"
+
+
+def test_decide_appends_verbatim(env_setup, fake_repo):
+    path = _write_pattern_interrogation(fake_repo, "add-foo", open_questions_bullets=1)
+    p = _with_repo(env_setup, fake_repo)
+    result = _sp.spec_interrogate_decide(p, "add-foo", "Q1: 用户选择方案 A")
+    assert result["ok"] is True
+    text = path.read_text(encoding="utf-8")
+    assert "## User Decisions (Interactive)" in text
+    assert "Q1: 用户选择方案 A" in text
+
+
+def test_decide_second_call_rejected_no_overwrite(env_setup, fake_repo):
+    path = _write_pattern_interrogation(fake_repo, "add-foo", open_questions_bullets=1)
+    p = _with_repo(env_setup, fake_repo)
+    _sp.spec_interrogate_decide(p, "add-foo", "first decision")
+    before = path.read_bytes()
+    result = _sp.spec_interrogate_decide(p, "add-foo", "second decision")
+    assert result["ok"] is False
+    assert result["error"] == "decisions_already_recorded"
+    assert path.read_bytes() == before
+
+
+def test_decide_does_not_parse_content(env_setup, fake_repo):
+    path = _write_pattern_interrogation(fake_repo, "add-foo")
+    p = _with_repo(env_setup, fake_repo)
+    raw = "任意原文\n- 含 markdown\n### 甚至标题\n**加粗**"
+    _sp.spec_interrogate_decide(p, "add-foo", raw)
+    text = path.read_text(encoding="utf-8")
+    assert raw in text
+
+
+# ----- 9. 非目标守护 -----
+
+
+def test_existing_phase_keys_unchanged():
+    assert _pipeline.RESULT_REQUIRED_KEYS["implement"] == frozenset(
+        {"commit", "tasks", "tests", "summary"}
+    )
+    assert _pipeline.RESULT_REQUIRED_KEYS["fix"] == frozenset(
+        {"commit", "fixed", "tests", "summary", "categories_scanned", "regressions_added"}
+    )
+
+
+def test_spec_fix_run_source_unchanged_signature():
+    import inspect
+
+    src = inspect.getsource(_sp.spec_fix_run)
+    assert "prev_spec_review_missing" in src  # 既有行为未被改动
+
+
+# ----- 10. 端到端 -----
+
+
+def test_e2e_interrogate_then_write(env_setup, fake_repo):
+    # 全新 change：interrogate 未完成时 write 被拒；完成后成功
+    change_dir = fake_repo / "openspec" / "changes" / "add-foo"
+    change_dir.mkdir(parents=True)
+    p = _with_repo(env_setup, fake_repo)
+    assert _sp.spec_write_run(p, "add-foo")["error"] == "pattern_interrogation_missing"
+    _write_pattern_interrogation(fake_repo, "add-foo", open_questions_bullets=2)
+    rec = _sp.spec_interrogate_record(p, "add-foo", _valid_interrogate_result())
+    assert rec["ok"] is True and rec["open_questions"] == 2
+    assert _sp.spec_write_run(p, "add-foo")["ok"] is True
+
+
+# ----- CLI 层 -----
+
+
+def test_cli_interrogate_run_record_decide(env_setup, make_args, fake_repo, capsys):
+    _make_change_dir(fake_repo, "add-foo", interrogated=False)
+    _write_pattern_interrogation(fake_repo, "add-foo", open_questions_bullets=2)
+    _with_repo(env_setup, fake_repo)
+    _sp.cli_spec_interrogate_run(make_args(change_id="add-foo", goal=None, config=None))
+    run_out = json.loads(capsys.readouterr().out.strip())
+    assert run_out["ok"] is True
+    _sp.cli_spec_interrogate_record(make_args(change_id="add-foo", result=_valid_interrogate_result()))
+    rec_out = json.loads(capsys.readouterr().out.strip())
+    assert rec_out["ok"] is True and rec_out["open_questions"] == 2
+    _sp.cli_spec_interrogate_decide(make_args(change_id="add-foo", decisions_md="裁决原文"))
+    dec_out = json.loads(capsys.readouterr().out.strip())
+    assert dec_out["ok"] is True
+
+
+# ----- 命令文档 / subagent 契约 -----
+
+
+def test_spine_spec_command_auto_flag_and_interrogate_step():
+    text = (
+        REPO_ROOT / "plugins" / "agent-spine" / "commands" / "spine-spec.md"
+    ).read_text(encoding="utf-8")
+    assert "--auto" in text
+    assert "模式盘问" in text
+    # interrogate step 在 spec write 之前
+    assert text.index("npc spec interrogate run") < text.index("npc spec write run")
+    assert "AskUserQuestion" in text
+    assert "npc spec interrogate decide" in text
+
+
+def test_spine_spec_command_auto_forbids_askuserquestion():
+    text = (
+        REPO_ROOT / "plugins" / "agent-spine" / "commands" / "spine-spec.md"
+    ).read_text(encoding="utf-8")
+    assert "绝不调用 `AskUserQuestion`" in text
+
+
+def test_spine_run_step_2b_untouched():
+    text = (
+        REPO_ROOT / "plugins" / "agent-spine" / "commands" / "spine-run.md"
+    ).read_text(encoding="utf-8")
+    assert "spine-spec-writer" not in text
+
+
+def test_spine_spec_writer_agent_lists_interrogate_phase():
+    text = (
+        REPO_ROOT / "plugins" / "agent-spine" / "agents" / "spine-spec-writer.md"
+    ).read_text(encoding="utf-8")
+    assert "spec_interrogate" in text
+    assert "## Analogs" in text and "## Assumptions" in text and "## Open Questions" in text

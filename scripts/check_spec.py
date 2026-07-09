@@ -12,7 +12,7 @@ stdout 输出单行合法 JSON，含键 ``ok``、``change``、``errors``、``war
 全部规则名集合（含零命中项）。当且仅当 ``errors`` 为空时 ``ok`` 为 ``true``；
 退出码：存在 ``errors`` → ``1``，否则（仅 ``warnings`` 或全部干净）→ ``0``。
 
-本脚本实现四条**语义层**规则，用于补上 ``openspec validate`` 不管的真空
+本脚本实现五条**语义层**规则，用于补上 ``openspec validate`` 不管的真空
 （``openspec validate`` 只强制 delta header 合法 / Requirement 含
 SHALL/MUST / 每条 Requirement 至少一个 Scenario——这三类本脚本 MUST NOT
 重复实现）：
@@ -23,8 +23,11 @@ SHALL/MUST / 每条 Requirement 至少一个 Scenario——这三类本脚本 MU
   ``WHEN`` 与 ``THEN``。
 - ``vague_adverb``：Requirement / Scenario 正文命中含糊副词表。
 - ``proposal_missing_non_goals``：``proposal.md`` 无 Non-Goals/非目标段落。
+- ``touchpoint_list_missing_search_command``：``tasks.md`` 中某段落声明了
+  多落点清单（≥3 条引用不同文件路径的列表项）却无确定性搜索命令依据
+  （段内无含 ``grep``/``rg``/``git grep``/``git diff --name-only`` 的围栏代码块）。
 
-**本版本交付的四条规则 severity 一律为 ``warning``（shadow mode）**：任一
+**本版本交付的五条规则 severity 一律为 ``warning``（shadow mode）**：任一
 命中都 MUST NOT 使 ``.ok`` 变为 ``false``，MUST NOT 使退出码非零。系统级
 结构性问题（``invalid_change_id`` / ``change_not_found`` / ``openspec_missing``）
 走 ``errors`` 通道，与这四条内容规则的 severity 无关。
@@ -59,13 +62,25 @@ RULE_DEFERRED_DECISION = "deferred_decision_outside_open_questions"
 RULE_SCENARIO_MISSING_WHEN_THEN = "scenario_missing_when_then"
 RULE_VAGUE_ADVERB = "vague_adverb"
 RULE_PROPOSAL_MISSING_NON_GOALS = "proposal_missing_non_goals"
+RULE_TOUCHPOINT_LIST_MISSING_SEARCH_COMMAND = "touchpoint_list_missing_search_command"
 
 ALL_RULE_NAMES = (
     RULE_DEFERRED_DECISION,
     RULE_SCENARIO_MISSING_WHEN_THEN,
     RULE_VAGUE_ADVERB,
     RULE_PROPOSAL_MISSING_NON_GOALS,
+    RULE_TOUCHPOINT_LIST_MISSING_SEARCH_COMMAND,
 )
+
+# 多落点清单确定性枚举规则的常量（change: spec-writer-pattern-interrogation）。
+# 反引号包裹且含 `/` 或以下列后缀结尾的 token 视为"文件路径引用"。
+_TOUCHPOINT_MIN_PATHS = 3
+_CODE_FILE_SUFFIXES = (
+    ".py", ".ts", ".tsx", ".js", ".jsx", ".json", ".toml", ".sh",
+    ".rs", ".go", ".md", ".yaml", ".yml", ".sql", ".txt",
+)
+_SEARCH_CMD_SUBSTRINGS = ("grep", "rg", "git grep", "git diff --name-only")
+_BACKTICK_TOKEN_RE = re.compile(r"`([^`\n]+)`")
 
 # 延迟决策词表：MUST 只含「延迟 + 决策动词」的谓语短语，MUST NOT 含裸的时间
 # 副词（裸的「届时」「再定」「实现时」在本仓库真实语料中会在普通时间状语上
@@ -213,6 +228,93 @@ def _check_proposal_non_goals(proposal_path: Path) -> dict | None:
 
 
 # ============================================================
+# 规则 5：touchpoint_list_missing_search_command（tasks.md）
+# ============================================================
+
+
+def _line_file_path_tokens(line: str) -> list[str]:
+    """返回一行里被反引号包裹、且是**相对文件路径**（含 `/`）的 token 列表。
+
+    只认「看起来像相对路径」的 token：含 `/`、以常见代码文件后缀结尾、且不含
+    符号限定符 `::`/空白/glob `*`/尖括号 `<>` 等非路径字符。dogfood 本规则对本仓库
+    真实语料（本 change 自身的 tasks.md）跑一遍逼出这一约束——TDD 段落里大量出现
+    `src/npc/x.py::func`（符号引用，非落点路径）、`pattern-interrogation.md`（裸产物
+    文件名，非跨落点路径）、`round-*.spec-review.json`（glob 通配）会让朴素匹配把普通
+    TDD 段误判为"多落点清单"。真正的落点清单（跨目录枚举待改文件）用的是完整相对
+    路径 token（`plugins/.../spine-spec.md` 这类），据此收紧。与既有 vague_adverb /
+    deferred_decision 规则同理——启发式按真实误报语料迭代。
+    """
+    out: list[str] = []
+    for m in _BACKTICK_TOKEN_RE.finditer(line):
+        tok = m.group(1).strip()
+        if any(bad in tok for bad in ("::", " ", "*", "<", ">")):
+            continue
+        if tok.endswith("/"):
+            continue
+        if "/" in tok and tok.endswith(_CODE_FILE_SUFFIXES):
+            out.append(tok)
+    return out
+
+
+def _check_touchpoint_lists(tasks_path: Path) -> list[dict]:
+    """扫描 ``tasks.md``：某 ``##`` 段落若含 ≥3 条引用**不同**文件路径的列表项，
+    段内 MUST 有一个含 ``grep``/``rg``/``git grep``/``git diff --name-only`` 的围栏
+    代码块，否则命中 ``touchpoint_list_missing_search_command``。
+
+    段落定界口径与 :func:`section_of_line` 一致（只认恰好两个 ``#`` 的标题）；
+    围栏代码块的进出判定复用 :data:`_FENCE_RE`。以 ``warning`` 交付（shadow mode）。
+    """
+    text = tasks_path.read_text(encoding="utf-8")
+    lines = text.split("\n")
+
+    # 每个段落以其标题行索引为键，保证同名标题不折叠、line 号精确。
+    sections: dict[int, dict] = {}
+    current_key: int | None = None
+    in_fence = False
+    fence_buf: list[str] = []
+
+    for i, line in enumerate(lines):
+        if _FENCE_RE.match(line):
+            if in_fence:
+                blob = "\n".join(fence_buf)
+                if current_key is not None and any(s in blob for s in _SEARCH_CMD_SUBSTRINGS):
+                    sections[current_key]["has_search"] = True
+                fence_buf = []
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            fence_buf.append(line)
+            continue
+        m = _H2_RE.match(line)
+        if m:
+            current_key = i
+            sections[current_key] = {
+                "title": m.group(1).strip(),
+                "paths": set(),
+                "has_search": False,
+                "line": i + 1,
+            }
+            continue
+        if current_key is not None and line.lstrip().startswith("- "):
+            for tok in _line_file_path_tokens(line):
+                sections[current_key]["paths"].add(tok)
+
+    hits: list[dict] = []
+    for key in sorted(sections):
+        info = sections[key]
+        if len(info["paths"]) >= _TOUCHPOINT_MIN_PATHS and not info["has_search"]:
+            hits.append(
+                _finding(
+                    RULE_TOUCHPOINT_LIST_MISSING_SEARCH_COMMAND,
+                    str(tasks_path),
+                    info["line"],
+                    f"多落点清单缺确定性搜索命令依据：## {info['title']}",
+                )
+            )
+    return hits
+
+
+# ============================================================
 # 规则 2 & 3：scenario_missing_when_then / vague_adverb（消费 openspec 解析产物）
 # ============================================================
 
@@ -332,6 +434,14 @@ def lint_change(change_id: str | None, dir_path: str | None, changes_root: Path 
             rule_hits[RULE_PROPOSAL_MISSING_NON_GOALS] = 1
             warnings.append(finding)
 
+    # 规则 5：touchpoint_list_missing_search_command（tasks.md）。只读 tasks.md，
+    # 不依赖 `openspec show`，故 --change 与 --dir 两种模式下均生效、MUST NOT 跳过。
+    tasks_path = target_dir / "tasks.md"
+    if tasks_path.is_file():
+        t_hits = _check_touchpoint_lists(tasks_path)
+        rule_hits[RULE_TOUCHPOINT_LIST_MISSING_SEARCH_COMMAND] = len(t_hits)
+        warnings.extend(t_hits)
+
     # 规则 2 & 3：依赖 `openspec show --json --deltas-only`，--dir 模式下跳过
     # （openspec show 只认 active change id，--dir 可能指向 fixture / archive）。
     if not dir_mode:
@@ -369,7 +479,7 @@ def _finalize(change_label: str | None, errors: list[dict], warnings: list[dict]
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="check_spec.py",
-        description="agent-spine 仓库本地 spec 静态语义 lint（shadow mode，四条规则均为 warning）。",
+        description="agent-spine 仓库本地 spec 静态语义 lint（shadow mode，五条规则均为 warning）。",
     )
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--change", help="openspec/changes/<id> 下的单段 change id（拒绝 '/' 与 '..'）")
