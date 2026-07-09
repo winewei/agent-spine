@@ -1,0 +1,3 @@
+# run-lessons-feedforward
+
+为 spine-run 增加 run 级 lessons 前馈与试点回写闸口：(1) 每个 change archive 成功后，从该 change 的 fix summary（fixer 自报的失败模式与根因，非 reviewer 文本，不破不变量 1「生成⊥验证」）确定性提炼失败模式条目，追加到 run 级 lessons.md；(2) 后续 change 的 implement prompt 注入该 lessons.md，使首个 change 天然成为试点（Bun 的 3-file trial run 语义在多 change plan 中免费获得）；(3) 在 DAG 层屏障处增加「试点回写闸口」：首层 change 达终态后，允许基于 lessons 修订下游未开始 change 的 tasks/design（交互档 AskUserQuestion 确认；auto 档由 npc auto-decide 决定是否回写，默认不改只注入 lessons）。硬约束：lessons.md 只能来源于 fixer 自报的 summary，MUST NOT 含 reviewer 的 findings 原文、rubric 或评分细则。依据 docs/optimization-proposals/2026-07-09-bun-migration-lessons.md 提案 3 + 文档先行「试点回写」小点。
