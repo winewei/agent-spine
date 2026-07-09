@@ -225,7 +225,10 @@ def test_does_not_read_reviewer_artifacts(env_setup):
     assert secret not in text
 
 
-def test_corrupt_line_skipped_no_throw(env_setup):
+def test_corrupt_line_returns_structured_error_no_throw(env_setup):
+    """spec「非阻塞 best-effort 契约」：损坏 events.jsonl 与缺失并列为执行失败，
+    MUST 返回结构化 {ok:false, error:"events-invalid"}，MUST NOT 静默降级为「无 fix 轮」
+    或追加不完整条目，且不抛栈。"""
     p = env_setup
     base = _paths.base_for(p, 1, "change-a")
     _write_state(p, [{"seq": 1, "change_id": "change-a", "status": "archived",
@@ -236,10 +239,28 @@ def test_corrupt_line_skipped_no_throw(env_setup):
         f.write(json.dumps(_fix_done(1, cats="validation", notes="ok")) + "\n")
 
     res = _lessons.extract_and_append(p, 1)
-    assert res["ok"] is True
-    assert res["appended"] is True
-    text = (p.run_dir / "lessons.md").read_text(encoding="utf-8")
-    assert "validation" in text
+    assert res["ok"] is False
+    assert res["error"] == "events-invalid"
+    assert res["change_id"] == "change-a"
+    # 损坏文件不得写出 lessons.md（不追加不完整条目）
+    assert not (p.run_dir / "lessons.md").exists()
+
+
+def test_non_dict_line_returns_structured_error(env_setup):
+    """有效 JSON 但结构非 dict 的行同属结构损坏——不得静默跳过，返回 events-invalid。"""
+    p = env_setup
+    base = _paths.base_for(p, 1, "change-a")
+    _write_state(p, [{"seq": 1, "change_id": "change-a", "status": "archived",
+                      "base": str(base), "phases": {}}])
+    base.mkdir(parents=True, exist_ok=True)
+    with (base / "events.jsonl").open("w", encoding="utf-8") as f:
+        f.write("[1, 2, 3]\n")
+        f.write(json.dumps(_fix_done(1, cats="validation")) + "\n")
+
+    res = _lessons.extract_and_append(p, 1)
+    assert res["ok"] is False
+    assert res["error"] == "events-invalid"
+    assert not (p.run_dir / "lessons.md").exists()
 
 
 def test_entries_appended_recorded_in_state(env_setup):

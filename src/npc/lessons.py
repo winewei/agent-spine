@@ -74,6 +74,16 @@ def _heading_exists(lessons_path: Path, change_id: str) -> bool:
 # ============================================================
 
 
+class EventsInvalidError(Exception):
+    """``events.jsonl`` 含无法解析/结构损坏的行——损坏文件 MUST NOT 静默降级为空结果。
+
+    spec「非阻塞 best-effort 契约」把「``events.jsonl`` 损坏」与「缺失」并列为执行失败：
+    二者都 SHALL 返回结构化 ``{ok:false, error:...}``，而不是被当作「无 fix 轮」。由
+    ``_parse_fix_done_events`` 在遇到损坏行时抛出，``extract_and_append`` 兜成
+    ``{ok:false, error:"events-invalid"}``。
+    """
+
+
 def _split_csv(raw: Any) -> list[str]:
     """把 ``categories_scanned`` / ``regressions_added`` 的 csv 自报拆成去空/去 ``-`` 列表。"""
     if raw is None:
@@ -105,8 +115,10 @@ def _parse_fix_done_events(events_path: Path) -> list[dict]:
     因此这里筛 ``event == "fix.done" && phase`` 匹配 ``^fix-r\\d+$``，取三个 fixer
     自报字段。（``kind == "phase.exit" && status == "done"`` 是另一条 telemetry 派生流
     ``events.ndjson`` 的形态，且该流不携带 ``categories_scanned`` / ``regressions_added``
-    / ``notes``，无法用作提炼源——见 design.md D1。）逐行 best-effort 解析：无法解析的
-    行静默跳过（不抛栈），MUST NOT 打开任何 reviewer 产出文件。
+    / ``notes``，无法用作提炼源——见 design.md D1。）损坏行（无法 ``json.loads`` 或
+    结构非 dict）MUST NOT 被静默跳过——按 spec「损坏 events.jsonl 返回结构化错误」抛
+    ``EventsInvalidError``，由调用方兜成 ``{ok:false, error:"events-invalid"}``；空白行忽略。
+    MUST NOT 打开任何 reviewer 产出文件。
     """
     rounds: dict[int, dict] = {}
     text = events_path.read_text(encoding="utf-8")  # OSError 由调用方兜底
@@ -116,10 +128,10 @@ def _parse_fix_done_events(events_path: Path) -> list[dict]:
             continue
         try:
             ev = json.loads(line)
-        except json.JSONDecodeError:
-            continue
+        except json.JSONDecodeError as e:
+            raise EventsInvalidError(f"malformed json line: {e}") from e
         if not isinstance(ev, dict):
-            continue
+            raise EventsInvalidError(f"non-object json line: {type(ev).__name__}")
         if ev.get("event") != "fix.done":
             continue
         phase = ev.get("phase") or ""
@@ -243,6 +255,8 @@ def extract_and_append(p: _paths.Paths, seq: int) -> dict:
 
         try:
             fix_rounds = _parse_fix_done_events(events_path)
+        except EventsInvalidError as e:
+            return {"ok": False, "error": "events-invalid", "detail": str(e), "change_id": change_id}
         except OSError as e:
             return {"ok": False, "error": "events-read-failed", "detail": str(e), "change_id": change_id}
 
