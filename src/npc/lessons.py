@@ -98,9 +98,15 @@ def _clean_notes(raw: Any) -> str:
 def _parse_fix_done_events(events_path: Path) -> list[dict]:
     """读取 ``events.jsonl``，返回按 round 升序的 fix-rN done 事件精炼列表。
 
-    只取 ``fix.done`` 事件（即 ``phase`` 匹配 ``^fix-r\\d+$`` 且已 done）的三个 fixer
-    自报字段。逐行 best-effort 解析：无法解析的行静默跳过（不抛栈），MUST NOT 打开
-    任何 reviewer 产出文件。
+    过滤契约锚定 **npc 真实落盘形态**：``npc phase exit <seq> fix-rN --status done``
+    （见 ``events.py``）向 per-change ``events.jsonl`` 追加的行是
+    ``{"event":"fix.done","phase":"fix-rN", <fixer 自报字段...>}``——该文件用 ``event``
+    字段命名事件、以 ``.done`` 后缀编码成功退出，**行内不含 ``kind`` / ``status``**。
+    因此这里筛 ``event == "fix.done" && phase`` 匹配 ``^fix-r\\d+$``，取三个 fixer
+    自报字段。（``kind == "phase.exit" && status == "done"`` 是另一条 telemetry 派生流
+    ``events.ndjson`` 的形态，且该流不携带 ``categories_scanned`` / ``regressions_added``
+    / ``notes``，无法用作提炼源——见 design.md D1。）逐行 best-effort 解析：无法解析的
+    行静默跳过（不抛栈），MUST NOT 打开任何 reviewer 产出文件。
     """
     rounds: dict[int, dict] = {}
     text = events_path.read_text(encoding="utf-8")  # OSError 由调用方兜底

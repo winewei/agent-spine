@@ -2,7 +2,7 @@
 
 ## Context
 
-`spine-run` 的一个 run 内跑多个 change（`plan_order`）。`parallel-dag-scheduling`（已 archive）已经把执行组织成 DAG 分层 + 层屏障，并且每个 change 的 fix 循环里 fixer 已经在 RESULT 行结构化自报 `categories_scanned` / `regressions_added` / `notes`（`docs/cli.md` §8a `npc fix record`），落盘到该 change 的 `<base>/events.jsonl`（`kind=phase.exit`, `phase=fix-rN`, `status=done`）。这些字段目前只用于该 change 自己的 `spec-report`（§8c）自报核验，run 内其他 change 完全看不到。
+`spine-run` 的一个 run 内跑多个 change（`plan_order`）。`parallel-dag-scheduling`（已 archive）已经把执行组织成 DAG 分层 + 层屏障，并且每个 change 的 fix 循环里 fixer 已经在 RESULT 行结构化自报 `categories_scanned` / `regressions_added` / `notes`（`docs/cli.md` §8a `npc fix record`），落盘到该 change 的 `<base>/events.jsonl`（真实行形态：`event=fix.done`, `phase=fix-rN`——per-change events.jsonl 用 `event` 字段命名事件，行内不含 `kind`/`status`；`kind=phase.exit`+`status=done` 是另一条 telemetry 派生流的形态且不携带这三个字段）。这些字段目前只用于该 change 自己的 `spec-report`（§8c）自报核验，run 内其他 change 完全看不到。
 
 Bun 迁移复盘（`docs/optimization-proposals/2026-07-09-bun-migration-lessons.md` 提案 3）的核心洞察：不需要专门设计一个"试点阶段"，多 change plan 里第一个完成的 change 天然就是可以免费获得的 trial run——只要把它暴露的失败模式喂给后面的 change。
 
@@ -26,7 +26,7 @@ Bun 迁移复盘（`docs/optimization-proposals/2026-07-09-bun-migration-lessons
 
 ### D1: lessons.md 的数据源严格限定为 fixer 自报字段，不解析 summary.md 自由文本
 
-`npc lessons record` 只读 `<base>/events.jsonl` 里 `fix-rN` phase 的 `done` 事件（`categories_scanned` / `regressions_added` / `notes`），不打开、不解析 `round-N.fix.summary.md` 原文。
+`npc lessons record` 只读 `<base>/events.jsonl` 里 `event == "fix.done"`（`fix-rN` 成功退出）事件的 `categories_scanned` / `regressions_added` / `notes`，不打开、不解析 `round-N.fix.summary.md` 原文。
 
 **Why**：`round-N.fix.summary.md` 是 `spine-coder` 写给人和 `/spine-analyze` 复盘用的自由格式详细日志（`plugins/agent-spine/agents/spine-coder.md` 只要求"至少包含"几类内容，不是固定 schema）——对自由文本做"确定性提炼"要么需要正则硬编（脆弱，字段一改措辞就漏），要么需要 LLM 摘要（违反"npc 只做机械动作"）。而 `categories_scanned`/`regressions_added`/`notes` 三个字段已经是 fixer 在 RESULT 行里**自己填写的结构化自报**，是唯一同时满足"确定性可提取"与"fixer 自报、非 reviewer 文本"两个约束的数据源。
 

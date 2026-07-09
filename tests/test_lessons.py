@@ -87,6 +87,65 @@ def test_multi_round_fix_produces_full_entry(env_setup):
     assert text.index("r1:") < text.index("r2:")
 
 
+def test_extraction_reads_real_phase_exit_emitter(env_setup, make_args):
+    """回归：提炼源锚定 npc 真实落盘形态，防实现相对真实 schema 静默漂移。
+
+    不手搓事件 dict，而是通过真实 ``events.phase_exit``（等价 ``npc phase exit fix-rN
+    --status done``）生成 ``<base>/events.jsonl``，证明 ``extract_and_append`` 读取的正是
+    npc 实际 emit 的 ``event == "fix.done"`` 行——该行**不含** ``kind`` / ``status``
+    （spec/design/tasks 曾误写为 ``kind==phase.exit && status==done``，那是另一条 telemetry
+    派生流的形态，见 run-lessons-extraction spec 事件契约说明）。
+    """
+    from npc import events as _events
+
+    p = env_setup
+    base = _paths.base_for(p, 1, "change-real")
+    base.mkdir(parents=True, exist_ok=True)
+    # 先建 fix-r1 in-progress，再走真实 phase exit（模拟 fixer 收敛后 rotate/exit）
+    _write_state(p, [{"seq": 1, "change_id": "change-real", "status": "archived",
+                      "archive_commit": "cafebabe0001", "base": str(base),
+                      "phases": {"fix-r1": {"status": "in-progress",
+                                            "started_at": "2026-05-22T00:00:00Z",
+                                            "started_ms": 0}}}])
+    args = make_args(seq=1, phase="fix-r1", status="done",
+                     extra=json.dumps({"categories_scanned": "validation,concurrency",
+                                       "regressions_added": "tests/test_real.py::t",
+                                       "notes": "real emitter path"}))
+    _events.phase_exit(args)
+
+    # 真实落盘断言：event == "fix.done"，行内既无 kind 也无 status
+    lines = (base / "events.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    ev = json.loads(next(l for l in lines if "fix.done" in l))
+    assert ev["event"] == "fix.done"
+    assert ev["phase"] == "fix-r1"
+    assert "kind" not in ev and "status" not in ev  # 关键：不是 spec 误写的 phase.exit 形态
+    assert ev["categories_scanned"] == "validation,concurrency"
+
+    # 提炼确实读到这条真实事件并追加条目
+    res = _lessons.extract_and_append(p, 1)
+    assert res["ok"] is True and res["appended"] is True
+    text = (p.run_dir / "lessons.md").read_text(encoding="utf-8")
+    assert "## change-real (archived cafebabe, 1 fix rounds)" in text
+    assert "categories_scanned: concurrency, validation" in text
+    assert "tests/test_real.py::t" in text
+    assert "- r1: real emitter path" in text
+
+
+def test_telemetry_shaped_phase_exit_not_mistaken_for_fix_round(env_setup):
+    """契约边界：``kind==phase.exit && status==done`` 是 telemetry 派生流形态（且不携带
+    自报字段），即便误入 ``<base>/events.jsonl`` 也 MUST NOT 被当作 fix 轮——提炼只认
+    ``event == "fix.done"``。"""
+    p = env_setup
+    base = _paths.base_for(p, 1, "change-x")
+    _write_state(p, [{"seq": 1, "change_id": "change-x", "status": "archived",
+                      "base": str(base), "phases": {}}])
+    _write_events(base, [{"kind": "phase.exit", "phase": "fix-r1", "status": "done"}])
+    res = _lessons.extract_and_append(p, 1)
+    assert res["ok"] is True
+    assert res["appended"] is False
+    assert res["reason"] == "no-fix-rounds"
+
+
 def test_no_fix_round_not_appended(env_setup):
     p = env_setup
     base = _paths.base_for(p, 1, "change-b")

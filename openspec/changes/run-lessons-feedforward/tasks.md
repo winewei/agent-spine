@@ -2,7 +2,7 @@
 
 ## 1. run-lessons-extraction（`npc lessons record`）
 
-- [x] 1.1 新建 `src/npc/lessons.py`：`extract_and_append(p, seq)` 读取 `<base>/events.jsonl`，筛 `kind=phase.exit && phase~=^fix-r\d+$ && status=done`，按 round 顺序取 `categories_scanned`/`regressions_added`/`notes`
+- [x] 1.1 新建 `src/npc/lessons.py`：`extract_and_append(p, seq)` 读取 `<base>/events.jsonl`，筛 `event=="fix.done" && phase~=^fix-r\d+$`（真实落盘形态；per-change events.jsonl 用 `event` 字段、`.done` 后缀编码成功退出，不含 `kind`/`status`），按 round 顺序取 `categories_scanned`/`regressions_added`/`notes`
 - [x] 1.2 幂等：`lessons.md` 中已存在该 `change_id` 的 `## ` 段落时跳过追加；`state.lessons.entries_appended` 记录已处理 change_id 列表
 - [x] 1.3 无 fix 轮（round 0 review 即 blocking==0）的 change 不追加条目；字段为空/`-` 时对应子项省略，全空时仍追加仅含 rounds 数的最简条目
 - [x] 1.4 `src/npc/cli.py` 注册 `npc lessons record --seq N`；stdout `{ok, appended: bool, lessons_path, change_id}`；失败（events.jsonl 缺失/损坏）不抛栈，`ok:false` + 结构化 error，best-effort 调用方不阻塞
