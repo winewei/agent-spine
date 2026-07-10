@@ -122,6 +122,88 @@ def test_atomic_add_discipline_shared_constant_single_source():
     assert templates.ATOMIC_ADD_DISCIPLINE_MD in fix
 
 
+# ============================================================
+# change fix-prompt-exhaustive-sweep：连续复现升级层
+# ============================================================
+
+
+def _fixer(**kw):
+    base = dict(
+        change_id="c",
+        round_n=2,
+        implement_commit="abc",
+        base="/b",
+        repo_root="/r",
+        blocking_findings_md="F1\n",
+        categories_seen=["error-handling"],
+        blocking_trend=[3, 3],
+    )
+    base.update(kw)
+    return templates.render_fixer(**base)
+
+
+def test_render_fixer_no_escalation_byte_equivalent_to_baseline():
+    # 未传升级参数 vs 传空升级参数（未达阈值、无复现）→ 与基线逐字等价
+    baseline = _fixer()
+    with_empty = _fixer(
+        category_streaks={}, recurred_categories=[], category_streak_threshold=2
+    )
+    assert baseline == with_empty
+    assert "连续复现升级" not in baseline
+
+
+def test_render_fixer_below_threshold_no_escalation():
+    text = _fixer(
+        category_streaks={"error-handling": 1},
+        recurred_categories=[],
+        category_streak_threshold=2,
+    )
+    assert "连续复现升级" not in text
+
+
+def test_render_fixer_streak_at_threshold_triggers_exhaustive():
+    text = _fixer(
+        category_streaks={"error-handling": 2},
+        recurred_categories=[],
+        category_streak_threshold=2,
+    )
+    assert "连续复现升级" in text
+    assert "强制穷举清单" in text
+    assert "error-handling" in text
+    assert "已覆盖" in text and "新增覆盖" in text and "确认不可达" in text
+    assert "连续 2 轮" in text
+
+
+def test_render_fixer_recurred_below_threshold_still_escalates():
+    # unsubstantiated（复现）即使 streak 未达阈值仍强制穷举
+    text = _fixer(
+        category_streaks={"error-handling": 1},
+        recurred_categories=["error-handling"],
+        category_streak_threshold=2,
+    )
+    assert "连续复现升级" in text
+    assert "复现/未被证实" in text
+
+
+def test_render_fixer_escalation_uses_recurrence_not_refutation_wording():
+    # design D7：文案用"复现/未被证实"，不用"证伪/为假"
+    text = _fixer(
+        category_streaks={"error-handling": 3},
+        recurred_categories=["error-handling"],
+        category_streak_threshold=2,
+    )
+    assert "证伪" not in text
+    assert "为假" not in text
+
+
+def test_render_fixer_custom_threshold_shifts_trigger():
+    # 阈值 3：streak=2 不触发，streak=3 触发
+    t2 = _fixer(category_streaks={"error-handling": 2}, category_streak_threshold=3)
+    assert "连续复现升级" not in t2
+    t3 = _fixer(category_streaks={"error-handling": 3}, category_streak_threshold=3)
+    assert "连续复现升级" in t3
+
+
 def test_render_spawn_prompt_implement_minimal():
     s = templates.render_spawn_prompt(
         phase="implement",

@@ -1878,3 +1878,119 @@ def test_record_implement_auto_mode_rerun_via_paths(
     assert rerun_called["n"] == 1, "auto 档缺省时应触发真实复跑"
     assert result["ok"] is True
     assert result["tests_verified"] is True
+
+
+# ============================================================
+# change fix-prompt-exhaustive-sweep：复现检测「重算前后差集」触发 telemetry
+# ============================================================
+
+
+def _seed_phases(p, seq, phases):
+    def mutate(state):
+        entry = state["progress"][seq - 1]
+        entry["phases"] = dict(phases)
+    _state.update_state(p.state_json, p.state_md, mutate)
+
+
+def _capture_recurrence(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        _pipeline._telemetry,
+        "emit_category_recurrence",
+        lambda **kw: calls.append(kw),
+    )
+    return calls
+
+
+def test_review_phase_exit_emits_recurrence_on_new_recur(
+    env_setup, make_args, capsys, monkeypatch
+):
+    p = env_setup
+    _bootstrap_run(env_setup, make_args, capsys, "add-foo")
+    # 已有 review-r0（触发轮）+ fix-r1 自报 error-handling
+    _seed_phases(
+        p, 1,
+        {
+            "review-r0": {"status": "done", "blocking": 1, "categories": ["error-handling"]},
+            "fix-r1": {"status": "done", "categories_scanned": "error-handling"},
+        },
+    )
+    calls = _capture_recurrence(monkeypatch)
+    # review-r1 再次判 error-handling blocking → 复现（M=1 ≥ N=1）
+    _pipeline._do_review_phase_exit_and_trend(
+        p, 1, "review-r1", {"blocking": 1, "categories": ["error-handling"], "verdict": "x"}
+    )
+    assert len(calls) == 1
+    assert calls[0]["category"] == "error-handling"
+    assert calls[0]["claimed_at_round"] == 1
+    assert calls[0]["recurred_at_round"] == 1
+
+
+def test_review_phase_exit_no_emit_when_no_recur(
+    env_setup, make_args, capsys, monkeypatch
+):
+    p = env_setup
+    _bootstrap_run(env_setup, make_args, capsys, "add-foo")
+    _seed_phases(
+        p, 1,
+        {
+            "review-r0": {"status": "done", "blocking": 1, "categories": ["error-handling"]},
+            "fix-r1": {"status": "done", "categories_scanned": "error-handling"},
+        },
+    )
+    calls = _capture_recurrence(monkeypatch)
+    # review-r1 未再现 error-handling → 差集为空，不发事件
+    _pipeline._do_review_phase_exit_and_trend(
+        p, 1, "review-r1", {"blocking": 0, "categories": [], "verdict": "x"}
+    )
+    assert calls == []
+
+
+def test_review_phase_exit_no_duplicate_recurrence_emit(
+    env_setup, make_args, capsys, monkeypatch
+):
+    p = env_setup
+    _bootstrap_run(env_setup, make_args, capsys, "add-foo")
+    # review-r1 已经确立了复现（fix-r1 claim → review-r1 再现）
+    _seed_phases(
+        p, 1,
+        {
+            "review-r0": {"status": "done", "blocking": 1, "categories": ["error-handling"]},
+            "fix-r1": {"status": "done", "categories_scanned": "error-handling"},
+            "review-r1": {"status": "done", "blocking": 1, "categories": ["error-handling"]},
+        },
+    )
+    calls = _capture_recurrence(monkeypatch)
+    # 写 review-r2 再现 → fix-r1 的复现已在 review-r1 记过（(error-handling,1) 去重），
+    # review-r2 只新增不了 fix-r1 的条目；无 fix-r2 claim → 无新增
+    _pipeline._do_review_phase_exit_and_trend(
+        p, 1, "review-r2", {"blocking": 1, "categories": ["error-handling"], "verdict": "x"}
+    )
+    assert calls == []
+
+
+def test_review_phase_exit_no_new_state_field_persisted(
+    env_setup, make_args, capsys, monkeypatch
+):
+    p = env_setup
+    _bootstrap_run(env_setup, make_args, capsys, "add-foo")
+    _seed_phases(
+        p, 1,
+        {
+            "review-r0": {"status": "done", "blocking": 1, "categories": ["error-handling"]},
+            "fix-r1": {"status": "done", "categories_scanned": "error-handling"},
+        },
+    )
+    _capture_recurrence(monkeypatch)
+    _pipeline._do_review_phase_exit_and_trend(
+        p, 1, "review-r1", {"blocking": 1, "categories": ["error-handling"], "verdict": "x"}
+    )
+    state = _state.read_state(p.state_json)
+    entry = state["progress"][0]
+    # 不落盘任何复现证据字段
+    assert "category_recurrence_evidence" not in entry
+    assert "recurred_categories" not in entry
+    assert "category_streaks" not in entry
+    for ph in entry["phases"].values():
+        assert "recurred_categories" not in ph
+        assert "category_recurrence_evidence" not in ph

@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from . import _io, agent as _agent, config, paths as _paths, pipeline as _pipeline, templates
+from . import _io, agent as _agent, config, paths as _paths, pipeline as _pipeline, templates, trend as _trend
 from .config import Config, load_config
 from .state import read_state
 
@@ -340,6 +340,12 @@ def _render_prompt_file(
         entry = state.get("progress", [{}])[seq - 1] if state.get("progress") else {}
         categories_seen = entry.get("categories_seen") or []
         blocking_trend = entry.get("blocking_trend") or []
+        # 连续计数 + 复现判定：从 entry["phases"] 现场重算（共享纯函数，design D2），
+        # MUST NOT 打开任何 round-*.review.json、MUST NOT 落盘新字段。
+        phases = entry.get("phases") or {}
+        streaks = _trend.category_streaks(phases)
+        recurred = _trend.recurred_category_names(phases)
+        threshold = load_config(p.repo_root).coder.category_streak_threshold
 
         import json
 
@@ -358,6 +364,9 @@ def _render_prompt_file(
             blocking_findings_md=findings_md,
             categories_seen=categories_seen,
             blocking_trend=blocking_trend,
+            category_streaks=streaks,
+            recurred_categories=recurred,
+            category_streak_threshold=threshold,
         )
     prompt_file.parent.mkdir(parents=True, exist_ok=True)
     prompt_file.write_text(text, encoding="utf-8")

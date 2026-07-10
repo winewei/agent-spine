@@ -292,6 +292,115 @@ def test_prompt_render_fix_explicit_implement_commit_overrides_state(
 
 
 # ============================================================
+# change fix-prompt-exhaustive-sweep：coder / agent 两路径 escalated 一致（design D2）
+# ============================================================
+
+
+def _high_finding(cat="error-handling"):
+    return {
+        "id": "F1",
+        "severity": "high",
+        "category": cat,
+        "title": "recur bug",
+        "file": "src/foo.py",
+        "line_range": "1-2",
+        "detail": "d",
+        "recommendation": "r",
+        "in_scope": True,
+    }
+
+
+def _extract_escalation(text: str) -> str:
+    marker = "### 连续复现升级（强制穷举落点清单）"
+    if marker not in text:
+        return ""
+    start = text.index(marker)
+    end = text.index("## 上下文", start)
+    return text[start:end].strip()
+
+
+def test_fix_render_escalation_streak_and_recurrence(env_setup, make_args, capsys):
+    """连续 2 轮同 category（达阈值）+ 复现信号 → fix prompt 强制穷举段落。"""
+    _bootstrap(env_setup, make_args, capsys, "add-foo")
+    state = _state.read_state(env_setup.state_json)
+    base = Path(state["progress"][0]["base"])
+    _write_review(base, 0, [_high_finding()])
+    _write_review(base, 1, [_high_finding()])
+
+    def _mut(s: dict) -> None:
+        e = s["progress"][0]
+        e["implement_commit"] = "deadbeef"
+        e["categories_seen"] = ["error-handling"]
+        e["blocking_trend"] = [1, 1]
+        e["phases"] = {
+            "review-r0": {"status": "done", "blocking": 1, "categories": ["error-handling"]},
+            "fix-r1": {"status": "done", "categories_scanned": "error-handling"},
+            "review-r1": {"status": "done", "blocking": 1, "categories": ["error-handling"]},
+        }
+
+    _state.update_state(env_setup.state_json, env_setup.state_md, _mut)
+
+    _agent.prompt_render(
+        make_args(
+            phase="fix", change_id="add-foo", seq=None, round_n=2,
+            output=None, review_json=None, implement_commit=None,
+        )
+    )
+    out = _read_emit(capsys)
+    text = Path(out["output"]).read_text(encoding="utf-8")
+    esc = _extract_escalation(text)
+    assert esc  # 升级段出现
+    assert "error-handling" in esc
+    assert "连续 2 轮" in esc
+    assert "复现/未被证实" in esc
+    assert "强制穷举清单" in esc
+
+
+def test_fix_render_coder_and_agent_escalation_identical(env_setup, make_args, capsys):
+    """coder._render_prompt_file 与 agent.prompt_render 对同一 state 产出一致 escalated 段。"""
+    from npc import coder as _coder
+
+    _bootstrap(env_setup, make_args, capsys, "add-foo")
+    p = env_setup
+    state = _state.read_state(p.state_json)
+    base = Path(state["progress"][0]["base"])
+    _write_review(base, 0, [_high_finding()])
+    _write_review(base, 1, [_high_finding()])
+
+    def _mut(s: dict) -> None:
+        e = s["progress"][0]
+        e["implement_commit"] = "deadbeef"
+        e["categories_seen"] = ["error-handling"]
+        e["blocking_trend"] = [1, 1]
+        e["phases"] = {
+            "review-r0": {"status": "done", "blocking": 1, "categories": ["error-handling"]},
+            "fix-r1": {"status": "done", "categories_scanned": "error-handling"},
+            "review-r1": {"status": "done", "blocking": 1, "categories": ["error-handling"]},
+        }
+
+    _state.update_state(p.state_json, p.state_md, _mut)
+
+    # agent 路径
+    _agent.prompt_render(
+        make_args(
+            phase="fix", change_id="add-foo", seq=None, round_n=2,
+            output=None, review_json=None, implement_commit=None,
+        )
+    )
+    agent_out = _read_emit(capsys)
+    agent_text = Path(agent_out["output"]).read_text(encoding="utf-8")
+
+    # coder 路径
+    _prompt_file, _spawn = _coder._render_prompt_file(
+        p, 1, "add-foo", base, "fix", 2, "deadbeef"
+    )
+    coder_text = _prompt_file.read_text(encoding="utf-8")
+
+    assert _extract_escalation(agent_text) == _extract_escalation(coder_text)
+    assert _extract_escalation(coder_text)  # 非空（确实触发了升级）
+
+
+# ============================================================
 # spawn-prompt
 # ============================================================
 

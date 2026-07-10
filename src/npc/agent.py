@@ -16,7 +16,8 @@ import argparse
 import json
 from pathlib import Path
 
-from . import _io, paths as _paths, telemetry as _telemetry, templates
+from . import _io, paths as _paths, telemetry as _telemetry, templates, trend as _trend
+from .config import load_config
 from .fixer import render_findings
 from .review import parse_review
 from .state import read_state, update_state
@@ -236,6 +237,13 @@ def prompt_render(args: argparse.Namespace) -> None:
                     pass
                 break
 
+        # 连续计数 + 复现判定：从 entry["phases"] 现场重算（与 coder._render_prompt_file
+        # 共享同一份 trend.py 纯函数，design D2），MUST NOT 打开 round-*.review.json。
+        phases = entry.get("phases") or {}
+        streaks = _trend.category_streaks(phases)
+        recurred = _trend.recurred_category_names(phases)
+        threshold = load_config(p.repo_root).coder.category_streak_threshold
+
         text = templates.render_fixer(
             change_id=args.change_id,
             round_n=round_n,
@@ -246,6 +254,9 @@ def prompt_render(args: argparse.Namespace) -> None:
             categories_seen=entry.get("categories_seen") or [],
             blocking_trend=entry.get("blocking_trend") or [],
             eviction_md=eviction_md,
+            category_streaks=streaks,
+            recurred_categories=recurred,
+            category_streak_threshold=threshold,
         )
         meta_extra = {
             "round": round_n,

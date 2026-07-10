@@ -112,6 +112,9 @@ class CoderConfig:
     dispatch: str | None = None
     # per-phase dispatch 覆盖。((phase, dispatch), ...)，保持 frozen 可哈希。
     phase_dispatches: tuple[tuple[str, str], ...] = ()
+    # 同一 category 连续出现（逐轮不中断）达此阈值时，fix prompt 该 category 段落
+    # 升级为强制穷举落点清单（change fix-prompt-exhaustive-sweep）。默认 2，整数 ≥1。
+    category_streak_threshold: int = 2
 
     @property
     def effective_backend(self) -> str:
@@ -153,6 +156,15 @@ class CoderConfig:
         if self.dispatch is not None and self.dispatch not in SUPPORTED_DISPATCH_VALUES:
             raise ConfigError(
                 f"未知 coder dispatch：{self.dispatch!r}（仅支持 {'/'.join(SUPPORTED_DISPATCH_VALUES)}）"
+            )
+        if (
+            not isinstance(self.category_streak_threshold, int)
+            or isinstance(self.category_streak_threshold, bool)
+            or self.category_streak_threshold < 1
+        ):
+            raise ConfigError(
+                f"[coder].category_streak_threshold 必须是整数 ≥1，得到："
+                f"{self.category_streak_threshold!r}"
             )
         for ph, dp in self.phase_dispatches:
             if dp not in SUPPORTED_DISPATCH_VALUES:
@@ -392,6 +404,12 @@ def _build(data: dict, source: str) -> Config:
         phase_dispatches_list.append((str(ph), dp))
     phase_dispatches = tuple(sorted(phase_dispatches_list))
 
+    category_streak_threshold_raw = coder_raw.get("category_streak_threshold", 2)
+    if not isinstance(category_streak_threshold_raw, int) or isinstance(
+        category_streak_threshold_raw, bool
+    ):
+        raise ConfigError(f"[coder].category_streak_threshold 必须是整数（{source}）")
+
     verify_raw = data.get("verify") or {}
     if not isinstance(verify_raw, dict):
         raise ConfigError(f"[verify] 节必须是 table（{source}）")
@@ -475,6 +493,7 @@ def _build(data: dict, source: str) -> Config:
             phase_backends=phase_backends,
             dispatch=coder_dispatch,
             phase_dispatches=phase_dispatches,
+            category_streak_threshold=category_streak_threshold_raw,
         ),
         verify=VerifyConfig(
             test=_opt_str(verify_raw.get("test"), "verify.test", source),

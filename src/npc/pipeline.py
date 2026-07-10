@@ -36,6 +36,7 @@ from . import (
     schema as _schema,
     state as _state,
     telemetry as _telemetry,
+    trend as _trend,
     verify as _verify,
 )
 from .config import Config, ConfigError, load_config
@@ -416,7 +417,23 @@ def _do_review_phase_exit_and_trend(
             new_phase["started_at"] = started_at
         if started_ms is not None:
             new_phase["started_ms"] = started_ms
+
+        # 复现检测（change fix-prompt-exhaustive-sweep，design D5）：写入本轮 review
+        # categories 前后各现场重算一次复现，差集即"本轮新增的复现条目"。MUST NOT 落盘
+        # 任何持久化复现字段——纯 entry["phases"] 现场重算，仅用于当轮即时发 telemetry。
+        recurred_before = _trend.recurred_categories(
+            {k: v for k, v in phases.items() if k != phase}
+        )
         phases[phase] = new_phase
+        recurred_after = _trend.recurred_categories(phases)
+        _before_keys = {
+            (d["category"], d["claimed_at_round"]) for d in recurred_before
+        }
+        captured["new_recurrences"] = [
+            d
+            for d in recurred_after
+            if (d["category"], d["claimed_at_round"]) not in _before_keys
+        ]
 
         trend = list(entry.get("blocking_trend") or [])
         if not trend:
@@ -445,6 +462,20 @@ def _do_review_phase_exit_and_trend(
         captured["rounds_since_strict_decrease"] = new_rsd
 
     _state.update_state(p.state_json, p.state_md, mutate)
+    # 本轮新增复现条目 → 逐条发 telemetry（best-effort，不阻塞主流程；design D5）。
+    # 差集为空则不发；已在更早轮次记为复现的条目不重复发（差集按 (category,
+    # claimed_at_round) 去重）。
+    for rec in captured.get("new_recurrences") or []:
+        _telemetry.emit_category_recurrence(
+            proj_key=p.proj_key,
+            canonical_proj_key=p.canonical_proj_key,
+            run_ts=p.run_ts,
+            change_seq=seq,
+            change_id=captured["change_id"],
+            category=rec["category"],
+            claimed_at_round=rec["claimed_at_round"],
+            recurred_at_round=rec["recurred_at_round"],
+        )
     base = Path(captured["base"])
     event_name = _events._phase_base_event_name(phase) + ".done"
     _events.append_event(

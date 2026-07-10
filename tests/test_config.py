@@ -171,6 +171,46 @@ def test_coder_unknown_backend_rejected(tmp_path):
 
 
 # ============================================================
+# [coder].category_streak_threshold（change fix-prompt-exhaustive-sweep task 1）
+# ============================================================
+
+
+def test_category_streak_threshold_default_two(tmp_path):
+    from npc.config import load_config
+    cfg = load_config(tmp_path)  # 无配置文件
+    assert cfg.coder.category_streak_threshold == 2
+
+
+def test_category_streak_threshold_explicit_parsed(tmp_path):
+    from npc.config import load_config
+    repo = _write_cfg(tmp_path, "[coder]\ncategory_streak_threshold = 3\n")
+    cfg = load_config(repo)
+    assert cfg.coder.category_streak_threshold == 3
+
+
+def test_category_streak_threshold_non_int_rejected(tmp_path):
+    from npc.config import load_config, ConfigError
+    repo = _write_cfg(tmp_path, '[coder]\ncategory_streak_threshold = "two"\n')
+    with pytest.raises(ConfigError, match="category_streak_threshold"):
+        load_config(repo)
+
+
+def test_category_streak_threshold_below_one_rejected(tmp_path):
+    from npc.config import load_config, ConfigError
+    repo = _write_cfg(tmp_path, "[coder]\ncategory_streak_threshold = 0\n")
+    with pytest.raises(ConfigError, match="category_streak_threshold"):
+        load_config(repo)
+
+
+def test_category_streak_threshold_bool_rejected(tmp_path):
+    # bool 是 int 子类，必须显式拒绝（true 会被误当 1）
+    from npc.config import load_config, ConfigError
+    repo = _write_cfg(tmp_path, "[coder]\ncategory_streak_threshold = true\n")
+    with pytest.raises(ConfigError, match="category_streak_threshold"):
+        load_config(repo)
+
+
+# ============================================================
 # [verify].rerun_tests 配置项（wire-verify-tests task 1.2）
 # ============================================================
 

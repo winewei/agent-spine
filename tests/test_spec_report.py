@@ -244,6 +244,67 @@ def test_aggregate_self_report_verdict_precedence():
 
 
 # ============================================================
+# change fix-prompt-exhaustive-sweep：unsubstantiated verdict
+# ============================================================
+
+
+def test_verify_categories_scanned_unsubstantiated_on_recurrence():
+    # fix-r1 自报 error-handling，review-r1 再次 blocking → 复现 → unsubstantiated
+    entry = _base_entry(
+        categories_seen=["error-handling"],
+        phases={
+            "review-r0": {"status": "done", "blocking": 1, "categories": ["error-handling"]},
+            "fix-r1": {"status": "done", "categories_scanned": "error-handling"},
+            "review-r1": {"status": "done", "blocking": 1, "categories": ["error-handling"]},
+        },
+    )
+    out = _sr._verify_categories_scanned(entry)
+    assert out["verdict"] == "unsubstantiated"
+    assert out["recurred"] == [
+        {"category": "error-handling", "claimed_at_round": 1, "recurred_at_round": 1}
+    ]
+
+
+def test_verify_categories_scanned_unsubstantiated_beats_ok_coverage():
+    # 集合覆盖层面本应 ok（自报覆盖全部 seen），但存在复现 → unsubstantiated 优先
+    entry = _base_entry(
+        categories_seen=["error-handling"],
+        phases={
+            "review-r0": {"status": "done", "blocking": 1, "categories": ["error-handling"]},
+            "fix-r1": {"status": "done", "categories_scanned": "error-handling"},
+            "review-r1": {"status": "done", "blocking": 1, "categories": ["error-handling"]},
+        },
+    )
+    out = _sr._verify_categories_scanned(entry)
+    assert out["verdict"] == "unsubstantiated"
+    assert out["missing"] == []  # 集合覆盖度本身是完整的
+
+
+def test_verify_categories_scanned_no_recurrence_keeps_ok():
+    # fix-r1 自报后无更晚 review 再现 → 维持 ok，无 recurred 字段
+    entry = _base_entry(
+        categories_seen=["error-handling"],
+        phases={
+            "review-r0": {"status": "done", "blocking": 1, "categories": ["error-handling"]},
+            "fix-r1": {"status": "done", "categories_scanned": "error-handling"},
+            "review-r1": {"status": "done", "blocking": 0, "categories": []},
+        },
+    )
+    out = _sr._verify_categories_scanned(entry)
+    assert out["verdict"] == "ok"
+    assert "recurred" not in out
+
+
+def test_aggregate_self_report_verdict_unsubstantiated_highest():
+    assert _sr._aggregate_self_report_verdict(
+        [{"verdict": "warn"}], {"verdict": "unsubstantiated"}
+    ) == "unsubstantiated"
+    assert _sr._aggregate_self_report_verdict(
+        [{"verdict": "ok"}], {"verdict": "unsubstantiated"}
+    ) == "unsubstantiated"
+
+
+# ============================================================
 # derive_report + render_md
 # ============================================================
 

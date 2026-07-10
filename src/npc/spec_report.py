@@ -20,7 +20,14 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from . import _io, cost as _cost, paths as _paths, state as _state, telemetry as _telemetry
+from . import (
+    _io,
+    cost as _cost,
+    paths as _paths,
+    state as _state,
+    telemetry as _telemetry,
+    trend as _trend,
+)
 
 
 MD_LINE_LIMIT = 80
@@ -217,36 +224,58 @@ def _collect_categories_scanned(entry: dict) -> tuple[set[str], bool]:
 
 
 def _verify_categories_scanned(entry: dict) -> dict:
-    """``categories_scanned`` 与 ``categories_seen``（观测源）对照。"""
+    """``categories_scanned`` 与 ``categories_seen``（观测源）对照。
+
+    change fix-prompt-exhaustive-sweep：对该 change 完整 ``entry["phases"]`` 现场重算
+    复现证据（``_trend.recurred_categories``，MUST NOT 读取任何持久化复现字段）；一旦
+    复现证据非空，verdict 强制为 ``unsubstantiated``（优先级高于 ``warn``），并保留
+    ``recurred`` 证据列表供报告呈现。``unsubstantiated`` 表示该轮自报未被后续轮次证实，
+    是复现信号，MUST NOT 被呈现为对该轮自报的证伪结论（design D6/D7）。
+    """
     seen = set(entry.get("categories_seen") or [])
     scanned, any_present = _collect_categories_scanned(entry)
+    recurred = _trend.recurred_categories(entry.get("phases") or {})
+
     if not seen:
-        return {
+        base = {
             "verdict": "ok",
             "categories_seen": [],
             "categories_scanned": sorted(scanned),
             "missing": [],
         }
-    if not any_present:
-        return {
+    elif not any_present:
+        base = {
             "verdict": "unverifiable",
             "categories_seen": sorted(seen),
             "categories_scanned": [],
             "missing": sorted(seen),
             "reason": "missing-self-report",
         }
-    missing = sorted(seen - scanned)
-    return {
-        "verdict": "ok" if not missing else "warn",
-        "categories_seen": sorted(seen),
-        "categories_scanned": sorted(scanned),
-        "missing": missing,
-    }
+    else:
+        missing = sorted(seen - scanned)
+        base = {
+            "verdict": "ok" if not missing else "warn",
+            "categories_seen": sorted(seen),
+            "categories_scanned": sorted(scanned),
+            "missing": missing,
+        }
+
+    if recurred:
+        # 复现证据优先于集合覆盖度层面的 ok/warn/unverifiable
+        base["verdict"] = "unsubstantiated"
+        base["recurred"] = recurred
+    return base
 
 
 def _aggregate_self_report_verdict(regressions: list[dict], categories: dict) -> str:
-    """汇总结论：warn > unverifiable > ok（任一 warn 即整体 warn，缺数据不误报 warn）。"""
+    """汇总结论：unsubstantiated > warn > unverifiable > ok。
+
+    ``unsubstantiated``（存在复现信号、自报未被证实）优先级最高（design D6），
+    不因集合覆盖度是 ok 或存在 warn 而被掩盖；缺数据不误报 warn。
+    """
     verdicts = [r["verdict"] for r in regressions] + [categories["verdict"]]
+    if "unsubstantiated" in verdicts:
+        return "unsubstantiated"
     if "warn" in verdicts:
         return "warn"
     if "unverifiable" in verdicts:
@@ -462,6 +491,11 @@ def render_md(report: dict) -> str:
     cs = srv["categories_scanned"]
     missing = cs.get("missing") or []
     lines.append(f"- categories_scanned: {cs['verdict']} (missing={','.join(missing) if missing else '-'})")
+    for rec in cs.get("recurred") or []:
+        lines.append(
+            f"  - 复现（未被证实）: {rec['category']} "
+            f"（声明 fix-r{rec['claimed_at_round']} → 复现 review-r{rec['recurred_at_round']}）"
+        )
     lines.append("")
 
     narrative = report.get("narrative") or {}

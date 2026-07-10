@@ -131,6 +131,13 @@ EMIT_FIELD_CONTRACT: dict[str, frozenset[str]] = {
         "blocking_categories", "engine", "retry_count", "outcome_reason",
         "tokens", "pointer", "gate_failed", "gate_skipped", "gate_rule_hits",
     }),
+    # pipeline.py：review phase-exit「重算前后差集」检测到某 category 在被 fixer 自报
+    # 扫过之后又复现为 blocking 时，逐条即时发出（change fix-prompt-exhaustive-sweep）。
+    # 这是复现信号（不是证伪证明，见 design D7）；MUST NOT 落盘为任何持久化 state 字段。
+    "category_recurrence_after_sweep_claim": frozenset({
+        "proj_key", "canonical_proj_key", "run_ts", "change_seq", "change_id",
+        "category", "claimed_at_round", "recurred_at_round",
+    }),
 }
 
 # token 估算系数：bytes / 4 ≈ tokens（OpenAI/Anthropic tokenizer 在中英混合文本上的中位数）。
@@ -1141,6 +1148,41 @@ def emit_agent_spawn(
         ),
     }
     emit_event(record)
+
+
+def emit_category_recurrence(
+    *,
+    proj_key: str,
+    canonical_proj_key: str | None = None,
+    run_ts: str | None,
+    change_seq: int | None,
+    change_id: str,
+    category: str,
+    claimed_at_round: int,
+    recurred_at_round: int,
+) -> None:
+    """某 category 在被 fixer 自报扫过之后又复现为 blocking 时的埋点
+    （change fix-prompt-exhaustive-sweep，见 design D5/D7）。
+
+    仅在 review phase-exit「重算前后差集」新增复现条目时逐条调用；MUST NOT 落盘为
+    任何持久化 state 字段。携带声明轮（claimed_at_round）与复现轮（recurred_at_round）
+    两个可追溯轮次。这是复现信号（未被证实），不是对该轮自报的证伪证明。
+    """
+    emit_event(
+        {
+            "kind": "category_recurrence_after_sweep_claim",
+            "proj_key": proj_key,
+            "canonical_proj_key": canonical_proj_key
+            if canonical_proj_key is not None
+            else proj_key,
+            "run_ts": run_ts,
+            "change_seq": change_seq,
+            "change_id": change_id,
+            "category": category,
+            "claimed_at_round": claimed_at_round,
+            "recurred_at_round": recurred_at_round,
+        }
+    )
 
 
 def _build_pointer(**kwargs) -> dict | None:
