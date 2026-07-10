@@ -1241,15 +1241,37 @@ def test_archive_effect_happened_false_when_archive_dir_absent(tmp_path: Path):
     assert _pipeline._archive_effect_happened(tmp_path, "add-foo") is False
 
 
-def test_archive_effect_happened_matches_nonstandard_prefix(tmp_path: Path):
-    """2.5 回归：后缀匹配用 endswith，不依赖固定日期前缀长度——非标准前缀仍匹配。"""
-    (tmp_path / "openspec" / "changes" / "archive" / "2026-1-1-add-foo").mkdir(parents=True)
+def test_archive_effect_happened_matches_any_valid_date(tmp_path: Path):
+    """2.5 回归：锚定 `YYYY-MM-DD-` 零填充日期前缀 + change_id 整体相等——任意合法日期均匹配。"""
+    (tmp_path / "openspec" / "changes" / "archive" / "2025-12-31-add-foo").mkdir(parents=True)
     assert _pipeline._archive_effect_happened(tmp_path, "add-foo") is True
 
 
 def test_archive_effect_happened_no_false_positive_on_substring(tmp_path: Path):
     """回归边界：archive/ 下目录名仅包含 change_id 作为子串但非 -<id> 后缀 → 不误判为 True。"""
     (tmp_path / "openspec" / "changes" / "archive" / "2026-07-10-add-foo-extra").mkdir(parents=True)
+    assert _pipeline._archive_effect_happened(tmp_path, "add-foo") is False
+
+
+def test_archive_effect_happened_no_false_positive_on_suffix_collision(tmp_path: Path):
+    """F1 回归：change_id 为另一归档 change_id 的连字符后缀时不误判。
+
+    change_id="foo"，archive/ 下仅有 `2026-07-10-add-foo`（另一个 change
+    `add-foo` 的归档，恰以 `-foo` 结尾）。裸 endswith("-foo") 会误命中；
+    锚定日期前缀 + change_id 整体相等必须返回 False。
+    """
+    (tmp_path / "openspec" / "changes" / "archive" / "2026-07-10-add-foo").mkdir(parents=True)
+    assert _pipeline._archive_effect_happened(tmp_path, "foo") is False
+
+
+def test_archive_effect_happened_false_on_missing_date_prefix(tmp_path: Path):
+    """回归边界：archive/ 下目录名缺少 `YYYY-MM-DD-` 日期前缀（裸 change_id）→ False。
+
+    非零填充/非法日期前缀（如 `2026-1-1-add-foo`）不符合 OpenSpec archive 契约，
+    不被视作有效归档副作用。
+    """
+    (tmp_path / "openspec" / "changes" / "archive" / "add-foo").mkdir(parents=True)
+    (tmp_path / "openspec" / "changes" / "archive" / "2026-1-1-add-foo").mkdir(parents=True)
     assert _pipeline._archive_effect_happened(tmp_path, "add-foo") is False
 
 

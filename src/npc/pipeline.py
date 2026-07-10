@@ -16,6 +16,7 @@ import argparse
 import dataclasses
 import json
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -982,20 +983,28 @@ def _git_head(repo_root: Path) -> str:
     return out.stdout.strip()
 
 
+_ARCHIVE_DATE_PREFIX = re.compile(r"^\d{4}-\d{2}-\d{2}-")
+
+
 def _archive_effect_happened(repo_root: Path, change_id: str) -> bool:
-    """独立核验 `openspec archive` 是否真的产生了归档副作用。
+    r"""独立核验 `openspec archive` 是否真的产生了归档副作用。
 
     不采信子进程 returncode，转而核对文件系统真实状态（对齐
     `git_chain.check_chain` 确立的"不信子进程返回码"先例）。判定口径为双重
     确定性检查，两条同时满足才算归档已发生：
 
     (a) `openspec/changes/<change_id>/` 目录已不再存在（change 被移出原位）；
-    (b) `openspec/changes/archive/` 下存在一个以 `-<change_id>` 结尾的目录
-        （真实 `openspec archive` 会加 `YYYY-MM-DD-` 日期前缀）。
+    (b) `openspec/changes/archive/` 下存在一个恰好命名为
+        `YYYY-MM-DD-<change_id>` 的目录（OpenSpec archive 契约：确定性的
+        `YYYY-MM-DD-` 零填充日期前缀 + change_id 整体，见 archive/ 实测目录名）。
 
-    后缀匹配用 `name.endswith(f"-{change_id}")`，不假设固定日期前缀字符长度，
-    对非标准长度前缀（如 `2026-1-1-<change_id>`）仍能正确匹配。`archive/`
-    目录本身不存在（全新仓库从未归档过）时返回 False，不抛异常。
+    匹配用「锚定日期前缀 + change_id 整体相等」而非裸后缀匹配：先剥去
+    `^\d{4}-\d{2}-\d{2}-` 日期前缀，再要求剩余部分与 change_id **整体相等**。
+    裸 `endswith(f"-{change_id}")` 对连字符 change_id 不是身份安全的——
+    例如 `change_id="foo"` 会被历史归档 `2026-07-10-add-foo` 误命中（它以
+    `-foo` 结尾），从而在 change 实际未归档时误判副作用已发生。锚定日期边界
+    + 整体相等消除了这种 suffix 碰撞。`archive/` 目录本身不存在（全新仓库从未
+    归档过）时返回 False，不抛异常。
     """
     change_dir = repo_root / "openspec" / "changes" / change_id
     if change_dir.exists():
@@ -1003,9 +1012,11 @@ def _archive_effect_happened(repo_root: Path, change_id: str) -> bool:
     archive_dir = repo_root / "openspec" / "changes" / "archive"
     if not archive_dir.is_dir():
         return False
-    suffix = f"-{change_id}"
     for child in archive_dir.iterdir():
-        if child.is_dir() and child.name.endswith(suffix):
+        if not child.is_dir():
+            continue
+        stripped = _ARCHIVE_DATE_PREFIX.sub("", child.name, count=1)
+        if stripped != child.name and stripped == change_id:
             return True
     return False
 
