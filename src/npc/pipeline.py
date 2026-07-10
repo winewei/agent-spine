@@ -983,9 +983,6 @@ def _git_head(repo_root: Path) -> str:
     return out.stdout.strip()
 
 
-_ARCHIVE_DATE_PREFIX = re.compile(r"^\d{4}-\d{2}-\d{2}-")
-
-
 def _archive_effect_happened(repo_root: Path, change_id: str) -> bool:
     r"""独立核验 `openspec archive` 是否真的产生了归档副作用。
 
@@ -994,16 +991,28 @@ def _archive_effect_happened(repo_root: Path, change_id: str) -> bool:
     确定性检查，两条同时满足才算归档已发生：
 
     (a) `openspec/changes/<change_id>/` 目录已不再存在（change 被移出原位）；
-    (b) `openspec/changes/archive/` 下存在一个恰好命名为
-        `YYYY-MM-DD-<change_id>` 的目录（OpenSpec archive 契约：确定性的
-        `YYYY-MM-DD-` 零填充日期前缀 + change_id 整体，见 archive/ 实测目录名）。
+    (b) `openspec/changes/archive/` 下存在一个命名为
+        `<date-prefix>-<change_id>` 的目录，其中 `<date-prefix>` **仅由数字与
+        连字符构成**（OpenSpec archive 契约：日期前缀 + `-` + change_id 整体）。
 
-    匹配用「锚定日期前缀 + change_id 整体相等」而非裸后缀匹配：先剥去
-    `^\d{4}-\d{2}-\d{2}-` 日期前缀，再要求剩余部分与 change_id **整体相等**。
-    裸 `endswith(f"-{change_id}")` 对连字符 change_id 不是身份安全的——
-    例如 `change_id="foo"` 会被历史归档 `2026-07-10-add-foo` 误命中（它以
-    `-foo` 结尾），从而在 change 实际未归档时误判副作用已发生。锚定日期边界
-    + 整体相等消除了这种 suffix 碰撞。`archive/` 目录本身不存在（全新仓库从未
+    匹配规则用正则 `[0-9][0-9-]*-<re.escape(change_id)>` 做 `fullmatch`，即
+    「前缀仅限数字/连字符 + 边界连字符 + change_id 整体」。这一规则同时满足两个
+    约束，二者曾在早期评审里被认为冲突，实则可兼得：
+
+    - **容忍非标准日期前缀**（tasks.md 2.5 要求）：不假设固定 `YYYY-MM-DD-` 10
+      字符长度，`2026-1-1-<change_id>`（非零填充）这类只含数字/连字符的前缀仍
+      正确匹配。
+    - **消除 suffix 碰撞**（round-0 F1 推翻裸 `endswith`）：裸
+      `endswith(f"-{change_id}")` 对连字符 change_id 不是身份安全的——
+      `change_id="foo"` 会被历史归档 `2026-07-10-add-foo` 误命中（它以 `-foo`
+      结尾）。而本规则要求 change_id 之前的前缀**只含数字和连字符**，
+      `2026-07-10-add-foo` 的前缀 `2026-07-10-add` 含字母 `add`，fullmatch 失败，
+      故 `change_id="foo"` 不会被误命中。
+
+    关键洞察：**碰撞的假前缀必含字母，而日期前缀（标准或非标准）只含数字和连字符**，
+    因此「前缀仅限数字/连字符」这一条同时排除了字母碰撞、又放行了任意合法日期。
+    历史决定（design.md D2 / tasks.md 2.5 曾写 `endswith`）已因 round-0 F1 的
+    suffix 碰撞被推翻，改用本等价规则。`archive/` 目录本身不存在（全新仓库从未
     归档过）时返回 False，不抛异常。
     """
     change_dir = repo_root / "openspec" / "changes" / change_id
@@ -1012,11 +1021,11 @@ def _archive_effect_happened(repo_root: Path, change_id: str) -> bool:
     archive_dir = repo_root / "openspec" / "changes" / "archive"
     if not archive_dir.is_dir():
         return False
+    pattern = re.compile(r"[0-9][0-9-]*-" + re.escape(change_id))
     for child in archive_dir.iterdir():
         if not child.is_dir():
             continue
-        stripped = _ARCHIVE_DATE_PREFIX.sub("", child.name, count=1)
-        if stripped != child.name and stripped == change_id:
+        if pattern.fullmatch(child.name):
             return True
     return False
 

@@ -1242,8 +1242,20 @@ def test_archive_effect_happened_false_when_archive_dir_absent(tmp_path: Path):
 
 
 def test_archive_effect_happened_matches_any_valid_date(tmp_path: Path):
-    """2.5 回归：锚定 `YYYY-MM-DD-` 零填充日期前缀 + change_id 整体相等——任意合法日期均匹配。"""
+    """2.5 回归：前缀仅限数字/连字符 + `-<change_id>` 整体——任意合法日期前缀均匹配。"""
     (tmp_path / "openspec" / "changes" / "archive" / "2025-12-31-add-foo").mkdir(parents=True)
+    assert _pipeline._archive_effect_happened(tmp_path, "add-foo") is True
+
+
+def test_archive_effect_happened_matches_nonstandard_date_prefix(tmp_path: Path):
+    """2.5 回归（非固定长度）：非零填充日期前缀 `2026-1-1-<change_id>` 仍正确匹配。
+
+    tasks.md 2.5 明确要求匹配不依赖固定 `YYYY-MM-DD-` 10 字符长度——前缀只要
+    仅含数字/连字符即放行。`2026-1-1-add-foo` 的前缀 `2026-1-1` 全是数字/连字符，
+    故必须匹配为 True。这与 suffix-碰撞防护同时成立：碰撞前缀（如 `...-add`）含
+    字母而被排除。
+    """
+    (tmp_path / "openspec" / "changes" / "archive" / "2026-1-1-add-foo").mkdir(parents=True)
     assert _pipeline._archive_effect_happened(tmp_path, "add-foo") is True
 
 
@@ -1265,13 +1277,14 @@ def test_archive_effect_happened_no_false_positive_on_suffix_collision(tmp_path:
 
 
 def test_archive_effect_happened_false_on_missing_date_prefix(tmp_path: Path):
-    """回归边界：archive/ 下目录名缺少 `YYYY-MM-DD-` 日期前缀（裸 change_id）→ False。
+    """回归边界：archive/ 下目录名为裸 change_id（完全无数字/连字符日期前缀）→ False。
 
-    非零填充/非法日期前缀（如 `2026-1-1-add-foo`）不符合 OpenSpec archive 契约，
-    不被视作有效归档副作用。
+    `add-foo` 前无任何 `[0-9][0-9-]*-` 前缀，不符合 OpenSpec archive 命名契约
+    （archive 目录名总是 `<date>-<change_id>`），不被视作有效归档副作用。
+    注意：非零填充日期前缀 `2026-1-1-add-foo` 反而**应**匹配，见
+    test_archive_effect_happened_matches_nonstandard_date_prefix。
     """
     (tmp_path / "openspec" / "changes" / "archive" / "add-foo").mkdir(parents=True)
-    (tmp_path / "openspec" / "changes" / "archive" / "2026-1-1-add-foo").mkdir(parents=True)
     assert _pipeline._archive_effect_happened(tmp_path, "add-foo") is False
 
 

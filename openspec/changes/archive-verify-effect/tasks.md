@@ -25,7 +25,7 @@ grep -n "openspec-archive-failed\|openspec-validate-failed" src/npc/pipeline.py
 - [x] 2.2 写测试（RED）：`openspec/changes/<change_id>/` 仍存在（未被移动）→ 核验函数返回"未发生"（假值），即使 `archive/` 下恰好存在同名后缀目录（历史遗留）
 - [x] 2.3 写测试（RED）：`openspec/changes/<change_id>/` 已不存在，但 `archive/` 下不存在任何以 `-<change_id>` 结尾的目录 → 核验函数返回"未发生"
 - [x] 2.4 写测试（RED）：`archive/` 目录本身不存在（边界情况，如全新仓库从未归档过任何 change）→ 核验函数返回"未发生"，不抛异常
-- [x] 2.5 写**回归**测试（RED）：`archive/` 下目录名后缀匹配用 `endswith(f"-{change_id}")` 或等价 glob，不依赖固定日期前缀字符长度——构造一个非标准长度前缀的目录名（如 `2026-1-1-<change_id>`）仍应正确匹配
+- [x] 2.5 写**回归**测试（RED）：目录名匹配不依赖固定日期前缀字符长度——构造一个非标准长度前缀的目录名（如 `2026-1-1-<change_id>`）仍应正确匹配。**注（round-0 F1 修订）**：最初本任务写「用 `endswith(f"-{change_id}")` 或等价 glob」，但 round-0 review F1 证明裸 `endswith` 有 suffix 碰撞（`change_id="foo"` 被 `2026-07-10-add-foo` 误命中）。改用正则 `re.fullmatch(r"[0-9][0-9-]*-" + re.escape(change_id), name)`：前缀仅限数字/连字符即同时（a）容忍非标准日期 `2026-1-1-<id>`（前缀全数字/连字符 → 匹配）、（b）防 suffix 碰撞（碰撞前缀含字母如 `add` → 拒绝）。两个方向都要留回归测试
 - [x] 2.6 实现核验辅助函数（`src/npc/pipeline.py` 内，独立可测的纯函数，输入 `repo_root: Path`/`change_id: str`，返回布尔或结构化结果）
 - [x] 2.7 跑 2.1–2.5 确认 GREEN
 

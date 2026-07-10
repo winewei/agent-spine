@@ -27,7 +27,16 @@
 
 **D2：判定口径——双重确定性检查，两条同时满足才算归档已发生。**
 
-(a) `openspec/changes/<change_id>/` 目录已不存在；(b) `openspec/changes/archive/` 下存在一个以 `-<change_id>` 结尾的目录（真实 `openspec archive` 会加日期前缀 `YYYY-MM-DD-<change_id>`）。任一不满足即视为静默 abort，短路返回 `error="openspec-archive-aborted"`，不再执行后续 `git add`/`git commit`。目录名匹配用后缀匹配（如对 `archive/` 下每个子目录做 `name.endswith(f"-{change_id}")`），不假设固定日期前缀字符长度。
+(a) `openspec/changes/<change_id>/` 目录已不存在；(b) `openspec/changes/archive/` 下存在一个命名为 `<date-prefix>-<change_id>` 的目录，其中 `<date-prefix>` **仅由数字与连字符构成**（真实 `openspec archive` 会加日期前缀 `YYYY-MM-DD-<change_id>`）。任一不满足即视为静默 abort，短路返回 `error="openspec-archive-aborted"`，不再执行后续 `git add`/`git commit`。
+
+**目录名匹配规则（round-0 F1 后修订）**：最初本 change 决定用裸后缀匹配 `name.endswith(f"-{change_id}")`，理由是「不假设固定日期前缀字符长度」以容忍非标准日期前缀（如 `2026-1-1-<change_id>`）。**round-0 review F1 推翻了裸 `endswith`**：它对连字符 change_id 不是身份安全的——`change_id="foo"` 会被历史归档 `2026-07-10-add-foo`（以 `-foo` 结尾）误命中，导致 change 实际未归档时误判副作用已发生。
+
+改用正则 `re.compile(r"[0-9][0-9-]*-" + re.escape(change_id)).fullmatch(name)`：前缀仅限数字/连字符 + 边界连字符 + change_id 整体。此规则**同时满足两个曾被认为冲突的约束**：
+
+- 容忍非标准日期前缀：不假设固定 10 字符长度，`2026-1-1-<change_id>` 前缀全是数字/连字符，仍匹配 ✓。
+- 消除 suffix 碰撞：`2026-07-10-add-foo` 中 change_id=`foo` 之前的前缀 `2026-07-10-add` 含字母 `add`，fullmatch 失败，故 `change_id="foo"` 不被误命中 ✓。
+
+关键洞察：**碰撞的假前缀必含字母，而日期前缀（标准或非标准）只含数字和连字符**——「前缀仅限数字/连字符」一条即同时排除字母碰撞、放行任意合法日期，无需假设固定长度。
 
 **D3：错误码与既有失败分支区分开。**
 
@@ -50,7 +59,7 @@
 ## Risks / Trade-offs
 
 - **[新增一次文件系统 stat 调用，理论上增加一次 I/O]** → 相比子进程调用本身的开销可忽略不计，且只在 `openspec archive` 返回后触发一次，不引入循环或轮询。
-- **[`archive/` 目录后缀匹配依赖 `openspec archive` 的日期前缀命名惯例，若该惯例变化匹配会失效]** → 现状是仓库内 40+ 个既有归档目录均遵循该模式，且用后缀匹配（非固定长度切片）已经是对该惯例最宽松的假设；若未来 `openspec` 命名规则变化，需要同步更新匹配逻辑，属已知的外部依赖风险，不在本 change 范围内规避。
+- **[`archive/` 目录匹配依赖 `openspec archive` 的日期前缀命名惯例，若该惯例变化匹配会失效]** → 现状是仓库内 40+ 个既有归档目录均遵循 `<date>-<change_id>` 模式，且用「前缀仅限数字/连字符」的正则匹配（非固定长度切片）已经是对该惯例既宽松（不限日期长度）又身份安全（防 suffix 碰撞）的假设；若未来 `openspec` 命名规则引入字母前缀，需要同步更新匹配逻辑，属已知的外部依赖风险，不在本 change 范围内规避。
 - **[既有成功路径测试需要同步改造，若遗漏会导致该测试假阳性通过或误报失败]** → D6 已明确选择独立可测函数的方案，实施时需同步跑通 `test_run_archive_success` 并新增专门覆盖 abort 路径的用例。
 
 ## Migration Plan
