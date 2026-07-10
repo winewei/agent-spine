@@ -67,6 +67,8 @@ WORKTREE_ROOT=$(printf '%s' "$INIT" | jq -r '.worktree_root // empty')
 
 **worktree 隔离**：若 `INIT` 含 `worktree_root`（默认行为），则**后续所有 `npc` 子命令与 `spine-coder` spawn 必须在 `worktree_root` 内执行**（以 `cwd=WORKTREE_ROOT` 调用，或在调用前 `cd "$WORKTREE_ROOT"`）。主 checkout 在整个 run 期间不受触动。若 `worktree_root` 为空（`--no-worktree` 模式），则就地在主 checkout 跑，行为不变。
 
+> **Agent 子代理的 cwd 不可靠**：Agent 工具没有 cwd 参数，subagent 的初始 cwd 锚定主 checkout，且 harness 可能随时把 shell cwd 静默重置——编排者无法从外部保证 coder 落在 worktree。可靠锚定由 npc 渲染的 prompt 内「工作目录契约」承载（REPO_ROOT 绝对路径 + agent 自检），并由 `npc implement/fix record` 的 `commit-not-on-run-branch` 确定性门兜底。编排者只需照常传递 spawn_prompt，不要试图靠 `cd` 控制 subagent cwd。
+
 - `needs_resume == true`：这是一个中断的旧 run，且 init 返回了悬空的 `worktree_root`。
   ```bash
   WORKTREE_ROOT=$(printf '%s' "$INIT" | jq -r '.worktree_root')

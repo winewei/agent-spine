@@ -272,3 +272,26 @@ def test_adversarial_round0_non_bool_rejected(tmp_path):
     repo = _write_cfg(tmp_path, '[review]\nadversarial_round0 = "yes"\n')
     with pytest.raises(ConfigError, match="adversarial_round0"):
         load_config(repo)
+
+
+def test_worktree_provision_cmd_default_empty(tmp_path):
+    """缺省 [worktree].provision_cmd 为空字符串。"""
+    from npc.config import load_config
+    cfg = load_config(tmp_path)
+    assert cfg.worktree.provision_cmd == ""
+
+
+def test_worktree_provision_cmd_parsed(tmp_path):
+    """[worktree].provision_cmd 字符串正常解析。"""
+    from npc.config import load_config
+    repo = _write_cfg(tmp_path, '[worktree]\nprovision_cmd = "pnpm install --frozen-lockfile"\n')
+    cfg = load_config(repo)
+    assert cfg.worktree.provision_cmd == "pnpm install --frozen-lockfile"
+
+
+def test_worktree_provision_cmd_non_str_rejected(tmp_path):
+    """非法类型（非字符串）→ ConfigError。"""
+    from npc.config import load_config, ConfigError
+    repo = _write_cfg(tmp_path, '[worktree]\nprovision_cmd = 3\n')
+    with pytest.raises(ConfigError, match="provision_cmd"):
+        load_config(repo)

@@ -26,6 +26,7 @@ tools: Read, Write, Edit, Bash, Grep, Glob
 
 ## 职责边界（MUST，确定性校验，不是口头约束）
 
+- **shell 初始 cwd 不可信**：你 spawn 时的 cwd 可能是主 checkout 而非本 run 的隔离 worktree（那里也有 `openspec/changes/`，写错位置无任何可感知异常）。唯一合法工作树是 prompt 文件 Runtime Variables 里的 `REPO_ROOT`——动手前先 `git -C "$REPO_ROOT" rev-parse --show-toplevel` 自检，所有文件读写只用 `REPO_ROOT` 前缀的绝对路径；自检不匹配立即停止并按失败态 RESULT 上报 `notes=cwd-mismatch`。
 - 只写 / 改 `openspec/changes/<id>/` 目录下的文件。
 - **MUST NOT** 运行 `git commit`——本 phase 的 RESULT 契约不含 `commit` 键，你自报的 commit 无处安放。
 - **MUST NOT** 修改 `openspec/changes/<id>/` 之外的任何文件（含 `src/`、其它 change 目录、根配置文件等）。

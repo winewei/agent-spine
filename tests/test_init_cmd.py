@@ -525,3 +525,63 @@ def test_init_shared_context_oserror_does_not_crash(
     payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
     assert isinstance(payload["shared_context_warning"], str)
     assert payload["shared_context_warning"]
+
+
+# ============================================================
+# worktree provisioning（fix-coder-cwd-desync）
+# ============================================================
+
+
+def _write_home_config(home: Path, provision_cmd: str) -> None:
+    cfg_dir = home / ".config" / "npc"
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    (cfg_dir / "config.toml").write_text(
+        f'[worktree]\nprovision_cmd = "{provision_cmd}"\n', encoding="utf-8"
+    )
+
+
+def test_init_worktree_provision_not_configured(worktree_env, capsys, make_args):
+    """未配置 provision_cmd：不执行，payload.provision.ran=False，其余行为不变。"""
+    args = make_args(auto=False, fresh=False, shell_exports=False)
+    _init.run(args)
+    payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert payload["worktree_root"] is not None
+    assert payload["provision"] == {"ran": False}
+
+
+def test_init_worktree_provision_success(worktree_env, capsys, make_args):
+    """provision_cmd 成功：ran=True ok=True，在 worktree 内执行。"""
+    repo, home = worktree_env
+    _write_home_config(home, "true")
+    args = make_args(auto=False, fresh=False, shell_exports=False)
+    _init.run(args)
+    payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert payload["worktree_root"] is not None
+    assert payload["provision"]["ran"] is True
+    assert payload["provision"]["ok"] is True
+    assert payload["provision"]["cmd"] == "true"
+
+
+def test_init_worktree_provision_failure_does_not_block(worktree_env, capsys, make_args):
+    """provision_cmd 失败：仅告警，init 正常完成且 worktree 已建。"""
+    repo, home = worktree_env
+    _write_home_config(home, "false")
+    args = make_args(auto=False, fresh=False, shell_exports=False)
+    _init.run(args)
+    out = capsys.readouterr().out.strip().splitlines()[-1]
+    payload = json.loads(out)
+    assert payload["worktree_root"] is not None
+    assert Path(payload["worktree_root"]).is_dir()
+    assert payload["provision"]["ran"] is True
+    assert payload["provision"]["ok"] is False
+
+
+def test_init_no_worktree_provision_not_run(init_env, capsys, make_args):
+    """--no-worktree 就地模式：不执行 provisioning。"""
+    repo, home = init_env
+    _write_home_config(home, "true")
+    args = make_args(auto=False, fresh=False, shell_exports=False, no_worktree=True)
+    _init.run(args)
+    payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert payload["worktree_root"] is None
+    assert payload["provision"] == {"ran": False}

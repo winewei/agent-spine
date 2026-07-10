@@ -1581,6 +1581,29 @@ def record_implement(
         )
         return {"ok": False, "seq": seq, "error": "commit-not-found", "commit": commit}
 
+    # commit 必须在本 run 工作树的 HEAD 祖先链上——linked worktree 与主 checkout
+    # 共享对象库，落在其他分支/checkout 的 commit 用 cat-file 探测不出来
+    # （coder cwd 漂移到主 checkout 提交时的实证穿透路径）。
+    ancestor_check = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", commit, "HEAD"],
+        cwd=p.repo_root,
+        capture_output=True,
+    )
+    if ancestor_check.returncode != 0:
+        _do_phase_exit(
+            p, seq, "implement",
+            status="failed",
+            extra={"reason": "commit-not-on-run-branch", "commit": commit},
+            progress_updates={"status": "failed", "reason": "commit-not-on-run-branch"},
+        )
+        return {
+            "ok": False,
+            "seq": seq,
+            "error": "commit-not-on-run-branch",
+            "commit": commit,
+            "hint": "commit 在共享对象库可见但不在本 run 工作树分支上——coder 可能在其他 checkout（如主仓库）执行了实现（cwd 漂移）",
+        }
+
     # 真实复跑验证（tests=pass 自报硬轨）
     tests_verified: bool | None = None
     rerun_tail: str | None = None
@@ -1741,6 +1764,28 @@ def record_fix(
             progress_updates={"status": "needs-user-decision", "reason": "commit-not-found"},
         )
         return {"ok": False, "seq": seq, "round": round_n, "error": "commit-not-found"}
+
+    # 同 implement record：commit 必须在本 run 工作树 HEAD 祖先链上（cwd 漂移防御）
+    ancestor_check = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", commit, "HEAD"],
+        cwd=p.repo_root,
+        capture_output=True,
+    )
+    if ancestor_check.returncode != 0:
+        _do_phase_exit(
+            p, seq, phase,
+            status="failed",
+            extra={"reason": "commit-not-on-run-branch", "commit": commit},
+            progress_updates={"status": "needs-user-decision", "reason": "commit-not-on-run-branch"},
+        )
+        return {
+            "ok": False,
+            "seq": seq,
+            "round": round_n,
+            "error": "commit-not-on-run-branch",
+            "commit": commit,
+            "hint": "commit 在共享对象库可见但不在本 run 工作树分支上——coder 可能在其他 checkout（如主仓库）执行了修复（cwd 漂移）",
+        }
 
     # 真实复跑验证（tests=pass 自报硬轨）
     tests_verified: bool | None = None

@@ -19,7 +19,7 @@ v1.0.0 把模板下沉到 CLI 包资源：
 from __future__ import annotations
 
 
-TEMPLATE_VERSION = "1.1.0"
+TEMPLATE_VERSION = "1.2.0"
 
 # ============================================================
 # 静态通用自检类目清单（单一事实源）
@@ -90,6 +90,29 @@ ATOMIC_ADD_DISCIPLINE_MD: str = """## 原子 git add 纪律（强约束，违反
 """
 
 
+# ============================================================
+# 工作目录契约（单一事实源，全部 agent prompt 均注入）
+# 背景：Agent 工具 spawn 的 subagent 不继承编排者 shell cwd（harness 会把
+# cd 到非授信目录的 shell cwd 静默重置回主 checkout），而主 checkout 与
+# run worktree 内容几乎一致，agent 在错误目录工作无任何可感知异常。
+# 已实证的事故模式：coder 的实现 commit 落到 main 而非 run worktree
+# （2026-07-10 两次复现）。防御必须由 prompt 内的绝对路径锚定 + agent
+# 自检承担，不能依赖 spawn 时的任何 cwd 假设。
+# ============================================================
+
+
+def cwd_contract_md(repo_root: str) -> str:
+    """渲染工作目录契约段（以具体 repo_root 插值，agent 无需解析变量名）。"""
+    return f"""## 工作目录契约（最高优先级，违反视为失败）
+
+- 你的 shell 初始 cwd **不可信**：它可能是另一个 checkout（如主仓库），那里有一模一样的文件。本任务唯一合法的工作树是 `{repo_root}`。
+- **动手前自检**：先执行 `git -C "{repo_root}" rev-parse --show-toplevel`，输出必须等于 `{repo_root}`；不等（或命令失败）则立即停止，不改任何文件，按本阶段失败态 RESULT 汇报，`notes=cwd-mismatch`。
+- **每个 Bash 调用**都显式锚定：以 `cd "{repo_root}" && …` 开头，或对 git 用 `git -C "{repo_root}" …`。shell cwd 不保证跨调用持久（harness 可能随时重置），绝不依赖上一条命令留下的 cwd。
+- Read / Write / Edit 一律使用以 `{repo_root}` 开头的绝对路径；禁止相对路径，禁止其他 checkout 的绝对路径。
+- 若任务含 `git commit`：commit 前最后断言一次 `git -C "{repo_root}" rev-parse --show-toplevel` 输出等于 `{repo_root}`。
+"""
+
+
 def render_implementer(
     change_id: str,
     base: str,
@@ -120,6 +143,7 @@ def render_implementer(
 - CHANGE_ID={change_id}
 - SUMMARY_PATH={summary_path}
 
+{cwd_contract_md(repo_root)}
 ## 必读输入（按需自取）
 
 - openspec/changes/{change_id}/proposal.md / tasks.md
@@ -274,6 +298,7 @@ def render_fixer(
 - FIX_ROUND={round_n}
 - SUMMARY_PATH={summary_path}
 
+{cwd_contract_md(repo_root)}
 ## Review Findings（仅 in_scope=true 且 severity ∈ {{critical, high}}）
 
 {blocking_findings_md}
@@ -405,6 +430,7 @@ def render_spec_interrogator(
 - CHANGE_ID={change_id}
 - SUMMARY_PATH={summary_path}
 {goal_section}
+{cwd_contract_md(repo_root)}
 ## 必读输入（按需自取）
 
 - openspec/changes/{change_id}/ 下已存在的任何草稿（如有）
@@ -518,6 +544,7 @@ fixer 自报字段，不含任何 reviewer 产出）。**仅供参考**：你可
 - CHANGE_ID={change_id}
 - SUMMARY_PATH={summary_path}
 {goal_section}{lessons_section}
+{cwd_contract_md(repo_root)}
 ## 必读输入（按需自取）
 
 - openspec/changes/{change_id}/pattern-interrogation.md（**本轮之前已完成的模式盘问产物**，必读）
@@ -590,6 +617,7 @@ def render_spec_fixer(
 - FIX_ROUND={round_n}
 - SUMMARY_PATH={summary_path}
 
+{cwd_contract_md(repo_root)}
 ## 上一轮已签发的 Blocking Findings
 
 {blocking_findings_md}

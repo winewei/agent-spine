@@ -1994,3 +1994,102 @@ def test_review_phase_exit_no_new_state_field_persisted(
     for ph in entry["phases"].values():
         assert "recurred_categories" not in ph
         assert "category_recurrence_evidence" not in ph
+
+
+# ============================================================
+# commit-not-on-run-branch（fix-coder-cwd-desync：ancestor 门）
+# ============================================================
+
+
+def _make_linked_worktree_with_stray_commit(fake_repo: Path, tmp_path: Path) -> tuple[Path, str]:
+    """建 linked worktree，然后在主 checkout 上再提交一笔（模拟 cwd 漂移的 coder）。
+
+    返回 (worktree_path, 主分支上的漂移 commit hash)。该 commit 在共享对象库中
+    可见（cat-file 门穿透），但不在 worktree HEAD 祖先链上。
+    """
+    wt = tmp_path / "wt"
+    subprocess.run(
+        ["git", "worktree", "add", "-b", "spine/test", str(wt), "HEAD"],
+        cwd=fake_repo, check=True, capture_output=True,
+    )
+    (fake_repo / "stray.txt").write_text("drifted")
+    subprocess.run(["git", "add", "stray.txt"], cwd=fake_repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "feat: drifted"], cwd=fake_repo, check=True)
+    stray = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=fake_repo, capture_output=True, text=True
+    ).stdout.strip()
+    return wt, stray
+
+
+def test_record_implement_rejects_commit_not_on_run_branch(
+    env_setup, make_args, capsys, fake_repo: Path, tmp_path: Path
+):
+    _bootstrap_run(env_setup, make_args, capsys, "add-foo")
+    wt, stray = _make_linked_worktree_with_stray_commit(fake_repo, tmp_path)
+
+    p = env_setup
+    p_with_repo = type(p)(**{**p.__dict__, "repo_root": wt})
+    summary = p.run_dir / "001-add-foo" / "implement.summary.md"
+    summary.parent.mkdir(parents=True, exist_ok=True)
+    summary.write_text("# impl summary\n")
+
+    result_line = f"RESULT: commit={stray} tasks=3 tests=pass summary={summary} notes=ok"
+    result = _pipeline.record_implement(p_with_repo, 1, result_line)
+    assert result["ok"] is False
+    assert result["error"] == "commit-not-on-run-branch"
+    assert result["commit"] == stray
+    assert "hint" in result
+
+    s = json.loads(p.state_json.read_text())
+    assert s["progress"][0]["status"] == "failed"
+
+
+def test_record_implement_accepts_commit_on_worktree_head(
+    env_setup, make_args, capsys, fake_repo: Path, tmp_path: Path
+):
+    _bootstrap_run(env_setup, make_args, capsys, "add-foo")
+    wt = tmp_path / "wt2"
+    subprocess.run(
+        ["git", "worktree", "add", "-b", "spine/test2", str(wt), "HEAD"],
+        cwd=fake_repo, check=True, capture_output=True,
+    )
+    # coder 正常在 worktree 内提交
+    (wt / "ok.txt").write_text("good")
+    subprocess.run(["git", "add", "ok.txt"], cwd=wt, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "feat: ok"], cwd=wt, check=True)
+    commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=wt, capture_output=True, text=True
+    ).stdout.strip()
+
+    p = env_setup
+    p_with_repo = type(p)(**{**p.__dict__, "repo_root": wt})
+    summary = p.run_dir / "001-add-foo" / "implement.summary.md"
+    summary.parent.mkdir(parents=True, exist_ok=True)
+    summary.write_text("# impl summary\n")
+
+    result_line = f"RESULT: commit={commit} tasks=3 tests=pass summary={summary} notes=ok"
+    result = _pipeline.record_implement(p_with_repo, 1, result_line)
+    assert result["ok"] is True
+    assert result["commit"] == commit
+
+
+def test_record_fix_rejects_commit_not_on_run_branch(
+    env_setup, make_args, capsys, fake_repo: Path, tmp_path: Path
+):
+    _bootstrap_run(env_setup, make_args, capsys, "add-foo")
+    wt, stray = _make_linked_worktree_with_stray_commit(fake_repo, tmp_path)
+
+    p = env_setup
+    p_with_repo = type(p)(**{**p.__dict__, "repo_root": wt})
+    base = p.run_dir / "001-add-foo"
+    base.mkdir(parents=True, exist_ok=True)
+    summary = base / "round-1.fix.summary.md"
+    summary.write_text("# fix summary\n")
+
+    result_line = (
+        f"RESULT: commit={stray} fixed=1 tests=pass summary={summary} "
+        f"categories_scanned=validation regressions_added=- notes=-"
+    )
+    result = _pipeline.record_fix(p_with_repo, 1, 1, result_line)
+    assert result["ok"] is False
+    assert result["error"] == "commit-not-on-run-branch"

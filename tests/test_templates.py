@@ -259,3 +259,42 @@ def test_implementer_template_significantly_larger_than_spawn_prompt():
     )
     # 模板内容应该至少是引导语的 5 倍（实际是 10x+）
     assert len(impl) > 5 * len(spawn)
+
+
+# ============================================================
+# 工作目录契约（fix-coder-cwd-desync）
+# ============================================================
+
+
+def _all_rendered_prompts(repo_root: str) -> dict[str, str]:
+    return {
+        "implementer": templates.render_implementer("c", "/b", repo_root),
+        "fixer": templates.render_fixer("c", 1, "abc", "/b", repo_root, "F1\n", [], []),
+        "spec_interrogator": templates.render_spec_interrogator("c", "/b", repo_root),
+        "spec_writer": templates.render_spec_writer("c", "/b", repo_root),
+        "spec_fixer": templates.render_spec_fixer("c", 1, "/b", repo_root, "F1\n"),
+    }
+
+
+def test_cwd_contract_injected_into_all_templates():
+    repo_root = "/tmp/wt-x"
+    for name, text in _all_rendered_prompts(repo_root).items():
+        assert text.count("## 工作目录契约") == 1, name
+        # 自检指令以具体 repo_root 插值，agent 无需解析变量名
+        assert f'git -C "{repo_root}" rev-parse --show-toplevel' in text, name
+        assert "notes=cwd-mismatch" in text, name
+
+
+def test_cwd_contract_precedes_task_inputs():
+    for name, text in _all_rendered_prompts("/tmp/wt-y").items():
+        contract_pos = text.index("## 工作目录契约")
+        # 契约先于任务性段落（必读输入 / findings）
+        for marker in ("## 必读输入", "## Review Findings", "## 上一轮已签发"):
+            if marker in text:
+                assert contract_pos < text.index(marker), (name, marker)
+
+
+def test_cwd_contract_uses_literal_repo_root():
+    text = templates.cwd_contract_md("/abs/wt-z")
+    assert "/abs/wt-z" in text
+    assert "{repo_root}" not in text

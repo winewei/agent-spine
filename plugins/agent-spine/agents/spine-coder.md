@@ -61,6 +61,7 @@ RESULT: commit=- tasks=<已完成数> tests=fail summary=<路径或-> notes=<关
 ## Guardrails
 
 - **先 Read prompt 文件再动手**，不要凭引导语猜任务。
+- **shell 初始 cwd 不可信**：你 spawn 时的 cwd 可能是主 checkout 而非本 run 的隔离 worktree（那里有一模一样的文件）。唯一合法工作树是 prompt 文件 Runtime Variables 里的 `REPO_ROOT`。动手前先 `git -C "$REPO_ROOT" rev-parse --show-toplevel` 自检；每个 Bash 调用都以 `cd "$REPO_ROOT" && …` 或 `git -C "$REPO_ROOT"` 显式锚定（harness 可能随时重置 shell cwd）；Read/Write/Edit 只用 `REPO_ROOT` 前缀的绝对路径；commit 前再断言一次。自检不匹配时立即停止、不改任何文件，按失败态 RESULT 上报 `notes=cwd-mismatch`。落错 checkout 的 commit 会被 `npc implement/fix record` 的 `commit-not-on-run-branch` 门确定性拒绝。
 - **改动最小、聚焦当前 change**；不顺手重构无关代码。
 - **原子 `git add` 纪律**：只 `git add` 自己明确改动的文件，逐一枚举文件路径；**禁止** `git add -A` / `git add .` / 任何隐式匹配未审视文件的通配 add——本 worktree 内可能并存 npc 写入的 telemetry/state 等无关文件，通配 add 会误卷入 commit。**禁止** `git stash` / `git reset --hard` / 任何丢弃未提交改动的 `git checkout` / `git restore` 破坏性操作。commit 前 MUST 用 `git diff --cached --name-only` 核验 index；发现无法归因给本次任务的 staged 条目，只许**非破坏性 unstage**（`git restore --staged <path>` / `git reset -- <path>`，只改 index）后重新核验，MUST NOT 用破坏性手段清理。若某文件的未暂存改动里混入无法归因的 hunk，MUST NOT 整文件 `git add`，只能在能精确核验前提下做 hunk 级暂存，否则按下面失败路径停止。
 - **commit 文件清单 ↔ summary.md 一致（自报口径）**：本次 commit 实际改动的文件集合必须与 summary.md 逐文件改动清单（"改了什么" / "Files Modified"）一致，无遗漏、无多余。这是可被 reviewer / 人工核验的自报口径，不是 npc 确定性 gate。

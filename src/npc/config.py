@@ -281,6 +281,19 @@ class SchedulerConfig:
 
 
 @dataclass(frozen=True)
+class WorktreeConfig:
+    """worktree 生命周期配置（[worktree] 节）。
+
+    ``provision_cmd``：worktree 创建成功后在其中执行的一次性预备命令
+    （如 ``pnpm install --frozen-lockfile --prefer-offline``，为 coder 在
+    worktree 内跑测试补齐 node_modules 等 gitignore 依赖）。默认空字符串 =
+    不执行。命令经 shlex 拆分后直接 exec（不经 shell），失败仅告警不阻塞 init。
+    """
+
+    provision_cmd: str = ""
+
+
+@dataclass(frozen=True)
 class Config:
     """npc 顶层配置。"""
 
@@ -290,6 +303,7 @@ class Config:
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     spec_writer: SpecWriterConfig = field(default_factory=SpecWriterConfig)
     spec_review: SpecReviewConfig = field(default_factory=SpecReviewConfig)
+    worktree: WorktreeConfig = field(default_factory=WorktreeConfig)
     source: str = "<default>"
 
 
@@ -473,6 +487,13 @@ def _build(data: dict, source: str) -> Config:
     if not isinstance(adversarial_round0_raw, bool):
         raise ConfigError(f"[review].adversarial_round0 必须是 bool（{source}）")
 
+    worktree_raw = data.get("worktree") or {}
+    if not isinstance(worktree_raw, dict):
+        raise ConfigError(f"[worktree] 节必须是 table（{source}）")
+    provision_cmd_raw = worktree_raw.get("provision_cmd", "")
+    if not isinstance(provision_cmd_raw, str):
+        raise ConfigError(f"[worktree].provision_cmd 必须是字符串（{source}）")
+
     return Config(
         review=ReviewEngineConfig(
             engine=engine,
@@ -518,6 +539,7 @@ def _build(data: dict, source: str) -> Config:
             gate_cmd=spec_review_gate_cmd,
             max_rounds=spec_review_max_rounds_raw,
         ),
+        worktree=WorktreeConfig(provision_cmd=provision_cmd_raw),
         source=source,
     )
 

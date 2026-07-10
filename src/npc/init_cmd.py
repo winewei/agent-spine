@@ -248,10 +248,52 @@ def _scan_spine_worktrees_for_resume(
     return False, None, False
 
 
+def _provision_worktree(worktree_dir: Path, runner=subprocess.run) -> dict:
+    """按 ``[worktree].provision_cmd`` 在新建 worktree 内执行一次性预备命令。
+
+    尽力而为（仿 auto_auth 惯例）：未配置返回 ``{"ran": False}``；失败/超时仅
+    ``[npc:warn]`` 并置 ``ok=False``，绝不使 init 失败——provision 只是降低
+    coder 在 worktree 内无法跑测试的概率，正确性硬轨仍是 record 的 rerun-tests。
+    """
+    import shlex
+
+    from .config import Config, ConfigError, load_config
+
+    try:
+        cfg = load_config(worktree_dir)
+    except ConfigError:
+        cfg = Config()
+    cmd = (cfg.worktree.provision_cmd or "").strip()
+    if not cmd:
+        return {"ran": False}
+    argv = shlex.split(cmd)
+    try:
+        proc = runner(
+            argv,
+            cwd=worktree_dir,
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+        rc = proc.returncode
+        tail = ((proc.stderr or "") + (proc.stdout or ""))[-500:]
+    except subprocess.TimeoutExpired:
+        rc = -1
+        tail = "timeout(600s)"
+    except OSError as e:
+        rc = -1
+        tail = str(e)
+    ok = rc == 0
+    if not ok:
+        _io.warn(f"worktree provision 失败（rc={rc}），不阻塞 init：{cmd}")
+    return {"ran": True, "ok": ok, "rc": rc, "cmd": cmd, "tail": tail if not ok else ""}
+
+
 def run(args: argparse.Namespace, runner=subprocess.run) -> None:
     """init 主入口。"""
     home = Path.home()
     no_worktree: bool = getattr(args, "no_worktree", False)
+    provision_info: dict = {"ran": False}
 
     # 1. 探测 git repo（canonical repo root，init 从主 checkout 运行）
     try:
@@ -367,6 +409,7 @@ def run(args: argparse.Namespace, runner=subprocess.run) -> None:
             return
         worktree_root = worktree_dir
         repo_root = worktree_root
+        provision_info = _provision_worktree(worktree_dir)
     elif not no_worktree and worktree_root is not None:
         # initializing 恢复：repo_root 和 worktree_root 已在 step 2 设置
         pass
@@ -513,6 +556,7 @@ def run(args: argparse.Namespace, runner=subprocess.run) -> None:
         "fresh": bool(args.fresh),
         "auto_auth": auto_auth,
         "auto_local_dirs": auto_local,
+        "provision": provision_info,
         # worktree 回指字段（--no-worktree 时为 null）
         "worktree_root": str(worktree_root) if worktree_root else None,
         "spine_branch": spine_branch,
