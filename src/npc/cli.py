@@ -154,8 +154,45 @@ exit code:
     p_state_init.add_argument(
         "--plan-order", required=True, help='JSON 数组字符串，如 \'["a","b"]\''
     )
+    p_state_init.add_argument(
+        "--goal",
+        default=None,
+        help="本 run 的原始目标（人设的一句话；summary render 用于目标覆盖对照）",
+    )
     p_state_init.set_defaults(
         handler=_make_handler("state", "init_run"), _cmd_path="state init-run"
+    )
+
+    p_state_note = sub_state.add_parser(
+        "note",
+        help="编排日志：--text 追加一条（意图备忘/steering）/ --consume 打消费水位",
+        formatter_class=_EPILOG_FMT,
+        epilog="""\
+notes.jsonl（<run_dir>/notes.jsonl，追加式）承载编排器意图备忘与人的中途转向
+指令（steering）。消费进度用 state.notes_consumed_at 水位标记；
+`npc status --brief` 只带出水位之后的未消费 note，主循环在 change 边界消费后
+`--consume` 打水位。
+
+stdout（--text）:
+  {"ok": true, "path": "<notes.jsonl>", "ts": "<iso>"}
+stdout（--consume）:
+  {"ok": true, "consumed_up_to": "<iso>"}
+
+exit code:
+  0  成功
+  2  --text 与 --consume 都缺或同给
+  3  环境错（未定位到 run / STATE_JSON 缺失）
+""",
+    )
+    p_state_note.add_argument("--text", default=None, help="note 正文")
+    p_state_note.add_argument(
+        "--consume", action="store_true", help="把当前全部未消费 note 标记为已消费"
+    )
+    p_state_note.add_argument(
+        "--source", default=None, help="来源标记（orchestrator/user/...；默认 orchestrator）"
+    )
+    p_state_note.set_defaults(
+        handler=_make_handler("state", "note"), _cmd_path="state note"
     )
 
     p_state_get = sub_state.add_parser(
@@ -763,6 +800,119 @@ exit code:
         handler=_make_handler("coder", "cli_fix_run"), _cmd_path="fix run"
     )
 
+    # ===== change =====（v1.5：单 change 内环下沉）
+    p_change = sub.add_parser("change", help="单 change 内环编排（v1.5）")
+    sub_change = p_change.add_subparsers(dest="change_cmd", required=True)
+    p_change_run = sub_change.add_parser(
+        "run",
+        help="一条命令跑完单 change 内环：implement → review → fix 循环 → archive",
+        formatter_class=_EPILOG_FMT,
+        epilog="""\
+把 v2/v3 skill 里逐轮搬运 JSON 的 review-fix 循环整体下沉。复用既有 pipeline
+（implement/fix run、review run、archive run）与 auto-decide，不重写。
+
+决策点分档：
+- --auto（或 state.mode=auto）：内部调 auto-decide 一路跑完，返回一行终态 JSON。
+- 交互档：跑到决策点（stale / max-rounds / implementer/fixer/codex-failed /
+  archive-failed）带 status=needs-decision 退出（exit 5），pending_decision 装订进
+  state；主 session 问人后用 --decision <action> 续跑。
+
+stdout（终态）:
+  {"ok": true, "seq": <int>, "change_id": "<str>", "status": "archived",
+   "rounds": <int>, "archive_commit": "<hash>", "blocking_trend": [...], "pointer": {...}}
+stdout（决策点，exit 5）:
+  {"ok": false, "seq": <int>, "change_id": "<str>", "status": "needs-decision",
+   "trigger": "<str>", "phase": "<str>", "round": <int>, "suggested": "<action>",
+   "blocking_trend": [...], "categories_seen": [...], "pointer": {...}}
+
+exit code:
+  0  archived
+  1  终态失败（skipped / failed / aborted）
+  5  needs-decision（仅交互档；--auto 下不会出现）
+  2  用法错（--decision 无 pending_decision / 终态重跑未带 --from）
+  3  环境错
+  4  依赖缺失（coder/review 引擎可执行文件）
+""",
+    )
+    p_change_run.add_argument("--seq", type=int, required=True)
+    p_change_run.add_argument(
+        "--from", dest="from_phase", default=None,
+        choices=["implement", "review", "fix", "archive"],
+        help="断点重入起点（默认按 state 推导）",
+    )
+    p_change_run.add_argument(
+        "--decision", default=None,
+        choices=["continue-retry", "skip", "force-archive", "abort"],
+        help="消费上次 needs-decision 的人工裁定",
+    )
+    p_change_run.add_argument(
+        "--max-rounds", dest="max_rounds", type=int, default=20, help="fix 轮数上限"
+    )
+    p_change_run.add_argument("--auto", action="store_true", help="决策点走 auto-decide")
+    p_change_run.add_argument(
+        "--backend", choices=["claude", "mimo", "codex"], default=None,
+        help="覆盖 coder 后端",
+    )
+    p_change_run.add_argument(
+        "--coder-timeout", dest="coder_timeout", type=int, default=None,
+        help="coder 子进程超时秒数",
+    )
+    p_change_run.add_argument(
+        "--review-retries", dest="review_retries", type=int, default=1
+    )
+    p_change_run.add_argument(
+        "--review-timeout", dest="review_timeout", type=int, default=900
+    )
+    p_change_run.add_argument(
+        "--engine", choices=["codex", "claude"], default=None, help="覆盖 review 引擎"
+    )
+    p_change_run.add_argument("--config", default=None, help="显式 TOML 配置路径")
+    p_change_run.set_defaults(
+        handler=_make_handler("change", "cli_run"), _cmd_path="change run"
+    )
+
+    # ===== integrate =====（v1.5：worktree 整合编排下沉）
+    p_integrate = sub.add_parser(
+        "integrate",
+        help="worktree 产物整合进 main：verify manifest → cherry-pick → hash 翻译 → record → verify tests（fail 则 revert）",
+        formatter_class=_EPILOG_FMT,
+        epilog="""\
+替代 v3 skill Step 9 的整合编排段（cherry-pick + sed 换 hash + record +
+verify tests + revert），单命令、失败自动收拾现场（main 保持绿）。
+hash 翻译是必要项：archive precheck 用 merge-base --is-ancestor 校验 chain，
+worktree 原始 hash 不在 main 链上会被判 chain-broken。
+
+stdout（成功）:
+  {"ok": true, "seq": <int>, "change_id": "<str>", "worktree_commit": "<hash>",
+   "integrated_commit": "<hash>", "verify_tests": "pass|skipped",
+   "files": {"present": <int>, "total": <int>}}
+stdout（失败）:
+  {"ok": false, "seq": <int>, "step": "verify-manifest|cherry-pick|record|verify-tests",
+   "reason": "<str>", "reverted": "<hash>|null", ...}
+
+exit code:
+  0  成功
+  1  任一步失败（stdout 带 step 定位；现场已收拾干净）
+  2  用法错
+  3  环境错
+""",
+    )
+    p_integrate.add_argument("--seq", type=int, required=True)
+    p_integrate.add_argument(
+        "--result", default=None, help="implementer 的 RESULT 行原文（与 --result-file 二选一）"
+    )
+    p_integrate.add_argument("--result-file", default=None, help="从文件读 RESULT 行")
+    p_integrate.add_argument(
+        "--manifest", default=None, help="MANIFEST 行给出的 manifest JSON 路径"
+    )
+    p_integrate.add_argument(
+        "--no-verify-tests", dest="no_verify_tests", action="store_true",
+        help="跳过整合后测试复跑（不推荐）",
+    )
+    p_integrate.set_defaults(
+        handler=_make_handler("integrate", "cli_integrate"), _cmd_path="integrate"
+    )
+
     # ===== verify =====
     p_verify = sub.add_parser("verify", help="质量门 + 路由不变量校验")
     sub_verify = p_verify.add_subparsers(dest="verify_cmd", required=True)
@@ -845,6 +995,33 @@ exit code:
     )
     p_verify_manifest.set_defaults(
         handler=_make_handler("verify", "run_manifest"), _cmd_path="verify manifest"
+    )
+    p_verify_tasks = sub_verify.add_parser(
+        "tasks",
+        help="tasks.md checkbox 完成度派生计数（可与 implement 自报交叉验证）",
+        formatter_class=_EPILOG_FMT,
+        epilog="""\
+change 是调度量子，task 绝不进主 context——主 session 与人只看两个数。
+解析 openspec/changes/<id>/tasks.md 的 - [ ] / - [x] 项；--seq 给定时与 state
+里 implement RESULT 自报的 tasks= 计数交叉验证。
+
+stdout:
+  {"ok": <bool>, "change": "<str>", "tasks_done": <int>, "tasks_total": <int>,
+   "claim": <int>|null, "consistent": <bool>|null}
+
+exit code:
+  0  一致或无 claim 可比
+  1  claim 存在且与 tasks.md 计数不一致
+  2  缺 --change
+  3  change 目录 / tasks.md 缺失
+""",
+    )
+    p_verify_tasks.add_argument("--change", required=True, help="change-id")
+    p_verify_tasks.add_argument(
+        "--seq", type=int, default=None, help="可选；与 state 自报计数交叉验证"
+    )
+    p_verify_tasks.set_defaults(
+        handler=_make_handler("verify", "run_tasks_check"), _cmd_path="verify tasks"
     )
 
     # ===== doctor =====
@@ -1123,6 +1300,11 @@ exit code:
   0  成功
   3  未定位到 active run / STATE_JSON 缺失
 """,
+    )
+    p_status.add_argument(
+        "--brief",
+        action="store_true",
+        help="重定向契约（v1.5）：收掉 changes 全列表，带出 pending_decisions / 未消费 notes / next_action",
     )
     p_status.set_defaults(handler=_make_handler("status", "run"), _cmd_path="status")
     p_cost = sub.add_parser(

@@ -1543,6 +1543,100 @@ push 当前分支到远程（对外动作）。不自作主张决定要不要推
 
 ---
 
+## 8f. 内环与整合下沉（v1.5+，上下文预算重构）
+
+设计依据 [docs/optimization-proposals/2026-07-05-orchestration-context-budget.md](./optimization-proposals/2026-07-05-orchestration-context-budget.md)：主 session 每推进一个 change 消耗 O(1) token；确定性循环与多步编排全部收进 npc，主 session 只在决策分叉点出场。
+
+### `npc change run --seq N [--from PHASE] [--decision ACTION] [--max-rounds 20] [--auto] [--backend ...] [--engine ...] [--config PATH]`
+
+单 change 内环一条命令跑完：implement → review round-0 → (fix → review)* → archive。复用既有 pipeline（`implement/fix run` / `review run` / `archive run`）与 `auto-decide`，不重写。
+
+**决策点分档**：
+
+- `--auto`（或 state.mode=auto）：决策点内部调 auto-decide，一路跑完，返回一行终态 JSON。
+- 交互档：跑到决策点（trigger ∈ stale / max-rounds / implementer-failed / fixer-failed / codex-failed / archive-failed）带 `status=needs-decision` 退出（**exit 5**），`pending_decision`（trigger/phase/round/suggested）装订进 state；主 session 问人后 `--decision <continue-retry|skip|force-archive|abort>` 消费续跑。存在未消费 pending_decision 时不带 `--decision` 重跑 → exit 2。
+
+`--from {implement|review|fix|archive}` 断点重入（默认按 entry.status + blocking_trend 推导）；终态 change 重跑必须显式 `--from`。
+
+```text
+stdout（终态）:
+  {"ok": true, "seq": N, "change_id": "...", "status": "archived",
+   "rounds": <int>, "archive_commit": "<hash>", "blocking_trend": [...], "pointer": {...}}
+stdout（决策点）:
+  {"ok": false, "seq": N, "change_id": "...", "status": "needs-decision",
+   "trigger": "...", "phase": "...", "round": <int>, "suggested": "<action>",
+   "blocking_trend": [...], "categories_seen": [...], "pointer": {...}}
+
+exit: 0 archived / 1 终态失败（skipped|failed|aborted）/ 5 needs-decision /
+      2 用法错 / 3 环境错 / 4 依赖缺失
+```
+
+### `npc integrate --seq N --result '<RESULT行>' [--result-file PATH] [--manifest PATH] [--no-verify-tests]`
+
+worktree 产物整合进 main 的多步编排（替代 v3 skill Step 9 伪 bash 段），任一步失败自动收拾现场、main 保持绿：
+
+1. verify manifest（plan-only 判定 + 文件存在性/sha 核对）；
+2. `git cherry-pick <worktree_commit>`，冲突 → `--abort`；
+3. **hash 翻译**：RESULT 行 `commit=<worktree_hash>` → 整合后 main HEAD（必要项：archive precheck 用 merge-base --is-ancestor 校验 chain）；
+4. `implement record` 装订，失败 → `git revert` 摘除；
+5. verify tests 真实复跑（探测不到测试命令 → skipped 警告），失败 → revert + progress 回退 `failed/verify-tests-failed`。
+
+冲突与 revert 均落 telemetry `deviation` record 与 run.events（`integrate.conflict` / `integrate.verify_tests_failed`）。
+
+```text
+stdout（成功）:
+  {"ok": true, "seq": N, "change_id": "...", "worktree_commit": "...",
+   "integrated_commit": "...", "verify_tests": "pass|skipped", "files": {"present","total"}}
+stdout（失败）:
+  {"ok": false, "seq": N, "step": "verify-manifest|cherry-pick|record|verify-tests",
+   "reason": "...", "reverted": "<hash>|null", ...}
+
+exit: 0 成功 / 1 任一步失败 / 2 用法错 / 3 环境错
+```
+
+### `npc status --brief`
+
+compaction / 续跑 / 接手后的**单命令重入契约**：收掉 changes 全列表，带出重定向必需品。主 session 纪律：任何 compaction 之后第一条命令永远是它，绝不信任记忆里的进度。
+
+```text
+stdout:
+  {"ok": true, "run_ts", "goal", "mode", "top_status", "total", "by_status",
+   "current": {...}|null,
+   "pending_decisions": [{"seq","change_id","trigger","round","suggested"}, ...],
+   "notes": [{"ts","source","text"}, ...]（未消费的编排日志/steering）,
+   "next_action": "<下一步动作提示>"}
+
+exit: 0 成功 / 3 环境错
+```
+
+### `npc state note (--text TEXT [--source SRC] | --consume)`
+
+编排日志（追加式 `<run_dir>/notes.jsonl`）：承载编排器意图备忘与**人的中途转向指令（steering）**。消费进度用 state 顶层 `notes_consumed_at` 水位；`status --brief` 只带出水位之后的 note，主循环在 change/波次边界消费后 `--consume` 打水位。
+
+```text
+stdout: {"ok": true, "path": "<notes.jsonl>", "ts": "<iso>"}   （--text）
+        {"ok": true, "consumed_up_to": "<iso>"}                 （--consume）
+exit: 0 成功 / 2 --text 与 --consume 都缺或同给 / 3 环境错
+```
+
+### `npc verify tasks --change ID [--seq N]`
+
+tasks.md checkbox 完成度派生计数。change 是调度量子，task 绝不进主 context——主 session 与人只看 `tasks_done/tasks_total` 两个数。`--seq` 给定时与 state 里 implement RESULT 自报的 `tasks=` 计数交叉验证。
+
+```text
+stdout: {"ok": <bool>, "change", "tasks_done", "tasks_total",
+         "claim": <int>|null, "consistent": <bool>|null}
+exit: 0 一致或无 claim / 1 claim 不一致 / 2 缺 --change / 3 tasks.md 缺失
+```
+
+### telemetry `deviation` record（偏差记账）
+
+`npc change run` 决策点、`npc integrate` 冲突/revert、`npc auto-decide --apply` 均自动落一条 `kind=deviation`：`{trigger, action, layer(implementation|decompose|design|unknown), cost_rounds, decided_by(auto|user), outcome_reason=trigger, pointer}`。这是"先收证据后建轨"的证据层——归因升级阶梯等未来硬轨是否值得建，由这些 record 的聚合（`telemetry agg` / `hotspots` 经 `outcome_reason` 计数）决定。
+
+### `npc state init-run --goal` + summary Goal Coverage
+
+`init-run --goal "<人设的原始目标>"` 把目标写进 state；`summary render` 据此渲染 **Goal Coverage** 段（原始目标 × 各 change 终态对照表）——run 级验收是**人**的活：逐 change 全过 ≠ 组合达标，缺口应立为新 change。
+
 ## 9. 收尾
 
 ### `npc summary render`
@@ -1871,7 +1965,16 @@ npc index append
 
 ## 12. 版本
 
-当前契约版本：`v1.4`。
+当前契约版本：`v1.5`。
+
+新增命令（v1.5，内环与整合下沉 + 上下文预算契约，详见 §8f）：
+
+- **`npc change run`**：单 change 内环（implement→review→fix 循环→archive）一条命令；决策点 `--auto` 走 auto-decide / 交互档 exit 5 + `--decision` 续跑。
+- **`npc integrate`**：worktree 产物整合（verify manifest→cherry-pick→hash 翻译→record→verify tests，失败自动 revert）。
+- **`npc status --brief`** / **`npc state note`**：compaction 单命令重入契约 + 编排日志/steering 通道。
+- **`npc verify tasks`**：tasks.md 完成度派生计数 × implement 自报交叉验证。
+- **`npc state init-run --goal`** + summary **Goal Coverage** 段：run 级人工验收对照表。
+- telemetry 新 kind **`deviation`**：决策点/冲突/revert 偏差记账（change run / integrate / auto-decide --apply 自动落）。
 
 新增命令（v1.4，v3 skill 脚本下沉，详见 §8c）：
 

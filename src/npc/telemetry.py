@@ -732,6 +732,50 @@ def emit_agent_spawn(
     emit_event(record)
 
 
+def emit_deviation(
+    *,
+    proj_key: str,
+    run_ts: str | None,
+    change_seq: int | None,
+    change_id: str | None,
+    trigger: str,
+    action: str,
+    phase: str | None = None,
+    layer: str = "implementation",
+    cost_rounds: int | None = None,
+    decided_by: str = "auto",
+    state_json: Path | str | None = None,
+    run_events: Path | str | None = None,
+) -> None:
+    """偏差记账（v1.5，P7）：每次 skip / stale / 冲突 / revert / 人工裁定落一条。
+
+    这是宪法"先收证据后建轨"的证据收集步骤——归因升级阶梯（L2/L3）等未来硬轨
+    是否值得建，由这些 record 聚合出的 hotspots 决定。字段：
+
+    - ``layer``：偏差归属层（implementation / decompose / design / unknown）——
+      调用方按已知信息标注，粗粒度即可（cherry-pick 冲突 → decompose 层的 DAG
+      漏边；review 循环 stale → 默认 implementation，真实归因留给未来裁定步骤）。
+    - ``outcome_reason=trigger``：复用既有聚合的 reasons 计数，零迁移成本。
+    - ``decided_by``：auto（auto-decide 裁定）/ user（--decision 人工裁定）。
+    """
+    record: dict[str, Any] = {
+        "kind": "deviation",
+        "proj_key": proj_key,
+        "run_ts": run_ts,
+        "change_seq": change_seq,
+        "change_id": change_id,
+        "phase": phase or "deviation",
+        "outcome_reason": trigger,
+        "trigger": trigger,
+        "action": action,
+        "layer": layer,
+        "cost_rounds": cost_rounds,
+        "decided_by": decided_by,
+        "pointer": _build_pointer(state_json=state_json, run_events=run_events),
+    }
+    emit_event(record)
+
+
 def _build_pointer(**kwargs) -> dict | None:
     """构造 pointer 字段；任何路径都转为绝对字符串；全 None 时返回 None。"""
     out: dict[str, str] = {}

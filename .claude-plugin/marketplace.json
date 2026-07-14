@@ -8,7 +8,7 @@
   "plugins": [
     {
       "name": "agent-spine",
-      "description": "本地自主 harness：长时运行、自主决策、逐个 change 跑 implement→review→fix→archive，主 session 只调度、coder subagent 只执行，全轨迹落 ~/task_log 供后续分析迭代。另含 new-plan-changes-v2/v3：批量推进 OpenSpec active changes（串行/波次并行）。需配套 npc CLI（仓库根 `uv tool install --force --from . npc`）。",
+      "description": "本地自主 harness：长时运行、自主决策、逐个 change 跑 implement→review→fix→archive，主 session 只调度、coder subagent 只执行，全轨迹落 ~/task_log 供后续分析迭代。另含 new-plan-changes-v2/v3/v4：批量推进 OpenSpec active changes（串行/波次并行/上下文预算版）。需配套 npc CLI（仓库根 `uv tool install --force --from . npc`）。",
       "author": {
         "name": "alpha"
       },

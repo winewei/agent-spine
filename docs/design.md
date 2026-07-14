@@ -127,7 +127,8 @@ agent-spine/
 │   │                                            # 质量门 / 体检 / coder 分层 / plan 门 / git（§11.7，v1.3）
 │   ├── deliver.py / status.py / cost.py / clean.py / spec_analyze.py   # 交付与运维（§11.7，v1.3）
 │   ├── task.py / watch.py                       # 后台任务上报与观测（§11.8）
-│   └── waves.py / notify.py                     # 波次切分与通知（§11.9，v1.4）
+│   ├── waves.py / notify.py                     # 波次切分与通知（§11.9，v1.4）
+│   └── change.py / integrate.py                 # 内环状态机与整合编排（§11.10，v1.5）
 └── tests/
     ├── conftest.py             # tmp_path fixture + fake STATE_JSON
     └── test_*.py               # 与 src/npc/ 模块一一对应（35 文件，580+ 用例）
@@ -155,6 +156,7 @@ agent-spine/
 - **交付与运维（1.3+）**：`deliver` / `pr open` / `status` / `cost` / `clean` / `spec analyze`
 - **后台任务观测（1.3+）**：`task start|update|heartbeat|finish` / `watch`
 - **波次与通知（1.4+）**：`plan waves` / `verify manifest` / `notify`
+- **内环与整合（1.5+）**：`change run` / `integrate` / `status --brief` / `state note` / `verify tasks`
 
 ## 7. 安装与分发
 
@@ -335,3 +337,19 @@ v1.3 把包从 `agent_spine`（嵌套 `npc/` 子包）改名为顶层 `npc`（`s
 - **`npc verify manifest`**：按 sub-agent 返回的 manifest 核对文件真实落盘（存在性 + sha），防"报告了但没写"（原 `verify_manifest.py` 下沉）
 - **`npc notify`**：webhook 通知（raw/slack/feishu 三种 format），供长跑 pipeline 关键节点外呼（原 `notify.py` 下沉）
 - plan-only 误判修复：implement 结果只含计划不含代码时的检测收编进 npc
+
+### 11.10 内环与整合下沉：上下文预算契约（1.5 已落地）
+
+设计定稿见 [optimization-proposals/2026-07-05-orchestration-context-budget.md](./optimization-proposals/2026-07-05-orchestration-context-budget.md)。核心不变量：**主 session 每推进一个 change 消耗 O(1) token（实测 ~400）；磁盘为真相，context 是缓存；异常向上冒泡，状态留在下面。**
+
+v1.4 的账目：review-fix 循环体活在 skill 里，每 change 主 session 流量 2–3k tokens，50 change 必然 compaction。而该循环的控制流本就是纯确定性的（分支只有 blocking / stale / 轮数上限 / auto-decide action）。1.5 按 §11.2 的下沉逻辑推到底：
+
+- **`npc change run`（change.py）**：单 change 内环状态机，复用 coder/pipeline/auto-decide 不重写。决策点分档——`--auto` 内部裁定一路跑完；交互档 exit 5 + `pending_decision` 装订，`--decision` 消费续跑。人驾驭的粒度从"盯每一轮"提升到"只在分叉点出场"。
+- **`npc integrate`（integrate.py）**：v3 skill Step 9 的整合伪 bash 段（cherry-pick + sed 换 hash + record + verify tests + revert）单命令化，失败自动收拾现场、main 保持绿。
+- **`npc status --brief` + `npc state note`**：compaction/续跑单命令重入契约（pending_decisions / 未消费 notes / next_action）+ steering 通道（notes.jsonl 追加式，state.notes_consumed_at 水位消费）。
+- **`npc verify tasks`**：task 维度只暴露派生计数（done/total × 自报交叉验证），清单绝不进主 context。
+- **telemetry `deviation` 记账**：change run 决策点 / integrate 冲突与 revert / auto-decide --apply 自动落 record（trigger/action/layer/cost_rounds/decided_by）——按宪法"先收证据后建轨"，归因升级阶梯等未来硬轨由这些数据的 hotspots 决定是否值得建。
+- **`init-run --goal` + summary Goal Coverage**：run 级验收留给人（人驾驭定位），机器只产对照表。
+- **new-plan-changes-v4 skill**：v3 的上下文预算重构版（~120 行纯决策文档），波次循环每 change 三条命令（spawn / integrate / change run），含 re-plan 触发点（cherry-pick 冲突暴露 DAG 漏边 → 对剩余集合重跑 waves）与 triage 纪律（失败细节走只读 sub-agent + pointer，绝不 cat 日志）。
+
+缓建清单（触发条件见提案 §4）：自动验收 agent、归因升级阶梯 L2/L3、自适应 stale 阈值、预算控制器、fresh review。
