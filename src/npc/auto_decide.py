@@ -178,6 +178,21 @@ def cli(args: argparse.Namespace) -> None:
 
         _state.update_state(p.state_json, p.state_md, mutate)
         decision["applied"] = True
+        # 偏差记账（v1.5，P7）：applied 的裁定落一条 deviation record，
+        # 为未来"归因升级阶梯"是否值得建收集证据。best-effort，绝不阻塞。
+        from . import telemetry as _telemetry
+
+        _telemetry.emit_deviation(
+            proj_key=p.proj_key,
+            run_ts=p.run_ts,
+            change_seq=seq,
+            change_id=entry.get("change_id"),
+            trigger=trigger,
+            action=decision["action"],
+            cost_rounds=len(entry.get("blocking_trend") or []),
+            state_json=p.state_json,
+            run_events=p.run_events,
+        )
     else:
         decision["applied"] = False
 

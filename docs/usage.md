@@ -4,14 +4,13 @@
 
 ---
 
-## 层 1：装 `npc` CLI（机器级，所有 Claude Code session 共享）
+## 层 1：装 `npc` 命令（机器级，所有 Claude Code session 共享）
 
-`npc` 内置在本仓库（`src/npc`），直接从仓库根安装；同一套 npc 亦作独立仓库 [cmzz/npc](https://github.com/cmzz/npc) 发布供其它项目复用：
+`npc` 是从当前 agent-spine 仓库安装出来的 CLI 命令，代码在 `src/npc`。直接从仓库根安装：
 
 ```bash
-uv tool install --force --from . npc              # 从仓库根（内置 src/npc）装 CLI
-npc --version          # 应输出 npc 1.3.0
-# 或从独立仓库装：uv tool install --from git+https://github.com/cmzz/npc.git npc
+uv tool install --force --from . npc              # 从当前仓库根安装 src/npc 为 npc 命令
+npc --version          # 应输出 npc 1.4.0
 ```
 
 首次在某工程内 `npc init` 时会自举 `~/task_log/.new-plan-review-schema.json` 与 `~/.local/bin/portable-timeout`。
@@ -28,9 +27,9 @@ npc --version          # 应输出 npc 1.3.0
 /plugin install agent-spine@agent-spine
 ```
 
-装完得到三个能力：`/spine-run`、`/spine-analyze`、`spine-coder`（subagent）。
+装完得到五个能力：`/spine-run`、`/spine-analyze`、`/new-plan-changes-v2`（串行推进全部 active changes）、`new-plan-changes-v3`（skill，波次并行版）、`spine-coder`（subagent）。
 
-> CLI 与 plugin 版本应保持一致；升级 CLI（`uv tool upgrade agent-spine`）后建议同步 `/plugin update agent-spine@agent-spine`。
+> CLI 与 plugin 版本应保持一致；升级 CLI（在仓库根重跑 `uv tool install --force --from . npc`）后建议同步 `/plugin update agent-spine@agent-spine`。
 
 ---
 
@@ -83,3 +82,34 @@ harness 会：
 ## 切 review 引擎到 claude（或自定义后端）
 
 见仓库根 [README — Review 引擎配置](../README.md#review-引擎配置)。常见：用 `.npc/config.toml` 把 `engine` 切到 `claude`，`bin` + `extra_args` 路由到经 `--settings` 配置的 qwen / deepseek 后端。
+
+## Meta-loop 定时化：让自迭代闭环（v1.5，P8）
+
+design.md §11.6 第二阶段的落地方式：**定时自动跑 `/spine-analyze`，人闸不动（只产提案、不改代码）**。它把"人记得去跑分析"这个易失步骤自动化——telemetry 指标一直在积累，但没人看等于没有。
+
+两种接法（选其一）：
+
+```text
+# A. Claude Code 内（推荐）：让 Claude 用 CronCreate 建每周任务
+"每周一上午 9 点跑一次 /spine-analyze，把建议落到 docs/optimization-proposals/"
+
+# B. 系统 cron / CI 定时任务（headless）
+0 9 * * 1  cd /path/to/your-project && claude -p "/spine-analyze" --permission-mode acceptEdits
+```
+
+约束（与 /spine-analyze 的 guardrails 一致）：
+
+- 每次只读派生指标（`npc telemetry hotspots` / `agg`，< 5KB），不读 events.ndjson 原文。
+- 产出落 `docs/optimization-proposals/YYYY-MM-DD.md`，**最多 3 条**、每条引用具体指标数值。
+- **绝不自动实施**——实施须经人审阅点头。这是自迭代的人在回路闸门，定时化只自动"触发分析"，不自动"改 harness"。
+- 指标样本不足（events_considered < 10）时如实写"数据不足"，跳过本期。
+
+## Steering：长 run 中途转向（v1.5，P4）
+
+run 跑着的时候想调整方向，不必打断：
+
+```bash
+npc state note --text "wave 3 之前先把 auth 相关的两个 change 提到前面" --source user
+```
+
+主循环（v4 skill）在每个波次边界跑 `npc status --brief` 消费未读 note，按指令调整剩余计划后 `npc state note --consume` 打水位。你也可以随时用 `npc status --brief` 看盘面：`pending_decisions` 是等你裁定的分叉点，`next_action` 是下一步动作提示。

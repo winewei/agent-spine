@@ -80,9 +80,63 @@ def summarize_status(state: dict) -> dict:
     }
 
 
+def _next_action_hint(summary: dict, pending_decisions: list[dict]) -> str:
+    """派生"下一步动作"提示（compaction 后主 session 的重定向锚点）。"""
+    if pending_decisions:
+        pd = pending_decisions[0]
+        return (
+            f"resolve pending decision: npc change run --seq {pd['seq']} "
+            f"--decision <continue-retry|skip|force-archive|abort> (suggested: {pd['suggested']})"
+        )
+    cur = summary.get("current")
+    if cur is not None:
+        return f"npc change run --seq {cur['seq']}"
+    if summary.get("top_status") == "in-progress":
+        return "npc state finalize && npc summary render && npc index append"
+    return "run finished"
+
+
+def brief_status(state: dict, notes: list[dict]) -> dict:
+    """--brief（v1.5，P4）：compaction/续跑后的单命令重入契约。
+
+    在 summarize 基础上收掉 changes 全列表（那是全量视图），补三样重定向必需品：
+    pending_decisions（悬而未决的裁定）、notes（未消费的编排日志/steering）、
+    next_action（下一步动作提示）。
+    """
+    summary = summarize_status(state)
+    pending_decisions = [
+        {
+            "seq": entry.get("seq"),
+            "change_id": entry.get("change_id"),
+            "trigger": (entry.get("pending_decision") or {}).get("trigger"),
+            "round": (entry.get("pending_decision") or {}).get("round"),
+            "suggested": (entry.get("pending_decision") or {}).get("suggested"),
+        }
+        for entry in (state.get("progress") or [])
+        if entry.get("pending_decision")
+    ]
+    return {
+        "run_ts": summary["run_ts"],
+        "goal": state.get("goal"),
+        "mode": state.get("mode"),
+        "top_status": summary["top_status"],
+        "total": summary["total"],
+        "by_status": summary["by_status"],
+        "current": summary["current"],
+        "pending_decisions": pending_decisions,
+        "notes": [
+            {"ts": n.get("ts"), "source": n.get("source"), "text": n.get("text")}
+            for n in notes
+        ],
+        "next_action": _next_action_hint(summary, pending_decisions),
+    }
+
+
 def run(args: argparse.Namespace) -> None:
     """status：定位 active run → 读 STATE_JSON → emit 只读快照。
 
+    --brief：收掉 changes 全列表，带出 pending_decisions / 未消费 notes /
+    next_action——主 session 在任何 compaction 或续跑后以此单命令重建盘面。
     无 active run / 定位失败 / state 文件缺失 → exit 3（env_missing）。
     """
     try:
@@ -90,6 +144,11 @@ def run(args: argparse.Namespace) -> None:
         state = _state.read_state(p.state_json)
     except (_paths.PathsError, FileNotFoundError) as e:
         _io.emit_error("env_missing", str(e), exit_code=3)
+        return
+
+    if getattr(args, "brief", False):
+        notes = _state.read_unconsumed_notes(p, state)
+        _io.emit({"ok": True, **brief_status(state, notes)})
         return
 
     _io.emit({"ok": True, **summarize_status(state)})

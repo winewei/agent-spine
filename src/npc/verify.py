@@ -1,6 +1,6 @@
 """npc verify —— 把"不裸信自报"做成确定性笼子。
 
-两个子命令：
+三个子命令：
 
 - ``npc verify tests``：真实复跑测试（质量门）。绝不读 LLM 的 RESULT 自报，
   而是在 repo_root 实际执行测试命令、捕获退出码与输出末尾，emit 结构化判定。
@@ -9,12 +9,19 @@
 - ``npc verify routing``：把路由不变量编进代码（生成⊥验证 + MiMo 只许执行）。
   纯函数 :func:`check_routing` 校验 coder/review 后端配置，发现"自己评自己"
   或"MiMo 越权到 review"等违规则报 violation。
+
+- ``npc verify manifest``：并行 implementer（worktree 内 sub-agent）的产出核验。
+  解析 RESULT 行（npc key=value 或 legacy JSON 两种格式）判定 plan-only，
+  再对 manifest JSON 里声明的 files_written 做存在性 + sha256 核对。
+  这是 /new-plan-changes-v3 波次并行的"写没写真代码"硬轨。
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import re
 import shlex
 import subprocess
 from pathlib import Path
@@ -280,4 +287,224 @@ def run_routing(args: argparse.Namespace) -> None:
         }
     )
     if violations:
+        raise SystemExit(1)
+
+
+# ============================================================
+# 子命令 3：npc verify manifest
+# ============================================================
+
+_RESULT_JSON_RE = re.compile(r"RESULT:\s*(\{.*\})\s*$", re.DOTALL)
+_RESULT_NPC_RE = re.compile(r"RESULT:\s*commit=(\S+)")
+
+
+def _sha256_of(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def parse_result_verdict(result_line: str, manifest_arg: str | None) -> dict:
+    """纯函数：RESULT 行 → ``{verdict, reason, commit, manifest}``。
+
+    两种 RESULT 格式：
+
+    - npc 契约（v2/v3 implementer）：``RESULT: commit=<hash> tasks=.. tests=.. ...``
+      manifest 路径来自单独的 ``MANIFEST:`` 行，须经 ``--manifest`` 传入。
+    - legacy JSON（architect-swarm）：``RESULT: {"status":.., "files_written":N, "manifest":..}``
+
+    verdict ∈ code / plan_only / error。plan-only 判据：无 RESULT 行、
+    npc 格式 commit=-、JSON 格式 status=plan_only 或 files_written≤0。
+    """
+    raw = (result_line or "").strip()
+
+    m = _RESULT_JSON_RE.search(raw)
+    if m:
+        try:
+            payload = json.loads(m.group(1))
+        except json.JSONDecodeError as e:
+            return {"verdict": "plan_only", "reason": f"json_error:{e}", "commit": None, "manifest": manifest_arg}
+        manifest = manifest_arg or payload.get("manifest")
+        if payload.get("status") == "plan_only":
+            return {"verdict": "plan_only", "reason": "self_declared", "commit": None, "manifest": manifest}
+        if payload.get("status") == "error":
+            return {"verdict": "error", "reason": payload.get("error", "unknown"), "commit": None, "manifest": manifest}
+        files = payload.get("files_written", 0)
+        if not isinstance(files, int) or files <= 0:
+            return {"verdict": "plan_only", "reason": "zero_files_written", "commit": None, "manifest": manifest}
+        return {"verdict": "code", "reason": None, "commit": payload.get("commit"), "manifest": manifest}
+
+    m = _RESULT_NPC_RE.search(raw)
+    if m:
+        commit = m.group(1)
+        if commit == "-":
+            return {"verdict": "plan_only", "reason": "no_commit", "commit": None, "manifest": manifest_arg}
+        return {"verdict": "code", "reason": None, "commit": commit, "manifest": manifest_arg}
+
+    return {"verdict": "plan_only", "reason": "no_result_line", "commit": None, "manifest": manifest_arg}
+
+
+def check_manifest_files(manifest_path: str | None) -> dict:
+    """核对 manifest 声明的 files_written：存在性 + 可选 sha256。
+
+    条目可以是纯路径字符串或 ``{path, sha256}`` 对象。返回
+    ``{ok, reason, present, missing, sha_mismatch, total}``。
+    """
+
+    def fail(reason: str) -> dict:
+        return {"ok": False, "reason": reason, "present": 0, "missing": [], "sha_mismatch": [], "total": 0}
+
+    if not manifest_path or not Path(manifest_path).is_file():
+        return fail("manifest_missing")
+    try:
+        data = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as e:
+        return fail(f"manifest_unreadable:{e}")
+    files = data.get("files_written") or []
+    if not files:
+        return fail("manifest_empty_files")
+
+    present, missing, sha_mismatch = 0, [], []
+    for entry in files:
+        if isinstance(entry, str):
+            entry = {"path": entry}
+        # manifest 是不可信的 implementer 输出：条目不是 str/dict 或缺合法
+        # path 时返回结构化失败，而不是让 .get() 抛裸 traceback。
+        if not isinstance(entry, dict) or not isinstance(entry.get("path"), str) or not entry["path"]:
+            return fail("manifest_malformed_entry")
+        path = Path(entry["path"])
+        if not path.is_file():
+            missing.append(str(path))
+            continue
+        present += 1
+        declared = entry.get("sha256")
+        if declared and _sha256_of(path) != declared:
+            sha_mismatch.append(str(path))
+
+    ok = not missing and not sha_mismatch
+    reason = None if ok else ("files_missing" if missing else "sha_mismatch")
+    return {
+        "ok": ok,
+        "reason": reason,
+        "present": present,
+        "missing": missing,
+        "sha_mismatch": sha_mismatch,
+        "total": len(files),
+    }
+
+
+def run_manifest(args: argparse.Namespace) -> None:
+    """``npc verify manifest --result '<RESULT 行>' [--manifest PATH]``。
+
+    退出码：verdict=code 且 manifest 全部核对通过 → 0；否则 1。
+    stdout：``{ok, verdict, reason, commit, files}``。
+    """
+    parsed = parse_result_verdict(args.result, args.manifest)
+    files: dict | None = None
+    ok = parsed["verdict"] == "code"
+    reason = parsed["reason"]
+
+    if ok:
+        files = check_manifest_files(parsed["manifest"])
+        if not files["ok"]:
+            ok = False
+            # manifest 缺失/为空/条目非法视为 plan-only（没有可信的真实产出）；
+            # 文件丢失/sha 不符是核验失败（代码可能写了但与声明不符）。
+            if files["reason"] in (
+                "manifest_missing",
+                "manifest_empty_files",
+                "manifest_malformed_entry",
+            ) or str(files["reason"] or "").startswith("manifest_unreadable"):
+                parsed["verdict"] = "plan_only"
+            reason = files["reason"]
+
+    _io.emit(
+        {
+            "ok": ok,
+            "verdict": parsed["verdict"],
+            "reason": reason,
+            "commit": parsed["commit"],
+            "files": files,
+        }
+    )
+    if not ok:
+        raise SystemExit(1)
+
+
+# ============================================================
+# 子命令 4：npc verify tasks（v1.5，P5）
+# ============================================================
+
+
+def run_tasks_check(args: argparse.Namespace) -> None:
+    """``npc verify tasks --change ID [--seq N]``：tasks.md 完成度派生计数。
+
+    change 是调度量子，task 绝不进主 context——主 session 与人只看
+    ``tasks_done/tasks_total`` 两个数，不看清单。--seq 给定时与 state 里
+    implement RESULT 自报的 tasks= 计数交叉验证（claim != tasks_done → 不一致）。
+
+    退出码：0 一致或无 claim；1 claim 存在且不一致；2 缺 --change；
+    3 change 目录 / tasks.md 缺失。
+    """
+    from .spec_analyze import parse_tasks
+
+    change = getattr(args, "change", None)
+    if not change:
+        _io.emit_error("invalid_args", "必须提供 --change", exit_code=2)
+        return
+
+    try:
+        repo_root = _resolve_repo_root(args)
+    except _paths.PathsError as e:
+        _io.emit_error("env_missing", f"未能定位 repo_root：{e}", exit_code=3)
+        return
+
+    tasks_md = repo_root / "openspec" / "changes" / change / "tasks.md"
+    if not tasks_md.is_file():
+        _io.emit_error(
+            "tasks_not_found", f"tasks.md 不存在：{tasks_md}", exit_code=3
+        )
+        return
+
+    try:
+        tasks = parse_tasks(tasks_md.read_text(encoding="utf-8", errors="replace"))
+    except OSError as e:
+        _io.emit_error("tasks_unreadable", f"tasks.md 读取失败：{e}", exit_code=3)
+        return
+    done = sum(1 for t in tasks if t["done"])
+    total = len(tasks)
+
+    claim: int | None = None
+    seq = getattr(args, "seq", None)
+    if seq is not None:
+        from . import state as _state
+
+        try:
+            p = _paths.load_paths(args)
+            state = _state.read_state(p.state_json)
+            entry = (state.get("progress") or [])[seq - 1]
+            c = ((entry.get("phases") or {}).get("implement") or {}).get("tasks")
+            if isinstance(c, int):
+                claim = c
+        except (
+            _paths.PathsError,
+            FileNotFoundError,
+            IndexError,
+        ):
+            pass  # claim 拿不到不阻塞：退化为纯计数
+
+    consistent = None if claim is None else (claim == done)
+    _io.emit(
+        {
+            "ok": consistent is not False,
+            "change": change,
+            "tasks_done": done,
+            "tasks_total": total,
+            "claim": claim,
+            "consistent": consistent,
+        }
+    )
+    if consistent is False:
         raise SystemExit(1)

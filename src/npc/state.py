@@ -345,6 +345,8 @@ def init_run(args: argparse.Namespace) -> None:
         for i, cid in enumerate(plan_order)
     ]
 
+    goal = (getattr(args, "goal", None) or "").strip() or None
+
     state = {
         "schema_version": SCHEMA_VERSION,
         "run_ts": p.run_ts,
@@ -352,6 +354,7 @@ def init_run(args: argparse.Namespace) -> None:
         "last_updated_at": _io.now_iso(),
         "mode": mode,
         "fresh": fresh,
+        "goal": goal,
         "status": "in-progress",
         "project_root": str(p.repo_root),
         "proj_key": p.proj_key,
@@ -551,3 +554,85 @@ def finalize(args: argparse.Namespace) -> None:
             "total": counts["total"],
         }
     )
+
+
+# ----------------------------- 编排日志（v1.5，P4） -----------------------------
+#
+# notes.jsonl 承载两类内容：编排器的意图备忘（为什么这么排、悬而未决什么）与
+# 人的中途转向指令（steering）。追加式落 <run_dir>/notes.jsonl；消费进度用
+# state.json 顶层 notes_consumed_at 水位标记（status --brief 只带出水位之后的
+# 未消费 note，主循环在 change 边界消费后打水位）。
+
+
+def _notes_path(p: _paths.Paths) -> Path:
+    return p.run_dir / "notes.jsonl"
+
+
+def read_unconsumed_notes(p: _paths.Paths, state: dict, limit: int = 10) -> list[dict]:
+    """读取水位之后的未消费 note（最多 limit 条，按时间正序）。纯读取。"""
+    path = _notes_path(p)
+    if not path.is_file():
+        return []
+    watermark = state.get("notes_consumed_at") or ""
+    out: list[dict] = []
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(rec, dict) and (rec.get("ts") or "") > watermark:
+                    out.append(rec)
+    except OSError:
+        return []
+    return out[-limit:]
+
+
+def note(args: argparse.Namespace) -> None:
+    """state note：--text 追加一条编排日志 / --consume 打消费水位。
+
+    退出码：0 成功；2 用法错（--text 与 --consume 都缺或同给）；3 环境错。
+    """
+    try:
+        p = _paths.load_paths(args)
+    except _paths.PathsError as e:
+        _io.emit_error("env_missing", str(e), exit_code=3)
+        return
+
+    text = (getattr(args, "text", None) or "").strip()
+    consume = bool(getattr(args, "consume", False))
+    if bool(text) == consume:
+        _io.emit_error(
+            "invalid_args", "--text 与 --consume 必须二选一", exit_code=2
+        )
+        return
+
+    if consume:
+        ts = _io.now_utc_iso()
+        try:
+            state = read_state(p.state_json)
+        except FileNotFoundError as e:
+            _io.emit_error("env_missing", str(e), exit_code=3)
+            return
+
+        def mutate(state: dict) -> None:
+            state["notes_consumed_at"] = ts
+
+        update_state(p.state_json, p.state_md, mutate)
+        _io.emit({"ok": True, "consumed_up_to": ts})
+        return
+
+    rec = {
+        "ts": _io.now_utc_iso(),
+        "text": text,
+        "source": getattr(args, "source", None) or "orchestrator",
+    }
+    path = _notes_path(p)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(rec, ensure_ascii=False, separators=(",", ":")) + "\n")
+    _io.emit({"ok": True, "path": str(path), "ts": rec["ts"]})

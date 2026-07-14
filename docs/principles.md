@@ -50,6 +50,6 @@
 
 ## Roadmap（设计了、暂不做——遵不变量 3 的"按需加"）
 
-- **复跑测试硬轨**：`npc record` 由 npc 真实复跑测试、不裸信 RESULT 的 `tests=pass`。仅在 spine 真去掉人、走无人值守时才升级为必需。详见 `docs/optimization-proposals/2026-06-22.md`。
+- **复跑测试硬轨**：~~`npc record` 由 npc 真实复跑测试、不裸信 RESULT 的 `tests=pass`~~ **前半已落地**（v1.3 `npc verify tests` 独立质量门，skill 流程在 record 前调用）；剩余部分——把复跑装订进 `record` 本体、自报/复跑不一致计入 telemetry——仍按"无人值守时才必需"缓建。详见 `docs/optimization-proposals/2026-06-22.md`。
 - **风险分级人在回路**：把 `--auto`/交互二元开关细化为按 change 爆炸半径决定"哪里问人"（aidevos risk→execution-mode 的轻量版）。
 - **fix 阶段成本升级**：fix 早期轮用 MiMo，连续 stale / 反复失败时自动升级到 Claude coder（成本感知 + 质量兜底）。
