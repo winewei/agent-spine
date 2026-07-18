@@ -7,6 +7,7 @@
 - 跨项目共享的 review schema 是否已自举；
 - 成本路由 ``mimo.env`` 是否就绪（缺失只降级 warn，不视为 missing）；
 - npc 配置是否能正常加载（失败降级 warn，不阻塞）；
+- 路由在用的 coder provider 是否就绪（env_file 可读 + runner 可执行文件）；
 - 工程级 ``docs/principles.md`` 是否在（warn 级）。
 
 设计成"纯函数核 + 薄 handler"：:func:`gather_checks` 不做任何 I/O 输出、可注入
@@ -165,6 +166,63 @@ def _check_config(*, home: Path, repo_root: Path) -> dict:
     }
 
 
+def _check_providers(*, home: Path, repo_root: Path, which) -> dict:
+    """路由实际引用到的 provider 是否就绪（env_file 可读 + runner 可执行文件在 PATH）。
+
+    只检查 coder 路由在用的 provider（effective + per-phase），未被引用的定义
+    不产生噪音。任何一项不就绪降级 warn（doctor 不因可选后端阻塞）。
+    """
+    try:
+        cfg = _config.load_config(repo_root, home=home)
+    except Exception:
+        return {
+            "name": "providers",
+            "status": "warn",
+            "detail": "配置加载失败，跳过 provider 检查（见 config 检查项）",
+            "required": False,
+        }
+
+    in_play = {cfg.coder.effective_backend}
+    in_play.update(be for _ph, be in cfg.coder.phase_backends)
+
+    problems: list[str] = []
+    descriptions: list[str] = []
+    runner_bins = {"claude-cli": "claude", "codex-cli": "codex"}
+    for name in sorted(in_play):
+        p = cfg.provider(name)
+        if p is None:
+            problems.append(f"{name}: 未注册（内置或 [providers.*]）")
+            continue
+        desc = f"{name}({p.runner}"
+        if p.model:
+            desc += f", model={p.model}"
+        desc += ")"
+        descriptions.append(desc)
+        bin_name = p.bin or cfg.coder.bin or runner_bins[p.runner]
+        if which(bin_name) is None and not Path(bin_name).expanduser().is_file():
+            problems.append(f"{name}: 可执行文件 {bin_name} 不可用")
+        if p.env_file:
+            env_path = Path(p.env_file).expanduser()
+            if not env_path.is_file():
+                problems.append(f"{name}: env_file 缺失 {env_path}")
+            elif not os.access(env_path, os.R_OK):
+                problems.append(f"{name}: env_file 不可读 {env_path}")
+
+    if problems:
+        return {
+            "name": "providers",
+            "status": "warn",
+            "detail": f"provider 未就绪：{'; '.join(problems)}",
+            "required": False,
+        }
+    return {
+        "name": "providers",
+        "status": "ok",
+        "detail": f"路由在用 provider 就绪：{', '.join(descriptions)}",
+        "required": False,
+    }
+
+
 def _check_principles(*, repo_root: Path | None) -> dict:
     """工程级 docs/principles.md 是否在（warn 级）。"""
     if repo_root is None:
@@ -211,6 +269,7 @@ def gather_checks(
     checks.append(_check_mimo_env(home=home))
     cfg_root = repo_root if repo_root is not None else Path.cwd()
     checks.append(_check_config(home=home, repo_root=cfg_root))
+    checks.append(_check_providers(home=home, repo_root=cfg_root, which=which))
     checks.append(_check_principles(repo_root=repo_root))
     return checks
 

@@ -334,17 +334,129 @@ def test_cli_implement_run_success_emits_backend(
 
 
 # ============================================================
-# codex backend：留 TODO（NotImplemented → 友好退出）
+# codex backend：codex exec 路径（workspace-write sandbox）
 # ============================================================
 
 
-def test_run_implement_codex_not_implemented(env_setup, make_args, capsys, fake_repo: Path):
+def test_run_implement_codex_exec(env_setup, make_args, capsys, fake_repo: Path):
     _bootstrap_run(make_args, capsys, "add-foo")
     p = env_setup
     pr = _paths_with_repo(p, fake_repo)
+
+    commit = _real_commit(fake_repo)
+    base = p.run_dir / "001-add-foo"
+    base.mkdir(parents=True, exist_ok=True)
+    summary = base / "implement.summary.md"
+    summary.write_text("# s\n")
+
+    stdout = f"RESULT: commit={commit} tasks=1 tests=pass summary={summary} notes=-\n"
+    runner = _fake_runner(stdout, exit_code=0)
+
+    result = _coder.run_implement(pr, 1, "add-foo", backend="codex", runner=runner)
+
+    assert result["ok"] is True
+    assert result["backend"] == "codex"
+    argv = runner.calls[0]["argv"]
+    assert argv[0] == "/fake/bin/codex"
+    assert argv[1] == "exec"
+    assert "--sandbox" in argv and "workspace-write" in argv
+    # 未配置 model → 不带 -m
+    assert "-m" not in argv
+    # prompt 是最后一个位置参数
+    assert argv[-1].strip() != ""
+
+
+# ============================================================
+# 自定义 provider（[providers.*]）：env 注入 + model + codex runner
+# ============================================================
+
+
+def test_run_implement_custom_provider_claude_cli(
+    env_setup, make_args, capsys, fake_repo: Path, tmp_path: Path
+):
+    _bootstrap_run(make_args, capsys, "add-foo")
+    p = env_setup
+    pr = _paths_with_repo(p, fake_repo)
+
+    commit = _real_commit(fake_repo)
+    base = p.run_dir / "001-add-foo"
+    base.mkdir(parents=True, exist_ok=True)
+    (base / "implement.summary.md").write_text("# s\n")
+    summary = base / "implement.summary.md"
+
+    env_file = tmp_path / "kimi.env"
+    env_file.write_text(
+        "export ANTHROPIC_BASE_URL=https://kimi.example\n"
+        "export ANTHROPIC_AUTH_TOKEN=ktok\n"
+    )
+    cfg_path = tmp_path / "cfg.toml"
+    cfg_path.write_text(
+        f'[providers.kimi]\nenv_file = "{env_file}"\nmodel = "kimi-k3"\n'
+        '[coder]\nbackend = "kimi"\n'
+    )
+
+    stdout = f"RESULT: commit={commit} tasks=1 tests=pass summary={summary} notes=-\n"
+    runner = _fake_runner(stdout, exit_code=0)
+
+    result = _coder.run_implement(pr, 1, "add-foo", config_path=cfg_path, runner=runner)
+
+    assert result["ok"] is True
+    assert result["backend"] == "kimi"
+    assert result["model"] == "kimi-k3"
+    injected = runner.calls[0]["env"]
+    assert injected["ANTHROPIC_BASE_URL"] == "https://kimi.example"
+    assert injected["ANTHROPIC_AUTH_TOKEN"] == "ktok"
+    argv = runner.calls[0]["argv"]
+    assert "kimi-k3" in argv
+
+
+def test_run_implement_custom_provider_codex_cli_with_model(
+    env_setup, make_args, capsys, fake_repo: Path, tmp_path: Path
+):
+    _bootstrap_run(make_args, capsys, "add-foo")
+    p = env_setup
+    pr = _paths_with_repo(p, fake_repo)
+
+    commit = _real_commit(fake_repo)
+    base = p.run_dir / "001-add-foo"
+    base.mkdir(parents=True, exist_ok=True)
+    summary = base / "implement.summary.md"
+    summary.write_text("# s\n")
+
+    cfg_path = tmp_path / "cfg.toml"
+    cfg_path.write_text(
+        '[providers.gpt-codex]\nrunner = "codex-cli"\nmodel = "gpt-5.4-codex"\n'
+        '[coder]\nbackend = "gpt-codex"\n'
+    )
+
+    stdout = f"RESULT: commit={commit} tasks=1 tests=pass summary={summary} notes=-\n"
+    runner = _fake_runner(stdout, exit_code=0)
+
+    result = _coder.run_implement(pr, 1, "add-foo", config_path=cfg_path, runner=runner)
+
+    assert result["ok"] is True
+    assert result["backend"] == "gpt-codex"
+    assert result["model"] == "gpt-5.4-codex"
+    argv = runner.calls[0]["argv"]
+    assert argv[1] == "exec"
+    assert "-m" in argv and "gpt-5.4-codex" in argv
+
+
+def test_run_implement_custom_provider_env_file_missing(
+    env_setup, make_args, capsys, fake_repo: Path, tmp_path: Path
+):
+    _bootstrap_run(make_args, capsys, "add-foo")
+    p = env_setup
+    pr = _paths_with_repo(p, fake_repo)
+
+    cfg_path = tmp_path / "cfg.toml"
+    cfg_path.write_text(
+        f'[providers.kimi]\nenv_file = "{tmp_path / "nope.env"}"\n'
+        '[coder]\nbackend = "kimi"\n'
+    )
     runner = _fake_runner("", exit_code=0)
-    with pytest.raises(NotImplementedError, match="codex"):
-        _coder.run_implement(pr, 1, "add-foo", backend="codex", runner=runner)
+    with pytest.raises(FileNotFoundError, match="kimi"):
+        _coder.run_implement(pr, 1, "add-foo", config_path=cfg_path, runner=runner)
 
 
 # ============================================================
@@ -511,20 +623,21 @@ def test_cli_fix_run_change_id_mismatch(
     assert out["error"] == "env_missing"
 
 
-def test_cli_fix_run_codex_not_implemented_exit_2(
+def test_cli_fix_run_unknown_provider_exit_2(
     env_setup, make_args, capsys, fake_repo: Path, monkeypatch
 ):
+    """--backend 指到未注册 provider → ValueError → invalid_args exit 2。"""
     _bootstrap_run(make_args, capsys, "add-foo")
     p = env_setup
     monkeypatch.setattr(_coder._paths, "load_paths", lambda args: _paths_with_repo(p, fake_repo))
 
-    args = make_args(seq=1, change_id="add-foo", round_n=1, backend="codex", timeout=None, config=None)
+    args = make_args(seq=1, change_id="add-foo", round_n=1, backend="gpt5", timeout=None, config=None)
     with pytest.raises(SystemExit) as ei:
         _coder.cli_fix_run(args)
     assert ei.value.code == 2
     out = json.loads(capsys.readouterr().out)
     assert out["ok"] is False
-    assert out["error"] == "not_implemented"
+    assert out["error"] == "invalid_args"
 
 
 # ============================================================

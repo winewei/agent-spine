@@ -98,6 +98,7 @@ def test_gather_checks_covers_all_items(tmp_path: Path):
         "schema",
         "mimo.env",
         "config",
+        "providers",
         "principles.md",
     }
     assert expected <= names
@@ -555,3 +556,73 @@ def test_run_repo_root_undetectable_still_runs(tmp_path: Path, monkeypatch, caps
     by = {c["name"]: c for c in report["checks"]}
     assert by["principles.md"]["status"] == "warn"
     assert report["ok"] is True
+
+
+# ============================================================
+# providers 检查（v1.6：路由在用 provider 就绪性）
+# ============================================================
+
+
+def test_providers_check_default_claude_ok(tmp_path: Path):
+    home = _make_home(tmp_path)
+    repo = _make_repo(tmp_path)
+    checks = doctor.gather_checks(
+        home=home, repo_root=repo, which=_which_factory(ALL_BINS)
+    )
+    by = {c["name"]: c for c in checks}
+    assert by["providers"]["status"] == "ok"
+    assert "claude" in by["providers"]["detail"]
+
+
+def test_providers_check_env_file_missing_warn(tmp_path: Path):
+    home = _make_home(tmp_path)
+    repo = _make_repo(tmp_path)
+    cfg_dir = repo / ".npc"
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    (cfg_dir / "config.toml").write_text(
+        f'[providers.kimi]\nenv_file = "{tmp_path / "nope.env"}"\n'
+        '[coder]\nbackend = "kimi"\n',
+        encoding="utf-8",
+    )
+    checks = doctor.gather_checks(
+        home=home, repo_root=repo, which=_which_factory(ALL_BINS)
+    )
+    by = {c["name"]: c for c in checks}
+    assert by["providers"]["status"] == "warn"
+    assert "env_file 缺失" in by["providers"]["detail"]
+
+
+def test_providers_check_env_file_present_ok(tmp_path: Path):
+    home = _make_home(tmp_path)
+    repo = _make_repo(tmp_path)
+    env_file = tmp_path / "kimi.env"
+    env_file.write_text("export ANTHROPIC_BASE_URL=https://kimi.example\n")
+    cfg_dir = repo / ".npc"
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    (cfg_dir / "config.toml").write_text(
+        f'[providers.kimi]\nenv_file = "{env_file}"\nmodel = "kimi-k3"\n'
+        '[coder]\nbackend = "kimi"\n',
+        encoding="utf-8",
+    )
+    checks = doctor.gather_checks(
+        home=home, repo_root=repo, which=_which_factory(ALL_BINS)
+    )
+    by = {c["name"]: c for c in checks}
+    assert by["providers"]["status"] == "ok"
+    assert "kimi" in by["providers"]["detail"]
+
+
+def test_providers_check_runner_bin_missing_warn(tmp_path: Path):
+    home = _make_home(tmp_path)
+    repo = _make_repo(tmp_path)
+    cfg_dir = repo / ".npc"
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    (cfg_dir / "config.toml").write_text(
+        '[coder]\nbackend = "codex"\n', encoding="utf-8"
+    )
+    # PATH 里没有 codex
+    bins = tuple(b for b in ALL_BINS if b != "codex")
+    checks = doctor.gather_checks(home=home, repo_root=repo, which=_which_factory(bins))
+    by = {c["name"]: c for c in checks}
+    assert by["providers"]["status"] == "warn"
+    assert "codex" in by["providers"]["detail"]

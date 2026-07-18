@@ -10,7 +10,7 @@
 
 ```bash
 uv tool install --force --from . npc              # 从当前仓库根安装 src/npc 为 npc 命令
-npc --version          # 应输出 npc 1.4.0
+npc --version          # 应输出 npc 1.6.0
 ```
 
 首次在某工程内 `npc init` 时会自举 `~/task_log/.new-plan-review-schema.json` 与 `~/.local/bin/portable-timeout`。
@@ -82,6 +82,22 @@ harness 会：
 ## 切 review 引擎到 claude（或自定义后端）
 
 见仓库根 [README — Review 引擎配置](../README.md#review-引擎配置)。常见：用 `.npc/config.toml` 把 `engine` 切到 `claude`，`bin` + `extra_args` 路由到经 `--settings` 配置的 qwen / deepseek 后端。
+
+## 配 coder 多模型：每工程独立选型（v1.6+，可选）
+
+完整四步照做指南见 [README — Coder 多模型配置](../README.md#coder-多模型配置每工程独立选型)。速记：
+
+```bash
+# 1. 每个模型一个凭据文件（全局，chmod 600，勿入 git）
+#    ~/.config/npc/kimi.env: export ANTHROPIC_BASE_URL=... + ANTHROPIC_AUTH_TOKEN=...
+# 2. 全局 ~/.config/npc/config.toml 注册：[providers.kimi] env_file/model
+# 3. 工程 .npc/config.toml 路由：[coder] backend = "kimi"（可入 git）
+# 4. 验证
+npc doctor | jq '.checks[] | select(.name=="providers")'
+npc verify routing
+```
+
+review 恒走 premium 引擎（codex / claude），不受此配置影响——廉价层只许执行，`npc verify routing` 强制。
 
 ## Meta-loop 定时化：让自迭代闭环（v1.5，P8）
 
