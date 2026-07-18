@@ -1332,7 +1332,7 @@ best-effort webhook 推送。URL 解析顺序：`--url` > `$NPC_WEBHOOK` > `$NPC
 
 ## 8d. 质量门与环境体检（v1.3+）
 
-`doctor` / `verify tests` / `verify routing` 是把"跑 npc 之前需要满足的前置条件"与"不裸信 sub-agent 自报"焊进确定性核心的三个基石命令。均只需 git 仓库（`verify routing`/`verify tests` 还需能加载 npc 配置），无需 active run。
+`doctor` / `verify tests` / `verify routing` 是把"跑 npc 之前需要满足的前置条件"与"不裸信 sub-agent 自报"固化进 npc 的三个基础命令。均只需 git 仓库（`verify routing`/`verify tests` 还需能加载 npc 配置），无需 active run。
 
 ### `npc doctor`
 
@@ -1419,7 +1419,7 @@ best-effort webhook 推送。URL 解析顺序：`--url` > `$NPC_WEBHOOK` > `$NPC
 
 ## 8e. Git 卫生 + 对外交付
 
-`git branch-for` / `git ensure-clean` / `git commit` 是 SDD 流程的确定性 git 卫生基石（分支隔离 / 干净工作区 / 确定性提交）。`deliver` / `pr open` 是 npc 笼子里少数的**对外动作**——push 与开 PR 都会把工作推到远端对外可见，因此 npc 只提供纯机械命令，绝不自作主张决定要不要推；是否交付由上层 skill 的人闸拍板。以上五个命令均只需 git 仓库，无需 active run。
+`git branch-for` / `git ensure-clean` / `git commit` 是 SDD 流程的确定性 git 卫生基础（分支隔离 / 干净工作区 / 确定性提交）。`deliver` / `pr open` 是 npc 笼子里少数的**对外动作**——push 与开 PR 都会把工作推到远端对外可见，因此 npc 只提供纯机械命令，绝不自作主张决定要不要推；是否交付由上层 skill 的人闸拍板。以上五个命令均只需 git 仓库，无需 active run。
 
 ### `npc git branch-for --change ID`
 
@@ -1984,7 +1984,7 @@ npc index append
 - **`npc verify manifest`**：implementer 产出核验（RESULT 行双格式 plan-only 判定 + manifest 文件存在性/sha256 核对），合并原 `detect_plan_only.py` + `verify_manifest.py`。
 - **`npc notify`**：best-effort webhook 推送（总是 exit 0），原 `notify.py`；URL 支持 `$NPC_WEBHOOK` / `$NPC_V3_WEBHOOK`。
 
-新增命令（v1.3，基石加固，全部经独立 review + 充分测试；完整契约见 §8d / §8a）：
+新增命令（v1.3，基础加固，全部经独立 review + 充分测试；完整契约见 §8d / §8a）：
 
 - **`npc doctor`**：环境前置体检，详见 §8d。
 - **`npc verify tests`** / **`npc verify routing`**：真实复跑测试 + 路由不变量校验，详见 §8d。
@@ -1998,7 +1998,7 @@ npc index append
 | **1.6** | Provider 注册表：config 新增 `[providers.*]`（runner/env_file/model/bin，内置 claude/mimo/codex），coder 可路由到任意 Anthropic 兼容端点（kimi/qwen/deepseek/...）与 `codex exec`（coder 的 codex-cli 路径补齐）；配置查找链改为分层深合并（全局定义 provider、项目只写路由）；`--backend` 接受 provider 名；`verify routing` 规则 3 更名 `cheap_exec_only` 并泛化到全部带 env_file 的 provider；`doctor` 新增 `providers` 检查 |
 | **1.5** | 内环与整合下沉（§8f）：新增 `change run`（单 change 内环编排）与 `integrate`（worktree 产物整合进 main），上下文预算重构 |
 | **1.4** | 新增 `plan waves` / `verify manifest` / `notify`：/new-plan-changes-v3 的全部 skill 脚本下沉为契约化子命令，skill 侧零脚本 |
-| **1.3** | 新增 `doctor` / `verify tests` / `verify routing` / `implement run` / `fix run`；`init --auto` 自动授权 `.claude/settings.json`；config 增 `[coder]`/`[verify]`。把成本路由、独立验证、复跑测试、auto 授权焊进确定性核心 |
+| **1.3** | 新增 `doctor` / `verify tests` / `verify routing` / `implement run` / `fix run`；`init --auto` 自动授权 `.claude/settings.json`；config 增 `[coder]`/`[verify]`。把成本路由、独立验证、复跑测试、auto 授权固化进确定性核心 |
 | **1.2** | 新增 `telemetry` 子命令族（emit/tail/agg/hotspots/estimate-tokens）+ events/pipeline/agent 自动 emit 钩子；`~/task_log/_telemetry/events.ndjson` 派生指标流落盘，主 session 仍零接触 |
 | 1.1 | 文档与版本对齐（初始 release 即包含 1.0 全部能力） |
 | 1.0 | 新增 `agent prompt render` / `agent spawn-prompt`，§A Implementer / §B Fixer 模板从 skill 文档下沉到 CLI 包资源；主 session 不再 Write 模板内容、不再把模板传给 Agent 工具 |

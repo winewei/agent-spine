@@ -4,13 +4,13 @@
 >
 > 主 session 调度、spine-coder 执行、确定性动作委托给安装后的 `npc` 命令（代码在 `src/npc`）。
 
-本仓库是 **harness 的上层**（plugin + skill + 宪法），并包含完整的确定性执行层代码（`src/npc`）。在仓库根执行 `uv tool install --from . npc` 后，本机得到的 `npc` 命令就是这个执行层。
+本仓库是 **harness 的上层**（plugin + skill + 原则），并包含完整的确定性执行层代码（`src/npc`）。在仓库根执行 `uv tool install --from . npc` 后，本机得到的 `npc` 命令就是这个执行层。
 
 - **智能层**：[`/spine-run`](plugins/agent-spine/commands/spine-run.md) 编排 plan→implement→review→fix→archive；[`/spine-analyze`](plugins/agent-spine/commands/spine-analyze.md) 自迭代。
 - **执行层**：[`spine-coder`](plugins/agent-spine/agents/spine-coder.md) subagent。
 - **底座**：安装后的 `npc` 命令（代码在 `src/npc`）。
 - **批量入口**：[`/new-plan-changes-v2`](plugins/agent-spine/commands/new-plan-changes-v2.md)（串行）、[`new-plan-changes-v3`](plugins/agent-spine/skills/new-plan-changes-v3/SKILL.md)（波次并行 worktree）与 [`new-plan-changes-v4`](plugins/agent-spine/skills/new-plan-changes-v4/SKILL.md)（v1.5 上下文预算版：每 change 三条 npc 命令——spawn / `npc integrate` / `npc change run`，主 session 只在决策分叉点出场）——按依赖顺序批量推进 OpenSpec active changes，共享同一个 `npc` 底座。
-- **宪法**：[docs/principles.md](docs/principles.md) 4 条不变量。
+- **原则**：[docs/principles.md](docs/principles.md) 4 条不变量。
 
 ---
 

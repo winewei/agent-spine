@@ -35,7 +35,7 @@ INIT=$(npc init ${AUTO:+--auto} ${FRESH:+--fresh})   # needs_resume / state_drif
 - **重定向纪律**：`needs_resume=true`、或你经历了任何 context compaction、或接手他人 session——一律先跑 `npc status --brief`，以其 `pending_decisions / notes / next_action` 重建盘面。**绝不信任你记忆里的进度。**
 - `init --auto` 弄脏 `.claude/settings.json` 时：tracked → `npc git commit --message "chore: npc auto-auth settings"`；untracked → 写入 `.git/info/exclude`。
 
-## Step 2 — 计划（唯一的重认知段，全部在 sub-agent 里）
+## Step 2 — 计划（唯一的重分析段，全部在 sub-agent 里）
 
 **你不读任何 proposal/design/tasks/spec 原文。**
 
