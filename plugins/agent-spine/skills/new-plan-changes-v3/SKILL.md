@@ -11,7 +11,7 @@ tags: [openspec, plan, implement, parallel, worktree, v3]
 
 > **三条核心原则**
 > 1. **只并行 implement**：最贵的环节（senior-code-developer 真写代码）并行掉；review/fix/archive 留在主分支线性链上，npc **零改动**。
-> 2. **切分全程 sub-agent**：DAG 抽取（§4.0 `dag-analyst`）+ 语义裁定（§4.9 双架构师）都在 sub-agent 内闭环，主 session 不读 N×4 份 proposal/design/tasks/spec_delta、只接 JSON；N 个 change 的上下文压力都摊到 sub-agent 上。安全优先——任一裁定 agent 要求串行即串行。
+> 2. **切分全程 sub-agent**：DAG 抽取（§4.0 `dag-analyst`）+ 语义裁定（§4.9 双架构师）都在 sub-agent 内完成，主 session 不读 N×4 份 proposal/design/tasks/spec_delta、只接 JSON；N 个 change 的上下文压力都摊到 sub-agent 上。安全优先——任一裁定 agent 要求串行即串行。
 > 3. **整合即锚定**：worktree commit 串行 cherry-pick 到 main 得新 hash，喂 `npc implement record`，commit chain 始终线性、可续跑。
 
 **与同类 skill 的关系**
@@ -141,7 +141,7 @@ npc task start --id "npc-v3-$RUN_TS" --description "new-plan-changes-v3 run" --s
 
 **plan 模式是给人看计划的约定，不是计算前提。`--auto` 下绝不进 plan 模式。**
 
-- **`--auto`（全自动，无人工门）**：跳过 `EnterPlanMode` / `ExitPlanMode`。§4.0 抽取由 sub-agent 闭环、§4.1–4.10 inline 编排，*DAG Plan Summary* / *Wave Plan Summary* 作为普通输出打印（仅留痕、不阻塞），§4.11 落地后**直接进入 Step 9**。整个 run 没有任何"按确认"动作——`ExitPlanMode` 本质就是审批门，调用它=请求批准，因此 `--auto` 一律不调。
+- **`--auto`（全自动，无人工门）**：跳过 `EnterPlanMode` / `ExitPlanMode`。§4.0 抽取由 sub-agent 完成、§4.1–4.10 inline 编排，*DAG Plan Summary* / *Wave Plan Summary* 作为普通输出打印（仅留痕、不阻塞），§4.11 落地后**直接进入 Step 9**。整个 run 没有任何"按确认"动作——`ExitPlanMode` 本质就是审批门，调用它=请求批准，因此 `--auto` 一律不调。
 - **交互模式（无 `--auto`）**：才 `EnterPlanMode`，§4.10 后 `ExitPlanMode` 等用户批准，再进 Step 9。
 
 > 唯一会让 `--auto` 停下的，是 Step 0 的**环境前置硬失败**（非 git 仓库 / 工作树脏 / `worktree.baseRef≠head`）与运行中 `npc` **exit 3**（编排基底坏掉）、`auto-decide` 返回 `abort`。运行中的 `npc` **exit 4** 与一切单 change 失败都**降级跳过、继续**（见 §参数表的失败分类），不打断。
@@ -512,7 +512,7 @@ Token 成本(npc cost): <按后端一行摘要，来自 $COST>
 ## 已知陷阱速查
 
 - **worktree.baseRef=fresh** → 每波从 origin 分叉，丢前序成果 → §0.3 硬校验报错。
-- **主 session 不该读 N 份 proposal**（v2 老问题：N 个 change 时主上下文线性污染）→ §4.0 `dag-analyst` sub-agent 闭环，主 session 只读 JSON；schema 校验失败重发一次，再失败 `--auto` 才降级回主 session 自抽。
+- **主 session 不该读 N 份 proposal**（v2 老问题：N 个 change 时主上下文线性污染）→ §4.0 `dag-analyst` sub-agent 完成，主 session 只读 JSON；schema 校验失败重发一次，再失败 `--auto` 才降级回主 session 自抽。
 - **§4.0 输出 schema 失效**（nodes 缺、files 漏、candidate 覆盖不全）→ 主 session 校验后拒收并重发；不允许沉默接收。
 - **同波次文件交集漏判**（proposal Affected Code 写不全）→ §4.0 sub-agent 用 Grep/Glob 把目录级写法展开为具体文件 + §4.9 工程师视角再核 + 整合阶段 cherry-pick 冲突兜底（abort + auto-decide 串行重 implement）。
 - **架构师 agent 为加速过度提级并行** → 合并规则安全优先（提级须双 agent 都判 independent + 给理由）；agent 不可用退化为 §4.0 候选（更保守）。

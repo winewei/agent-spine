@@ -3,7 +3,7 @@
 编排 skill（v2/v3）在 implementer 完成 / 波次收尾 / change 归档 / run 收尾等时刻
 调用本命令，把进度 POST 到外部 webhook（CI、群机器人、自建服务）。
 
-设计铁律：
+设计规则：
 
 - **无论何种失败都 exit 0**。webhook 挂了 / 超时 / 4xx 绝不允许中断 pipeline，
   失败只写 stderr 警告 + stdout 的 ``delivered:false``。
