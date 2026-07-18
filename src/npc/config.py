@@ -55,6 +55,7 @@ TOML 示例：
 
 from __future__ import annotations
 
+import string
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -367,7 +368,7 @@ def _build(data: dict, source: str) -> Config:
         ),
         host=HostConfig(
             name=_opt_str(host_raw.get("name"), "host.name", source),
-            session_dir=_opt_str(host_raw.get("session_dir"), "host.session_dir", source),
+            session_dir=_session_dir_template(host_raw.get("session_dir"), source),
         ),
         source=source,
     )
@@ -409,6 +410,28 @@ def _build_providers(
         except ConfigError as e:
             raise ConfigError(f"[providers.{name}]：{e}（{source}）") from e
     return tuple(by_name.values())
+
+
+def _session_dir_template(val: object, source: str) -> str | None:
+    """校验 ``host.session_dir`` 模板：仅允许 ``{proj_key}`` 占位符。
+
+    在加载期拦截语法错误 / 未知占位符，避免 init / session 识别路径上的
+    ``str.format`` 抛 KeyError（届时 run.json 可能已写盘，只能以 traceback 收场）。
+    """
+    tpl = _opt_str(val, "host.session_dir", source)
+    if tpl is None:
+        return None
+    try:
+        fields = [f for _, f, _, _ in string.Formatter().parse(tpl) if f is not None]
+    except ValueError as e:
+        raise ConfigError(f"host.session_dir 模板语法错误：{e}（{source}）")
+    bad = [f for f in fields if f != "proj_key"]
+    if bad:
+        raise ConfigError(
+            f"host.session_dir 含不支持的占位符 {{{bad[0]}}}"
+            f"（仅支持 {{proj_key}}；{source}）"
+        )
+    return tpl
 
 
 def _opt_str(val: object, name: str, source: str) -> str | None:
