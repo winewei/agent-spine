@@ -181,9 +181,9 @@ npc index append          # 追加跨 run 索引
 **用时**：<duration>
 
 ### 各 change
-- ✓ change-a  archived @ <commit>  (review 2 轮)
-- ✓ change-b  archived @ <commit>  (review 0 轮)
-- ✗ change-c  skipped — <reason>
+- change-a  archived @ <commit>  (review 2 轮)
+- change-b  archived @ <commit>  (review 0 轮)
+- change-c  skipped — <reason>
 
 ### 轨迹与日志（供后续分析）
 - 状态：<state_json 路径>

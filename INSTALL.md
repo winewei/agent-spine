@@ -52,7 +52,7 @@ claude plugin list | grep agent-spine
 ```bash
 npc doctor
 ```
-逐项检查 git/openspec/codex/claude/jq/schema/portable-timeout 等。`required`（git）必须 ✓；`openspec`（archive + 目标拆解）、`codex`（默认 review 引擎）缺则按需装——不阻断安装，但 `/spine-run` 跑到对应阶段会需要。
+逐项检查 git/openspec/codex/claude/jq/schema/portable-timeout 等。`required`（git）必须通过；`openspec`（archive + 目标拆解）、`codex`（默认 review 引擎）缺则按需装——不阻断安装，但 `/spine-run` 跑到对应阶段会需要。
 
 ---
 

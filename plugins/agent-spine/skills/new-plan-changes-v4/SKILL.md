@@ -99,7 +99,7 @@ BRIEF=$(npc status --brief)   # notes = 人的转向指令；消费后 npc state
 ```
 
 - `notes` 非空 → 按指令调整剩余计划（修剪范围/追加约束/改优先级），消费后打水位。
-- **re-plan 触发**（满足其一）：本波有 cherry-pick 冲突（DAG 漏边）、某 change 被 skip 且有下游依赖、人经 note 要求重排 → 对**剩余未完成集合**重跑 Step 2 的 dag-analyst + `npc plan waves`（交互档给人确认），run.events.jsonl 记 `{"type":"v4.replan","reason":...}`。计划是动词，不是开局刻好的碑文。
+- **re-plan 触发**（满足其一）：本波有 cherry-pick 冲突（DAG 漏边）、某 change 被 skip 且有下游依赖、人经 note 要求重排 → 对**剩余未完成集合**重跑 Step 2 的 dag-analyst + `npc plan waves`（交互档给人确认），run.events.jsonl 记 `{"type":"v4.replan","reason":...}`。
 
 ## Step 4 — 收尾
 
