@@ -1,6 +1,6 @@
 # 推荐用法：CLI + plugin + CLAUDE.md 三层配置
 
-`npc` 单独可用，但要发挥它作为**自主 harness 底座**的最大价值，需 **CLI + plugin + CLAUDE.md 三层一起配**。本文给出可直接照做的完整步骤。
+`npc` 单独可用，但它作为**自主 harness 底座**的价值要靠 **CLI + plugin + CLAUDE.md 三层一起配** 才能兑现。本文给出可直接照做的完整步骤。
 
 ---
 
@@ -83,7 +83,7 @@ harness 会：
 
 见仓库根 [README — Review 引擎配置](../README.md#review-引擎配置)。常见：用 `.npc/config.toml` 把 `engine` 切到 `claude`，`bin` + `extra_args` 路由到经 `--settings` 配置的 qwen / deepseek 后端。
 
-## Meta-loop 定时化：让自迭代闭环（v1.5，P8）
+## Meta-loop 定时化（v1.5，P8）
 
 design.md §11.6 第二阶段的落地方式：**定时自动跑 `/spine-analyze`，人闸不动（只产提案、不改代码）**。它把"人记得去跑分析"这个易失步骤自动化——telemetry 指标一直在积累，但没人看等于没有。
 

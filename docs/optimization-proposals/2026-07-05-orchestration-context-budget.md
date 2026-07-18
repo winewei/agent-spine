@@ -30,9 +30,9 @@ agent-spine 的"迭代"分三层，逐层结论：
 
 | 层 | 组成 | 评估 |
 |---|---|---|
-| ① 规划层 | `plan.py` / `waves.py`（Kahn 分层 + 路径前缀着色）/ v3 dag-analyst + 双架构师裁定 | ✅ 机械候选+语义裁定分工正确；❌ **一次性**——plan_order 开局冻结，无重规划回路 |
-| ② 微迭代 | review→fix 循环 + `trend.py` stale 闸门 + `auto-decide` | ✅ 有真终止保证（rsd≥3 + ≤20 轮）；⚠️ 循环体活在 skill 里（见 §2 账目） |
-| ③ 自迭代 | `telemetry.py` 派生指标 → `/spine-analyze` → optimization-proposals | ✅ 派生量+指针的取舍正确；❌ 只有手动触发，design §11.6 第二阶段未落地 |
+| ① 规划层 | `plan.py` / `waves.py`（Kahn 分层 + 路径前缀着色）/ v3 dag-analyst + 双架构师裁定 | 机械候选+语义裁定的分工是对的；短板是**一次性**——plan_order 开局冻结，无重规划回路 |
+| ② 微迭代 | review→fix 循环 + `trend.py` stale 闸门 + `auto-decide` | 有真终止保证（rsd≥3 + ≤20 轮）；问题是循环体活在 skill 里（见 §2 账目） |
+| ③ 自迭代 | `telemetry.py` 派生指标 → `/spine-analyze` → optimization-proposals | 派生量+指针的取舍是对的；缺口是只有手动触发，design §11.6 第二阶段未落地 |
 
 四条宪法不变量真实落到了代码层（`verify routing` / `verify tests` / `verify manifest` / 结构化契约），不是口号。
 
@@ -42,11 +42,11 @@ agent-spine 的"迭代"分三层，逐层结论：
 
 | 偏差产生层 | 现有机制 | 覆盖 |
 |---|---|---|
-| 实现↔spec | review→fix + stale | ✅ |
-| 自报↔实际 | verify tests / verify manifest | ✅ |
-| 状态↔现实 | state repair / drift 检测 | ✅ |
-| 拆解↔现实（DAG 漏边） | cherry-pick abort + 串行重实施 | ⚠️ 只有兜底 |
-| 设计↔目标 / spec↔现实 / 目标↔需求 | 无 | ❌（人驾驭定位下由**人**承担，见 §1.2） |
+| 实现↔spec | review→fix + stale | 有 |
+| 自报↔实际 | verify tests / verify manifest | 有 |
+| 状态↔现实 | state repair / drift 检测 | 有 |
+| 拆解↔现实（DAG 漏边） | cherry-pick abort + 串行重实施 | 只有兜底 |
+| 设计↔目标 / spec↔现实 / 目标↔需求 | 无 | 无（人驾驭定位下由**人**承担，见 §1.2） |
 
 关键原则：**偏差应在产生层修复，而非在发现层被反复补偿**。设计层的错在实现层表现为反复 blocking→stale→skip；skip 是止损不是纠偏。
 
@@ -174,7 +174,7 @@ stdout: {"ok":true,"tasks_done":14,"tasks_total":17,"result_claim":"partial","co
 
 主 session 与人永远只看 `tasks_done/tasks_total` 两个数，不看清单。人的驾驭界面 = `npc status` + `npc watch` + `notify` 仪表盘，不是滚动的 session 记录。
 
-### 3.7 P6 — re-plan 解禁：计划从名词变动词
+### 3.7 P6 — re-plan：对剩余集合按需重排
 
 新增 skill 层约定（npc 零新代码）：当出现 ①某 change 被 skip 且有下游依赖、②cherry-pick 冲突暴露 DAG 漏边、③人经 note 转向时，对**剩余未完成集合**重新走 §4.0 dag-analyst → `npc plan waves` → （交互档）人确认 → `state init-run` 追加式更新剩余 plan_order。留痕：run.events.jsonl 记 `{"type":"v3.replan","reason":...,"before":[...],"after":[...]}`。
 
