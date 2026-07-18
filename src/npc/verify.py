@@ -93,14 +93,18 @@ def resolve_test_cmd(repo_root: Path, cfg: _config.Config) -> str | None:
 
     优先级：
     1. ``cfg.verify.test`` 显式覆盖。
-    2. Python：有 ``pyproject.toml`` 或 ``pytest.ini`` 或 ``tests/`` 目录
+    2. Go：有 ``go.mod`` → ``go test ./...``。
+    3. Python：有 ``pyproject.toml`` 或 ``pytest.ini`` 或 ``tests/`` 目录
        → ``python3 -m pytest -q``。
-    3. Node：有 ``package.json`` 且 ``scripts.test`` 非空 → ``npm test``。
-    4. Make：有 ``Makefile`` 且含 ``test:`` 目标 → ``make test``。
-    5. 都没有 → ``None``。
+    4. Node：有 ``package.json`` 且 ``scripts.test`` 非空 → ``npm test``。
+    5. Make：有 ``Makefile`` 且含 ``test:`` 目标 → ``make test``。
+    6. 都没有 → ``None``。
     """
     if cfg.verify.test:
         return cfg.verify.test
+
+    if (repo_root / "go.mod").is_file():
+        return "go test ./..."
 
     if (
         (repo_root / "pyproject.toml").is_file()
