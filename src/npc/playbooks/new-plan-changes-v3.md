@@ -25,7 +25,7 @@ tags: [openspec, plan, implement, parallel, worktree, v3]
 > 3. **整合即锚定**：worktree commit 串行 cherry-pick 到 main 得新 hash，喂 `npc implement record`，commit chain 始终线性、可续跑。
 
 **与同类 skill 的关系**
-- `new-plan-changes-v2`：纯串行，npc pipeline。v3 是其并行超集，**复用其全部 npc 命令**（init/resume/state/agent/review/fix/archive/finalize/telemetry）。本文档只描述差异部分；§10.2–10.5 与 Step 11 行为与 v2 完全一致，需要细节时对照本插件内 `commands/new-plan-changes-v2.md`。
+- `new-plan-changes-v2`：纯串行，npc pipeline。v3 是其并行超集，**复用其全部 npc 命令**（init/resume/state/agent/review/fix/archive/finalize/telemetry）。本文档只描述差异部分；§10.2–10.5 与 Step 11 行为与 v2 完全一致，需要细节时对照同包分发的 v2 playbook（`npc playbook show new-plan-changes-v2`，或已安装宿主目录下的同名文件）。
 - `architect-swarm`：并行 worktree 但无 commit/review/archive/持久日志。v3 借用其 worktree 隔离 + manifest + plan-only 重试机制（1.4 起由 `npc verify manifest` 承担，兼容其 legacy JSON RESULT 格式）。
 
 **前置条件**
