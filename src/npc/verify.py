@@ -355,11 +355,21 @@ def parse_result_verdict(result_line: str, manifest_arg: str | None) -> dict:
     return {"verdict": "plan_only", "reason": "no_result_line", "commit": None, "manifest": manifest_arg}
 
 
-def check_manifest_files(manifest_path: str | None) -> dict:
+def check_manifest_files(
+    manifest_path: str | None,
+    *,
+    repo_root: Path | None = None,
+    git_ref: str | None = None,
+    runner=subprocess.run,
+) -> dict:
     """核对 manifest 声明的 files_written：存在性 + 可选 sha256。
 
     条目可以是纯路径字符串或 ``{path, sha256}`` 对象。返回
     ``{ok, reason, present, missing, sha_mismatch, total}``。
+
+    默认对工作树做核验；传入 ``git_ref``（配合 ``repo_root``）时改为对该
+    commit 的 tree 核验——worktree 并行流程里 implementer 的产出在
+    cherry-pick 之前只存在于 worktree 分支 commit 上，主工作树核验必然误报。
     """
 
     def fail(reason: str) -> dict:
@@ -383,12 +393,34 @@ def check_manifest_files(manifest_path: str | None) -> dict:
         # path 时返回结构化失败，而不是让 .get() 抛裸 traceback。
         if not isinstance(entry, dict) or not isinstance(entry.get("path"), str) or not entry["path"]:
             return fail("manifest_malformed_entry")
-        path = Path(entry["path"])
+        rel = entry["path"]
+        declared = entry.get("sha256")
+        # 绝对路径（v3 契约：指向仍存活的 worktree）走磁盘核验；
+        # 相对路径在给定 git_ref 时对 worktree commit 的 tree 核验。
+        if git_ref and not Path(rel).is_absolute():
+            root = repo_root or Path.cwd()
+            probe = runner(
+                ["git", "-C", str(root), "cat-file", "-e", f"{git_ref}:{rel}"],
+                capture_output=True,
+                text=True,
+            )
+            if probe.returncode != 0:
+                missing.append(rel)
+                continue
+            present += 1
+            if declared:
+                blob = runner(
+                    ["git", "-C", str(root), "show", f"{git_ref}:{rel}"],
+                    capture_output=True,
+                )
+                if hashlib.sha256(blob.stdout).hexdigest() != declared:
+                    sha_mismatch.append(rel)
+            continue
+        path = Path(rel)
         if not path.is_file():
             missing.append(str(path))
             continue
         present += 1
-        declared = entry.get("sha256")
         if declared and _sha256_of(path) != declared:
             sha_mismatch.append(str(path))
 

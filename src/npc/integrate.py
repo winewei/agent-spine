@@ -109,7 +109,9 @@ def run_integrate(
             "verify-manifest", parsed["reason"] or parsed["verdict"], seq=seq,
             extra={"verdict": parsed["verdict"]},
         )
-    files = _verify.check_manifest_files(parsed["manifest"])
+    files = _verify.check_manifest_files(
+        parsed["manifest"], repo_root=p.repo_root, git_ref=parsed["commit"], runner=runner,
+    )
     if not files["ok"]:
         return _fail(
             "verify-manifest", files["reason"], seq=seq,
