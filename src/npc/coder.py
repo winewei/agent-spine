@@ -1,8 +1,8 @@
 """Coder（执行体）子进程编排：把 implement / fix 阶段的 coder 子进程折进 npc。
 
 对标 ``pipeline.run_review_round``，但方向相反——review 是验证闸门（恒留 premium
-引擎），coder 是 bulk 生成工作（默认路由到廉价层 MiMo）。本模块是 Python 等价的
-``spine-coder-mimo.sh``：
+引擎），coder 是 bulk 生成工作（默认路由到廉价层 MiMo）。本模块是历史脚本
+``spine-coder-mimo.sh``（v1.7 已随 plugin 层移除）的 Python 等价与唯一实现：
 
 1. ``_do_phase_enter`` 标记 phase 进入
 2. 复用 agent 模板渲染 prompt 文件 + 取引导语

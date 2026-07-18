@@ -71,7 +71,7 @@
 5. **写 `<task_log_dir>/active.json`**（0.2+，指针指向本次 run_ts；原子写）
 6. 自举 `~/task_log/.new-plan-review-schema.json`（不存在时写）
 7. 自举 `~/.local/bin/portable-timeout`（不存在或非可执行时写）
-8. 识别当前 cc session_id（mtime 启发 + by-cwd hook 兜底，详见 `session` 模块）
+8. 解析宿主（`[host]` 配置 > `CLAUDECODE` env → claude > generic，v1.7）并识别当前宿主 session_id（宿主 session 目录 mtime 启发 + by-cwd hook 兜底，详见 `session` / `hosts` 模块；generic 宿主只走 hook 路径）
 9. **不写 STATE_JSON 文件**——由后续 `npc state init-run` 或 plan 流程内首次 `state add-change` 触发写入；`init` 仅负责"环境检测 + 路径计算 + 上下文落盘"
 10. 探测续跑：扫 `$TASK_LOG_DIR/*-plan-state.json` 找 `status=in-progress` 最新一份；若存在且非 `--fresh`，输出 `needs_resume: true` 与候选 `STATE_JSON` 路径（同时复用旧 run 的 `run_ts`，使后续命令仍能 resolve 到旧 run）
 
@@ -100,6 +100,7 @@
   "session_id": "018f5c4a-...-9b3e",
   "transcript_path": "/Users/you/.claude/projects/.../018f5c4a.jsonl",
   "session_source": "mtime-1min",
+  "host": {"name": "claude", "source": "env", "session_dir": "/Users/you/.claude/projects/-Users-you-code-foo"},
   "needs_resume": false,
   "resume_state_json": null,
   "mode": "auto",
@@ -129,9 +130,11 @@ export NPC_RESUME_STATE_JSON=''
 
 续跑场景：当 `needs_resume=true` 时，`NPC_STATE_JSON` 指向旧 run 的 state 文件（不是新建的）；`NPC_RUN_TS / NPC_RUN_DIR` 也指向旧 run。
 
-**stderr**：警告（如 cc projects 目录缺失、portable-timeout 自举成功提示）
+**stderr**：警告（如宿主 session 目录缺失、portable-timeout 自举成功提示）
 
-**exit**：`0` 正常；`3` 非 git 仓库或缺 `~/.claude/projects/<PROJ_KEY>` 目录（仅警告，仍出环境变量；exit 仍是 0）
+**宿主分流（v1.7）**：`host.name == "claude"` 且 `--auto` 时写 `<repo>/.claude/settings.json` 授权（`auto_auth` 字段汇报结果）；其它宿主 `auto_auth = {"ok": false, "skipped": "host-<name>-no-settings-grant"}`，权限按宿主自身机制放行。`host.session_dir` 为 null 表示该宿主无 mtime 启发能力（可用 `[host].session_dir` 配置模板补上）。
+
+**exit**：`0` 正常（缺宿主 session 目录仅警告）；`3` 非 git 仓库
 
 ---
 
@@ -1338,7 +1341,7 @@ best-effort webhook 推送。URL 解析顺序：`--url` > `$NPC_WEBHOOK` > `$NPC
 
 环境前置体检：git / openspec / codex / claude / jq / portable-timeout（PATH 或 `~/.local/bin` 自举）/ review schema 自举情况 / mimo.env 成本路由 / npc config 可加载性 / 路由在用 provider 就绪性（v1.6+）/ `docs/principles.md`。除 `git` 外全部是 warn 级、不阻塞。
 
-**做什么**：对 `_BIN_CHECKS`（`git` 必备，`openspec`/`codex`/`claude`/`jq` 可选）逐个查 PATH；`portable-timeout` 额外查 `~/.local/bin` 自举位置并校验可执行位；`schema` 检查 `~/task_log/.new-plan-review-schema.json` 是否存在且为合法 JSON；`mimo.env` 检查 `~/.config/npc/mimo.env` 是否存在可读；`config` 尝试 `load_config`（失败降级 warn，不阻塞）；`providers`（v1.6+）对 coder 路由实际引用的每个 provider 检查 env_file 存在可读 + runner 可执行文件可用（未被引用的定义不产生噪音，问题一律 warn 不阻塞）；`principles.md` 检查 `<repo>/docs/principles.md`。
+**做什么**：对 `_BIN_CHECKS`（`git` 必备，`openspec`/`codex`/`claude`/`jq` 可选）逐个查 PATH；`portable-timeout` 额外查 `~/.local/bin` 自举位置并校验可执行位；`schema` 检查 `~/task_log/.new-plan-review-schema.json` 是否存在且为合法 JSON；`mimo.env` 检查 `~/.config/npc/mimo.env` 是否存在可读；`config` 尝试 `load_config`（失败降级 warn，不阻塞）；`providers`（v1.6+）对 coder 路由实际引用的每个 provider 检查 env_file 存在可读 + runner 可执行文件可用（未被引用的定义不产生噪音，问题一律 warn 不阻塞）；`host`（v1.7+）报告解析出的宿主（名字/来源/session 识别能力，信息级恒 ok）；`principles.md` 检查 `<repo>/docs/principles.md`。
 
 **stdout（单行，`ok` 恒真实反映 required 缺失情况；required 缺失时同一行内嵌 `error`/`message`）**：
 
@@ -1355,6 +1358,7 @@ best-effort webhook 推送。URL 解析顺序：`--url` > `$NPC_WEBHOOK` > `$NPC
     {"name": "schema", "status": "ok", "detail": "已存在：...", "required": false},
     {"name": "mimo.env", "status": "warn", "detail": "成本路由 mimo.env 缺失：...；coder 将走默认 premium 层", "required": false},
     {"name": "config", "status": "ok", "detail": "使用内置默认配置（未找到配置文件）", "required": false},
+    {"name": "host", "status": "ok", "detail": "宿主 claude（来源 env）；session 目录模板 .claude/projects/{proj_key}", "required": false},
     {"name": "principles.md", "status": "ok", "detail": "已存在：...", "required": false}
   ],
   "summary": {"ok": 8, "warn": 2, "missing": 0, "missing_required": []}
@@ -1876,6 +1880,51 @@ stdout（`--once`）：
 
 ---
 
+## 9d. Playbook 分发（v1.7+，去 plugin 化）
+
+v1.7 起仓库不再发布 Claude Code plugin；原 plugin 的 commands / skills / agents 以宿主中立措辞收编为包资源 `src/npc/playbooks/`，经以下命令分发。
+
+### `npc playbook list`
+
+**stdout**：
+
+```json
+{"ok": true, "playbooks": [
+  {"name": "spine-run", "kind": "command", "summary": "...", "bytes": 11630},
+  {"name": "new-plan-changes-v3", "kind": "skill", "summary": "...", "bytes": 40777},
+  {"name": "spine-coder", "kind": "agent", "summary": "...", "bytes": 4683}
+]}
+```
+
+**exit**：`0`
+
+### `npc playbook show <name>`
+
+输出 playbook 原文 markdown 到 stdout——**stdout 单行 JSON 契约的唯一例外**，设计给任意宿主把工作流直接拉进 context 执行。错误路径（未知名字）仍是单行 JSON + exit 2。
+
+**exit**：`0` 成功；`2` 未知 playbook 名
+
+### `npc playbook install (--host claude|codex | --dest DIR) [--name N ...]`
+
+物化 playbooks 到宿主目录（**写盘副作用**；幂等覆盖，升级 npc 后重跑即同步内容）。
+
+- `--host claude`：command → `~/.claude/commands/<name>.md`；skill → `~/.claude/skills/<name>/SKILL.md`；agent → `~/.claude/agents/<name>.md`
+- `--host codex`：command/skill → `~/.codex/prompts/<name>.md`；agent 无对应机制 → 记入 `skipped`
+- `--dest DIR`：全部平铺为 `DIR/<name>.md`（任意其它宿主自行挂载）
+- `--name` 可多次，只装子集；缺省装全部
+
+**stdout**：
+
+```json
+{"ok": true, "host": "claude",
+ "installed": [{"name": "spine-run", "kind": "command", "path": "/Users/you/.claude/commands/spine-run.md", "replaced": false}],
+ "skipped": []}
+```
+
+**exit**：`0` 成功；`2` 用法错（--host/--dest 二选一、未知 host 或 playbook 名）；`3` 写盘失败
+
+---
+
 ## 10. 出错语义示例
 
 所有命令失败时：
@@ -1995,6 +2044,7 @@ npc index append
 
 | 版本 | 关键变化 |
 |---|---|
+| **1.7** | 宿主中立化 + 去 plugin 发布：新增 `hosts.py` 宿主抽象与 `[host]` 配置（name/session_dir；探测顺序 config > CLAUDECODE env > generic），init payload 增 `host` 字段、generic 宿主跳过 auto 授权、session 识别按宿主分流（generic 只走 by-cwd hook）；focus/templates 项目上下文 `CLAUDE.md`→`AGENTS.md` fallback、prompt 措辞去工具专名；新增 `playbook list/show/install`（§9d），原 plugin 内容收编进包资源，删除 marketplace/plugin manifest；`doctor` 新增 `host` 检查 |
 | **1.6** | Provider 注册表：config 新增 `[providers.*]`（runner/env_file/model/bin，内置 claude/mimo/codex），coder 可路由到任意 Anthropic 兼容端点（kimi/qwen/deepseek/...）与 `codex exec`（coder 的 codex-cli 路径补齐）；配置查找链改为分层深合并（全局定义 provider、项目只写路由）；`--backend` 接受 provider 名；`verify routing` 规则 3 更名 `cheap_exec_only` 并泛化到全部带 env_file 的 provider；`doctor` 新增 `providers` 检查 |
 | **1.5** | 内环与整合下沉（§8f）：新增 `change run`（单 change 内环编排）与 `integrate`（worktree 产物整合进 main），上下文预算重构 |
 | **1.4** | 新增 `plan waves` / `verify manifest` / `notify`：/new-plan-changes-v3 的全部 skill 脚本下沉为契约化子命令，skill 侧零脚本 |

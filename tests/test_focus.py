@@ -132,3 +132,30 @@ def test_render_round_n_includes_history_hints(env_setup, capsys, make_args, tmp
     assert "第 2 轮" in text
     assert "abc1234~1..HEAD" in text
     assert "Round 0 ~ Round 1 段落" in text
+
+
+# ============================================================
+# v1.7 AGENTS.md fallback
+# ============================================================
+
+
+def test_load_project_context_agents_md_fallback(fake_repo: Path):
+    (fake_repo / "AGENTS.md").write_text(
+        "# 项目\n\n## 评审重点\n\n- 来自 AGENTS 的约束\n", encoding="utf-8"
+    )
+    text, label = _focus.load_project_context(fake_repo)
+    assert label == "AGENTS.md"
+    assert "来自 AGENTS 的约束" in text
+
+
+def test_load_project_context_claude_md_wins_over_agents_md(fake_repo: Path):
+    (fake_repo / "CLAUDE.md").write_text(
+        "## 评审重点\n\n- 来自 CLAUDE 的约束\n", encoding="utf-8"
+    )
+    (fake_repo / "AGENTS.md").write_text(
+        "## 评审重点\n\n- 来自 AGENTS 的约束\n", encoding="utf-8"
+    )
+    text, label = _focus.load_project_context(fake_repo)
+    assert label == "CLAUDE.md"
+    assert "来自 CLAUDE 的约束" in text
+    assert "来自 AGENTS 的约束" not in text

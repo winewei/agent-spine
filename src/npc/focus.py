@@ -1,8 +1,8 @@
 """Codex review focus 文本渲染。
 
 - Round 0 与 Round N 用不同模板（N>=1 强调 carry-over 与 Fixer 自报证据校验）
-- PROJECT_REVIEW_CONTEXT 抽取：从 openspec/project.md / CLAUDE.md 找特定章节，
-  都没有则用默认中性约束
+- PROJECT_REVIEW_CONTEXT 抽取：从 openspec/project.md 与项目根 CLAUDE.md
+  （缺失时 fallback AGENTS.md，宿主中立）找特定章节，都没有则用默认中性约束
 """
 
 from __future__ import annotations
@@ -105,7 +105,7 @@ REVIEW_HEADING_PATTERNS = [
 DEFAULT_PROJECT_CONTEXT = """项目级评审约束（默认）：
 - 本次评审目标是验证「实现是否对齐 spec」，请优先核对 proposal / tasks / specs / design 中的明确要求。
 - tasks.md 中明确指定的实现方式（如"取 cells[0]"、"取最新 timestamp"）视为项目权威决策，不报告与之冲突的"应改为..."建议。
-- 项目级文档（project.md / CLAUDE.md）中的约定（如错误处理 pattern、测试规范、命名）视为约束，违反这些才报；未在文档明确的"业界最佳实践"不作为 high/critical 阻塞，必要时归类为 medium/low advisory。
+- 项目级文档（project.md / CLAUDE.md / AGENTS.md）中的约定（如错误处理 pattern、测试规范、命名）视为约束，违反这些才报；未在文档明确的"业界最佳实践"不作为 high/critical 阻塞，必要时归类为 medium/low advisory。
 - 若不确定某个行为是 spec 故意决策还是实现疏漏，优先查阅 design.md 的 Decisions 段，再决定是否报告。
 - 与本次 change diff 无直接关联的既有问题，请置 in_scope=false。"""
 
@@ -152,7 +152,9 @@ def load_project_context(
 ) -> tuple[str, str]:
     """返回 (context_text, source_label)。
 
-    source_label 取值：override / openspec/project.md / CLAUDE.md / both / default
+    source_label 取值：override / openspec/project.md / CLAUDE.md / AGENTS.md / both / default。
+    项目上下文文件宿主中立：优先 CLAUDE.md，抽不到章节时 fallback 到 AGENTS.md
+    （kimi / codex 等宿主的通用项目说明文件）。
     """
     if override_path is not None:
         if not override_path.exists():
@@ -169,12 +171,15 @@ def load_project_context(
             parts.append(sec)
             sources.append("openspec/project.md")
 
-    claude_file = repo_root / "CLAUDE.md"
-    if claude_file.exists():
-        sec = _extract_section(claude_file.read_text(encoding="utf-8"), REVIEW_HEADING_PATTERNS)
+    for context_name in ("CLAUDE.md", "AGENTS.md"):
+        context_file = repo_root / context_name
+        if not context_file.exists():
+            continue
+        sec = _extract_section(context_file.read_text(encoding="utf-8"), REVIEW_HEADING_PATTERNS)
         if sec:
             parts.append(sec)
-            sources.append("CLAUDE.md")
+            sources.append(context_name)
+            break  # CLAUDE.md 抽到章节即不再读 AGENTS.md（fallback 而非叠加）
 
     if parts:
         label = sources[0] if len(sources) == 1 else "both"
@@ -194,7 +199,7 @@ def _round_0_template(change_id: str, project_context: str) -> str:
 - openspec/changes/{change_id}/specs/ 目录下所有 spec.md（目标规格；若目录不存在则跳过）
 - openspec/changes/{change_id}/design.md（设计方案；若文件不存在则跳过）
 - openspec/project.md（项目级技术约定）
-- 项目根 CLAUDE.md（验收规范与提交约束）
+- 项目根 CLAUDE.md 或 AGENTS.md（验收规范与提交约束；存在哪个读哪个）
 
 {project_context}
 
@@ -203,7 +208,7 @@ def _round_0_template(change_id: str, project_context: str) -> str:
 2. 是否符合 design 中明确的接口契约、不变量、错误处理与边界条件
 3. 是否引入与目标 spec.md 冲突的行为（命名、字段语义、状态机、错误码等）
 4. 测试是否覆盖 spec 列出的验收场景与显式标注的边界情况；对并发 / 事务 / 锁 / 重试 / 竞态 / 部分失败场景，mock-only 测试视为"未充分覆盖"
-5. 与 project.md / CLAUDE.md 中规定的项目级约束的一致性
+5. 与 project.md / CLAUDE.md（或 AGENTS.md）中规定的项目级约束的一致性
 
 **输出要求（极重要）**：
 - 你的最终消息必须是**且仅是**一个合法的 JSON 对象，符合本次调用提供的 output-schema。
@@ -235,7 +240,7 @@ def _round_n_template(
 - openspec/changes/{change_id}/tasks.md
 - openspec/changes/{change_id}/specs/ 下 spec.md（如存在）
 - openspec/changes/{change_id}/design.md（如存在）
-- openspec/project.md 与项目根 CLAUDE.md
+- openspec/project.md 与项目根 CLAUDE.md（或 AGENTS.md）
 - $LOG_BASE/change.md 的 Round 0 ~ Round {round_n - 1} 段落（已识别 findings、已落地修复、Issue Category Tracker）
 - 上轮 fix.summary.md：$LOG_BASE/round-{round_n}.fix.summary.md 中的 "Locations Scanned" 和 "Real Regressions" 段——这是 Fixer 自报的修复证据，请验证是否属实
 
@@ -247,7 +252,7 @@ def _round_n_template(
 2. 修复是否引入新的与 spec 冲突的行为或回归
 3. 对并发 / 事务类 finding：Fixer 提供的真实回归是否真的触发了被修复路径；如果只有 mock-only 测试，请在 finding 里明确指出"需补真实回归"
 4. 是否仍存在 spec 列明但实现遗漏的 requirement / 边界场景
-5. 与 project.md / CLAUDE.md 约束的一致性
+5. 与 project.md / CLAUDE.md（或 AGENTS.md）约束的一致性
 
 请直接报告本轮的新 findings 或仍未修复的 carry-over findings；不要重复列已修复的项。**对前几轮已被标注为"spec-aligned 不修"的 finding（见 $LOG_BASE/change.md 的 Carried Over / Advisory 段），不再重报**。
 

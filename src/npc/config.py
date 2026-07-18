@@ -42,6 +42,10 @@ TOML 示例：
     model = "claude-opus-4-7"  # 可省略；省略则使用 claude 的默认 model
     extra_args = ["--permission-mode", "default"]
 
+    [host]                     # 宿主 CLI（可省略；默认 env 探测：CLAUDECODE → claude，否则 generic）
+    name = "generic"           # claude | generic | 任意自定义名
+    session_dir = ".kimi/sessions/{proj_key}"  # 可选：为非 Claude 宿主补 session 目录模板
+
 内置 provider（无需声明即可用，可被 ``[providers.*]`` 同名覆盖）：
 
 - ``claude``：claude-cli，无 env_file（订阅 / 当前 provider）
@@ -157,6 +161,20 @@ class CoderConfig:
 
 
 @dataclass(frozen=True)
+class HostConfig:
+    """宿主（调用 npc 的 agent CLI）配置。
+
+    - ``name``：``claude`` / ``generic`` / 任意自定义名；None = 自动探测
+      （``CLAUDECODE`` env → claude，否则 generic）。
+    - ``session_dir``：相对 home 的 session 目录模板（``{proj_key}`` 占位），
+      为非 Claude 宿主补 mtime 启发识别能力；None = 用宿主内置默认。
+    """
+
+    name: str | None = None
+    session_dir: str | None = None
+
+
+@dataclass(frozen=True)
 class VerifyConfig:
     """质量门命令覆盖；任一省略则由 ``npc verify`` 按 repo 清单自动探测。"""
 
@@ -173,6 +191,7 @@ class Config:
     review: ReviewEngineConfig = field(default_factory=ReviewEngineConfig)
     coder: CoderConfig = field(default_factory=CoderConfig)
     verify: VerifyConfig = field(default_factory=VerifyConfig)
+    host: HostConfig = field(default_factory=HostConfig)
     providers: tuple[ProviderConfig, ...] = BUILTIN_PROVIDERS
     source: str = "<default>"
 
@@ -320,6 +339,10 @@ def _build(data: dict, source: str) -> Config:
     if not isinstance(verify_raw, dict):
         raise ConfigError(f"[verify] 节必须是 table（{source}）")
 
+    host_raw = data.get("host") or {}
+    if not isinstance(host_raw, dict):
+        raise ConfigError(f"[host] 节必须是 table（{source}）")
+
     return Config(
         providers=providers,
         review=ReviewEngineConfig(
@@ -341,6 +364,10 @@ def _build(data: dict, source: str) -> Config:
             lint=_opt_str(verify_raw.get("lint"), "verify.lint", source),
             typecheck=_opt_str(verify_raw.get("typecheck"), "verify.typecheck", source),
             build=_opt_str(verify_raw.get("build"), "verify.build", source),
+        ),
+        host=HostConfig(
+            name=_opt_str(host_raw.get("name"), "host.name", source),
+            session_dir=_opt_str(host_raw.get("session_dir"), "host.session_dir", source),
         ),
         source=source,
     )

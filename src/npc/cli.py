@@ -92,7 +92,7 @@ stdout（--shell-exports，已 Deprecated 0.2）:
   一系列 export NPC_XXX='...' 行（stderr 打 deprecation warning）
 
 exit code:
-  0  正常（非 git 仓库 / 缺 ~/.claude/projects/<PROJ_KEY> 仅告警，仍 exit 0）
+  0  正常（非 git 仓库 / 缺宿主 session 目录仅告警，仍 exit 0）
   3  致命环境错误
 """,
     )
@@ -500,7 +500,7 @@ stdout（成功）:
    "categories": [...], "stale": <bool>, "rounds_since_strict_decrease": <int>,
    "blocking_trend": [...], "review_json": "<path>", "events_path": "<path>",
    "focus_path": "<path>", "findings_path": "<path>|null",
-   "project_context_source": "openspec/project.md|CLAUDE.md|both|default"}
+   "project_context_source": "openspec/project.md|CLAUDE.md|AGENTS.md|both|default"}
 
 stdout（失败）:
   {"ok": false, "seq": <int>, "round": <int>, "error": "codex-exec-failed",
@@ -545,11 +545,11 @@ exit code:
         formatter_class=_EPILOG_FMT,
         epilog="""\
 --project-context 未传时自动从 <repo>/openspec/project.md 与 <repo>/CLAUDE.md
-抽"评审重点"/"威胁模型"/"Review Context"/"Threat Model" 章节；都无则用默认中性约束。
+（缺则 fallback AGENTS.md）抽"评审重点"/"威胁模型"/"Review Context"/"Threat Model" 章节；都无则用默认中性约束。
 
 stdout:
   {"ok": true, "output": "<path>", "bytes": <int>,
-   "project_context_source": "openspec/project.md|CLAUDE.md|both|default"}
+   "project_context_source": "openspec/project.md|CLAUDE.md|AGENTS.md|both|default"}
 
 exit code:
   0  成功
@@ -564,7 +564,7 @@ exit code:
     p_focus_render.add_argument(
         "--project-context",
         default=None,
-        help="自定义 PROJECT_REVIEW_CONTEXT 文件；未传则从 openspec/project.md + CLAUDE.md 抽",
+        help="自定义 PROJECT_REVIEW_CONTEXT 文件；未传则从 openspec/project.md + CLAUDE.md（或 AGENTS.md）抽",
     )
     p_focus_render.set_defaults(
         handler=_make_handler("focus", "render"), _cmd_path="focus render"
@@ -1046,6 +1046,86 @@ exit code:
 """,
     )
     p_doctor.set_defaults(handler=_make_handler("doctor", "run"), _cmd_path="doctor")
+
+    # ===== playbook =====
+    p_pb = sub.add_parser(
+        "playbook",
+        help="宿主中立 harness playbook 分发（list / show / install）",
+    )
+    sub_pb = p_pb.add_subparsers(dest="playbook_cmd", required=True)
+    p_pb_list = sub_pb.add_parser(
+        "list",
+        help="枚举随 npc 包发行的全部 playbook",
+        formatter_class=_EPILOG_FMT,
+        epilog="""\
+stdout:
+  {"ok": true, "playbooks": [{"name","kind":"command|skill|agent","summary","bytes"}, ...]}
+
+exit code:
+  0  成功
+""",
+    )
+    p_pb_list.set_defaults(
+        handler=_make_handler("playbook", "cli_list"), _cmd_path="playbook list"
+    )
+    p_pb_show = sub_pb.add_parser(
+        "show",
+        help="输出单个 playbook 的 raw markdown（唯一非 JSON stdout 例外）",
+        formatter_class=_EPILOG_FMT,
+        epilog="""\
+stdout:
+  playbook 原文 markdown（**非 JSON**——设计给任意宿主直接拉进 context 用；
+  错误路径仍是单行 JSON + exit code）
+
+exit code:
+  0  成功
+  2  未知 playbook 名
+""",
+    )
+    p_pb_show.add_argument("name", help="playbook 名（见 playbook list）")
+    p_pb_show.set_defaults(
+        handler=_make_handler("playbook", "cli_show"), _cmd_path="playbook show"
+    )
+    p_pb_install = sub_pb.add_parser(
+        "install",
+        help="物化 playbooks 到宿主命令/技能目录（写盘副作用）",
+        formatter_class=_EPILOG_FMT,
+        epilog="""\
+--host 预置目标：
+  claude  command → ~/.claude/commands/；skill → ~/.claude/skills/<name>/SKILL.md；
+          agent → ~/.claude/agents/
+  codex   command/skill → ~/.codex/prompts/；agent 无对应机制（记入 skipped）
+--dest DIR：全部平铺为 DIR/<name>.md（其它任意宿主自行挂载）
+
+幂等：已存在的目标文件被覆盖（以 npc 包内版本为准；升级 npc 后重跑同步）。
+
+stdout:
+  {"ok": true, "host"|"dest": "...",
+   "installed": [{"name","kind","path","replaced"}, ...],
+   "skipped": [{"name","reason"}, ...]}
+
+exit code:
+  0  成功
+  2  用法错（--host/--dest 二选一、未知 host/playbook 名）
+  3  写盘失败
+""",
+    )
+    p_pb_install.add_argument(
+        "--host", default=None, help="目标宿主预置：claude | codex"
+    )
+    p_pb_install.add_argument(
+        "--dest", default=None, help="任意目标目录（与 --host 二选一）"
+    )
+    p_pb_install.add_argument(
+        "--name",
+        dest="names",
+        action="append",
+        default=None,
+        help="只装指定 playbook（可多次；缺省装全部）",
+    )
+    p_pb_install.set_defaults(
+        handler=_make_handler("playbook", "cli_install"), _cmd_path="playbook install"
+    )
 
     # ===== spec =====
     p_spec = sub.add_parser("spec", help="spec 一致性分析")

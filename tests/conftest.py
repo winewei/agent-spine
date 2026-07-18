@@ -70,6 +70,13 @@ def make_args():
 
 
 @pytest.fixture(autouse=True)
+def pin_host_env(monkeypatch) -> None:
+    """固定宿主探测 env：默认按 claude 宿主跑（既有测试语义），与是否真跑在
+    Claude Code / CI 里无关。generic 宿主行为由专门测试显式 delenv。"""
+    monkeypatch.setenv("CLAUDECODE", "1")
+
+
+@pytest.fixture(autouse=True)
 def isolate_telemetry(tmp_path: Path, monkeypatch) -> Path:
     """把 NPC_TELEMETRY_ROOT 隔离到 tmp，避免污染真实 ~/task_log/_telemetry。"""
     tel_root = tmp_path / "_telemetry"

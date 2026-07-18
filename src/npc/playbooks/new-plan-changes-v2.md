@@ -5,6 +5,16 @@ category: OpenSpec
 tags: [openspec, plan, implement, v2]
 ---
 
+> **宿主适配**：本 playbook 是宿主中立的主 session 指令，可在任意 agent CLI（Claude Code / Kimi / Codex / …）内执行。文中的宿主机制按下表映射，宿主缺某机制时用通用回退：
+>
+> | 文中写法 | Claude Code | 其它宿主通用回退 |
+> |---|---|---|
+> | `Agent(...)`（spawn sub-agent） | `Agent` 工具 | 宿主的 sub-agent 派发机制；没有则改用 `npc implement run` / `npc fix run`（headless coder 子进程，效果等价） |
+> | `isolation="worktree"` | Agent 工具参数 | 用 Bash `git worktree add` 手建隔离工作区，或把该波降级为串行 `npc implement run` |
+> | `AskUserQuestion` | 同名工具 | 直接向用户提问并等待回复 |
+> | `TodoWrite` | 同名工具 | 宿主的任务清单机制；没有则维护一份 markdown 清单 |
+> | `EnterPlanMode` / `ExitPlanMode` | plan 模式审批门 | 打印计划全文，请用户确认后继续（`--auto` 档两边都跳过） |
+
 **目标**
 进入 plan 模式，分析所有活跃的 openspec changes，**用 DAG 拓扑排序**（节点 = change，边 = 来自 spec delta / 显式引用 / 文件创建三条硬规则）决定串行实施顺序，然后逐个跑 Implement → Codex Review → Fix Loop → Archive。tier（infra/security/business/optional）仅作为同入度节点的 tie-breaker，**不**是排序键。
 

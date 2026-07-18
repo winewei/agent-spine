@@ -115,3 +115,58 @@ def test_detect_session_prefers_mtime(tmp_path: Path):
     sid, _, src = _session.detect_session(proj_key, home=home)
     assert sid == "mtime-sid"
     assert src == "mtime-1min"
+
+
+# ============================================================
+# v1.7 宿主抽象：detect 按 host 能力面分流
+# ============================================================
+
+
+def test_detect_via_mtime_generic_host_skips(tmp_path: Path):
+    from npc import hosts
+
+    home = tmp_path
+    proj_key = "-proj"
+    # 即使 claude 布局目录存在，generic 宿主也不扫
+    cc = home / ".claude" / "projects" / proj_key
+    cc.mkdir(parents=True)
+    (cc / "sess.jsonl").write_text("{}\n")
+    generic = hosts.resolve_host("generic", env={})
+    assert _session.detect_via_mtime(proj_key, home, host=generic) is None
+
+
+def test_detect_via_mtime_custom_host_session_dir(tmp_path: Path):
+    from npc import hosts
+
+    home = tmp_path
+    proj_key = "-proj"
+    kimi_dir = home / ".kimi" / "sessions" / proj_key
+    kimi_dir.mkdir(parents=True)
+    (kimi_dir / "abc123.jsonl").write_text("{}\n")
+    kimi = hosts.resolve_host("kimi", ".kimi/sessions/{proj_key}", env={})
+    result = _session.detect_via_mtime(proj_key, home, host=kimi)
+    assert result is not None
+    assert result[0] == "abc123"
+
+
+def test_detect_session_generic_host_falls_back_to_hook(tmp_path: Path):
+    from npc import hosts
+
+    home = tmp_path
+    proj_key = "-proj"
+    # claude 布局目录有新 jsonl，但 generic 宿主只认 by-cwd hook
+    cc = home / ".claude" / "projects" / proj_key
+    cc.mkdir(parents=True)
+    (cc / "should-not-match.jsonl").write_text("{}\n")
+
+    tx = home / "tx.jsonl"
+    tx.write_text("{}\n")
+    by_cwd = home / "task_log" / ".session-cache" / "by-cwd"
+    by_cwd.mkdir(parents=True)
+    (by_cwd / f"{proj_key}.jsonl").write_text(
+        json.dumps({"session_id": "hook-sid", "transcript_path": str(tx)}) + "\n"
+    )
+    generic = hosts.resolve_host("generic", env={})
+    sid, _, src = _session.detect_session(proj_key, home=home, host=generic)
+    assert sid == "hook-sid"
+    assert src == _session.SOURCE_HOOK

@@ -5,6 +5,16 @@ category: OpenSpec
 tags: [openspec, plan, implement, parallel, worktree, v3]
 ---
 
+> **宿主适配**：本 playbook 是宿主中立的主 session 指令，可在任意 agent CLI（Claude Code / Kimi / Codex / …）内执行。文中的宿主机制按下表映射，宿主缺某机制时用通用回退：
+>
+> | 文中写法 | Claude Code | 其它宿主通用回退 |
+> |---|---|---|
+> | `Agent(...)`（spawn sub-agent） | `Agent` 工具 | 宿主的 sub-agent 派发机制；没有则改用 `npc implement run` / `npc fix run`（headless coder 子进程，效果等价） |
+> | `isolation="worktree"` | Agent 工具参数 | 用 Bash `git worktree add` 手建隔离工作区，或把该波降级为串行 `npc implement run` |
+> | `AskUserQuestion` | 同名工具 | 直接向用户提问并等待回复 |
+> | `TodoWrite` | 同名工具 | 宿主的任务清单机制；没有则维护一份 markdown 清单 |
+> | `EnterPlanMode` / `ExitPlanMode` | plan 模式审批门 | 打印计划全文，请用户确认后继续（`--auto` 档两边都跳过） |
+
 # New Plan & Implement All Changes (v3 — 波次并行)
 
 把 v2 的串行 pipeline 升级为**波次并行**：同一 DAG 拓扑层级、且文件不相交、且经架构师 sub-agent 确认无语义耦合的 changes，在各自 worktree 内**并行** implement；写完串行 cherry-pick 回主分支，再**逐字复用 v2/npc** 的 review → fix → archive。
