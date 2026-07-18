@@ -6,7 +6,7 @@
 
 | 版本 | 位置 | 执行模型 | npc 要求 | 状态 |
 |---|---|---|---|---|
-| v2 | `../commands/new-plan-changes-v2.md` | 串行：DAG 拓扑排序后逐个 implement→review→fix→archive | ≥ 1.0 | 稳定 |
+| v2 | `../commands/new-plan-changes-v2.md` | 串行：DAG 拓扑排序后逐个 implement→review→fix→archive | ≥ 1.4 | 稳定 |
 | v3 | `new-plan-changes-v3/SKILL.md` | 波次并行：worktree 并行 implement，主 session 手工编排整合与内环 | ≥ 1.4 | 稳定，被 v4 取代中 |
 | v4 | `new-plan-changes-v4/SKILL.md` | 波次并行 + 上下文预算：整合与内环各下沉为一条 npc 命令 | ≥ 1.5 | 推荐 |
 
@@ -34,7 +34,8 @@
 
 ## 共同前置
 
-- `npc doctor` 通过（git 必需；codex/openspec 缺失走降级：跳 review / 只 commit 不 archive）
+- `npc doctor` 通过（git 必需；codex 缺失走降级：跳 review）
+- `openspec` 对本系列 skill 为必需：计划入口是 `openspec list --json`，缺失时在 Step 2 即失败，走不到"只 commit 不 archive"的降级路径
 - `npc verify routing` 无 violation（coder 与 review 引擎不同源；MiMo 不承担 review）
 - v3/v4 额外要求：git 工作树 clean；`worktree.baseRef=head`（`.claude/settings.json` 或 `~/.claude/settings.json`），未设置即报错退出，绝不静默以 fresh 语义分叉（会丢前序波次成果）
 

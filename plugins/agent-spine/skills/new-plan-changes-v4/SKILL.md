@@ -16,7 +16,8 @@ tags: [openspec, plan, implement, parallel, worktree, v4, context-budget]
 ## 前置（不满足即报错退出）
 
 - `npc --version` ≥ 1.5.0
-- `npc doctor` 通过；缺 codex → 跳 review、缺 openspec → 只 commit 不 archive，记降级项、不阻塞
+- `npc doctor` 通过；缺 codex → 跳 review，记降级项、不阻塞
+- `openspec` 可用（Step 2 的 `openspec list --json` 是计划入口，缺失即报错退出）
 - `npc verify routing` 无 violation；有则真停，提示改 `.npc/config.toml` / `~/.config/npc/config.toml`
 - git 工作树 clean
 - `.claude/settings.json` 或 `~/.claude/settings.json` 中 `worktree.baseRef=head`；否则报错退出，绝不静默退化
