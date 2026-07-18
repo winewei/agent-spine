@@ -749,7 +749,7 @@ def emit_deviation(
 ) -> None:
     """偏差记账（v1.5，P7）：每次 skip / stale / 冲突 / revert / 人工裁定落一条。
 
-    这是宪法"先收证据后建轨"的证据收集步骤——归因升级阶梯（L2/L3）等未来硬轨
+    这是原则"先收证据后建轨"的证据收集步骤——归因升级阶梯（L2/L3）等未来硬轨
     是否值得建，由这些 record 聚合出的 hotspots 决定。字段：
 
     - ``layer``：偏差归属层（implementation / decompose / design / unknown）——
