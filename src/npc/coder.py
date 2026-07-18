@@ -30,8 +30,8 @@ from .config import Config, load_config
 from .state import read_state
 
 
-DEFAULT_MIMO_ENV_FILE = Path.home() / ".config" / "npc" / "mimo.env"
-DEFAULT_MIMO_MODEL = "mimo-v2.5-pro"
+DEFAULT_MIMO_ENV_FILE = Path(config.DEFAULT_MIMO_ENV_FILE).expanduser()
+DEFAULT_MIMO_MODEL = config.DEFAULT_MIMO_MODEL
 
 
 # ============================================================
@@ -52,17 +52,17 @@ Runner = Callable[..., CoderRunResult]
 
 
 def resolve_backend(cfg: Config, phase: str, override: str | None = None) -> str:
-    """决定某 phase 的 coder backend。
+    """决定某 phase 的 coder backend（内置或 ``[providers.*]`` 自定义 provider 名）。
 
     优先级：
     1. ``override``（CLI ``--backend``）
-    2. per-phase 覆盖 ``[coder.phase].<phase>``（如只把 fix 给 mimo）
+    2. per-phase 覆盖 ``[coder.phase].<phase>``（如只把 fix 给 deepseek）
     3. 全局 ``[coder].backend``
     4. 默认 ``claude``
 
-    **MiMo 默认不启用**：只有在 ``--backend mimo`` / ``[coder].backend="mimo"`` /
-    ``[coder.phase].<phase>="mimo"`` 显式指定时才用 MiMo。mimo.env 是否存在不再
-    自动触发路由（MiMo 较慢，按需开启）。
+    **廉价层默认不启用**：只有显式指定（--backend / [coder].backend /
+    [coder.phase].<phase>）才路由到 mimo / kimi 等第三方 provider。env_file
+    是否存在不自动触发路由（按需开启）。
     """
     if override:
         return override
@@ -147,25 +147,28 @@ def _build_claude_argv(claude_bin: str, prompt: str, model: str | None) -> list[
 
 
 class MimoEnvError(Exception):
-    """mimo.env 读取失败（权限错误等）。CLI 层转 emit_error env(3)。
+    """provider env_file 读取失败（权限错误等）。CLI 层转 emit_error env(3)。
 
     与 ``FileNotFoundError``（→ dependency_missing exit 4）区分：缺文件是依赖未装，
     读不动文件（chmod 600 密钥权限错）是环境问题。
+
+    历史命名：v1.5 前 env_file 仅 mimo 一家在用；v1.6 泛化到任意 provider 后
+    类名保留以兼容既有 except 分支。
     """
 
 
-def _mimo_env(cfg: Config) -> dict[str, str]:
-    """读取并解析 mimo_env_file，叠加到当前进程 env 之上返回。
+def _env_from_file(env_file: Path, provider_name: str) -> dict[str, str]:
+    """读取并解析 provider env_file，叠加到当前进程 env 之上返回。
 
     - 文件缺失 → ``FileNotFoundError``（CLI 转 dependency_missing exit 4）
     - 读取受阻（PermissionError 等，chmod 600 密钥很常见）→ ``MimoEnvError``（CLI 转 env exit 3）
     """
     import os
 
-    env_file = _resolve_mimo_env_file(cfg)
     if not env_file.is_file():
         raise FileNotFoundError(
-            f"mimo.env 缺失：{env_file}（请创建或把 backend 切回 claude）"
+            f"provider {provider_name} 的 env_file 缺失：{env_file}"
+            f"（请创建或把 backend 切回 claude）"
         )
     try:
         text = env_file.read_text(encoding="utf-8")
@@ -174,12 +177,18 @@ def _mimo_env(cfg: Config) -> dict[str, str]:
         raise
     except (OSError, PermissionError) as e:
         raise MimoEnvError(
-            f"mimo.env 读取失败：{env_file}：{e}（密钥文件通常 chmod 600，请检查权限）"
+            f"provider {provider_name} 的 env_file 读取失败：{env_file}：{e}"
+            f"（密钥文件通常 chmod 600，请检查权限）"
         ) from e
     parsed = parse_env_file(text)
     merged = dict(os.environ)
     merged.update(parsed)
     return merged
+
+
+def _mimo_env(cfg: Config) -> dict[str, str]:
+    """mimo 专用入口（兼容旧 ``[coder.mimo].env_file`` 覆盖与默认路径）。"""
+    return _env_from_file(_resolve_mimo_env_file(cfg), "mimo")
 
 
 # ============================================================
@@ -275,6 +284,15 @@ def _extract_result_line(stdout: str, *, fallback: str) -> str:
     return fallback
 
 
+def _build_codex_argv(codex_bin: str, prompt: str, model: str | None) -> list[str]:
+    """codex exec 的 coder 调用：需要写工作区（区别于 review 的 read-only sandbox）。"""
+    argv = [codex_bin, "exec", "--skip-git-repo-check", "--sandbox", "workspace-write"]
+    if model:
+        argv += ["-m", model]
+    argv.append(prompt)
+    return argv
+
+
 def _run_backend(
     cfg: Config,
     backend: str,
@@ -285,29 +303,47 @@ def _run_backend(
     runner: Runner,
     timeout: int | None,
 ) -> tuple[CoderRunResult, str | None]:
-    """按 backend 跑 coder 子进程；返回 (CoderRunResult, model)。
+    """按 provider 跑 coder 子进程；返回 (CoderRunResult, model)。
+
+    backend 是 provider 名（内置 claude/mimo/codex 或 [providers.*] 自定义），
+    按 provider.runner 分流：
+
+    - ``claude-cli``：``claude -p``；provider.env_file 存在则 source 后注入子进程 env
+      （Anthropic 兼容端点走此路，kimi / qwen / deepseek / mimo 同一机制）
+    - ``codex-cli``：``codex exec``（workspace-write sandbox）
 
     缺可执行文件抛 FileNotFoundError（调用方转 emit_error dependency_missing）。
     """
-    if backend in ("claude", "mimo"):
-        claude_bin = _find_bin("claude", backend_override_bin or cfg.coder.bin)
-        if backend == "mimo":
-            model = cfg.coder.model or DEFAULT_MIMO_MODEL
-            env = _mimo_env(cfg)
+    provider = cfg.provider(backend)
+    if provider is None:
+        raise ValueError(
+            f"未知 coder backend：{backend!r}"
+            f"（内置 {'/'.join(config.SUPPORTED_CODER_BACKENDS)} 或 [providers.*] 自定义）"
+        )
+    # model：[coder].model 显式覆盖 > provider 自带默认
+    model = cfg.coder.model or provider.model
+    if provider.runner == "claude-cli":
+        claude_bin = _find_bin(
+            "claude", backend_override_bin or cfg.coder.bin or provider.bin
+        )
+        if provider.name == "mimo":
+            env = _mimo_env(cfg)  # 兼容 [coder.mimo].env_file 覆盖与默认路径
+        elif provider.env_file:
+            env = _env_from_file(
+                Path(provider.env_file).expanduser(), provider.name
+            )
         else:
-            model = cfg.coder.model
             env = None
         argv = _build_claude_argv(claude_bin, spawn_text, model)
         result = runner(argv=argv, cwd=repo_root, env=env, timeout=timeout)
         return result, model
-    if backend == "codex":
-        # TODO: codex exec 路径（参考 pipeline._codex_exec / engines.CodexEngine）。
-        # coder 经 codex 的 headless 编排尚未实现；当前明确报错而非静默退化。
-        raise NotImplementedError(
-            "coder backend=codex 尚未实现；请使用 claude / mimo，或参考 "
-            "engines.CodexEngine 补齐 codex exec 路径"
-        )
-    raise ValueError(f"未知 coder backend：{backend!r}")
+    # codex-cli
+    codex_bin = _find_bin(
+        "codex", backend_override_bin or cfg.coder.bin or provider.bin
+    )
+    argv = _build_codex_argv(codex_bin, spawn_text, model)
+    result = runner(argv=argv, cwd=repo_root, env=None, timeout=timeout)
+    return result, model
 
 
 def run_implement(

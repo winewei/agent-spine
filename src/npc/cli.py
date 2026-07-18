@@ -699,12 +699,13 @@ exit code:
         help="跑 coder 子进程完成 implement（render prompt → coder 后端 → 抽 RESULT → record）",
         formatter_class=_EPILOG_FMT,
         epilog="""\
-做什么：phase enter implement -> 渲染 §A 模板 -> 起 coder 后端子进程（headless
-claude -p，或 mimo 注入 env 路由）-> 从 stdout 尾部抽 RESULT 行（缺失则合成失败
+做什么：phase enter implement -> 渲染 §A 模板 -> 起 coder 后端子进程（claude-cli
+runner 走 headless claude -p、可经 provider env_file 路由到 Anthropic 兼容端点；
+codex-cli runner 走 codex exec）-> 从 stdout 尾部抽 RESULT 行（缺失则合成失败
 RESULT）-> 等价于 implement record。后端未产出 RESULT 不会让 phase 悬挂。
 
 stdout（成功，implement record 的字段 + 以下）:
-  {..., "backend": "claude|mimo|codex", "model": "<str>|null", "coder_exit": <int>}
+  {..., "backend": "<provider 名>", "model": "<str>|null", "coder_exit": <int>}
 
 stdout（失败）:
   {"ok": false, "seq": <int>, "error": "<implement record 的 error 码，或
@@ -713,18 +714,17 @@ stdout（失败）:
 exit code:
   0  成功
   1  业务失败（RESULT 校验不过等）
-  2  配置错误 / coder backend=codex 尚未实现
-  3  环境错（缺 state / MiMo env 文件问题）
-  4  依赖缺失（coder 可执行文件未找到）
+  2  配置错误（含未注册 provider）
+  3  环境错（缺 state / provider env 文件问题）
+  4  依赖缺失（coder 可执行文件 / env_file 未找到）
 """,
     )
     p_impl_run.add_argument("--seq", type=int, required=True)
     p_impl_run.add_argument("--change-id", default=None, help="可选；与 state 中的 seq 一致性校验")
     p_impl_run.add_argument(
         "--backend",
-        choices=["claude", "mimo", "codex"],
         default=None,
-        help="覆盖 coder 后端（默认从 [coder].backend 读，或 mimo.env 存在时自动 mimo）",
+        help="覆盖 coder 后端（内置 claude/mimo/codex 或 [providers.*] 自定义名；默认从 [coder].backend 读）",
     )
     p_impl_run.add_argument("--timeout", type=int, default=None, help="coder 子进程超时秒数")
     p_impl_run.add_argument("--config", default=None, help="显式 TOML 配置路径")
@@ -777,12 +777,12 @@ exit code:
 （比 implement run 更保守，因为 fix loop 失败通常需要人工介入）。
 
 stdout（成功，fix record 的字段 + 以下）:
-  {..., "backend": "claude|mimo|codex", "model": "<str>|null", "coder_exit": <int>}
+  {..., "backend": "<provider 名>", "model": "<str>|null", "coder_exit": <int>}
 
 exit code:
   0  成功
   1  业务失败
-  2  配置错误 / 缺 --round / backend=codex 尚未实现
+  2  配置错误（含未注册 provider）/ 缺 --round
   3  环境错
   4  依赖缺失
 """,
@@ -791,8 +791,8 @@ exit code:
     p_fix_run.add_argument("--round", dest="round_n", type=int, required=True)
     p_fix_run.add_argument("--change-id", default=None)
     p_fix_run.add_argument(
-        "--backend", choices=["claude", "mimo", "codex"], default=None,
-        help="覆盖 coder 后端",
+        "--backend", default=None,
+        help="覆盖 coder 后端（内置或 [providers.*] 自定义名）",
     )
     p_fix_run.add_argument("--timeout", type=int, default=None)
     p_fix_run.add_argument("--config", default=None)
@@ -850,8 +850,8 @@ exit code:
     )
     p_change_run.add_argument("--auto", action="store_true", help="决策点走 auto-decide")
     p_change_run.add_argument(
-        "--backend", choices=["claude", "mimo", "codex"], default=None,
-        help="覆盖 coder 后端",
+        "--backend", default=None,
+        help="覆盖 coder 后端（内置或 [providers.*] 自定义名）",
     )
     p_change_run.add_argument(
         "--coder-timeout", dest="coder_timeout", type=int, default=None,
@@ -943,12 +943,13 @@ exit code:
     )
     p_verify_routing = sub_verify.add_parser(
         "routing",
-        help="校验 coder/review 路由不变量（生成⊥验证 + MiMo 只许执行）",
+        help="校验 coder/review 路由不变量（生成⊥验证 + 廉价层只许执行）",
         formatter_class=_EPILOG_FMT,
         epilog="""\
-规则：1) coder.backend / review.engine 必须在各自受支持列表；2) coder 与 review
-不得解析到同一执行身份（自己评自己，覆盖全局 + per-phase 覆盖）；3) review 路由
-含 MiMo（engine/claude_bin/claude_model 含 'mimo'）一律 violation。
+规则：1) coder backend 必须是已注册 provider（内置 + [providers.*]），review.engine
+必须在受支持列表；2) coder 与 review 不得解析到同一执行身份（自己评自己，覆盖
+全局 + per-phase 覆盖）；3) review 路由含任何带 env_file 的廉价层 provider
+（engine/claude_bin/claude_model 命中其名或 model）一律 violation（cheap_exec_only）。
 
 stdout:
   {"ok": <bool>, "coder_backend": "<str>", "coder_phase_backends": {"<phase>":"<backend>", ...},

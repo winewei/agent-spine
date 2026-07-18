@@ -101,7 +101,7 @@ def test_routing_mimo_in_review_model_violation():
         review_claude_model="mimo-v2.5-pro",
     )
     rules = {v["rule"] for v in _verify.check_routing(cfg)}
-    assert "mimo_exec_only" in rules
+    assert "cheap_exec_only" in rules
 
 
 def test_routing_mimo_in_review_bin_violation():
@@ -111,7 +111,7 @@ def test_routing_mimo_in_review_bin_violation():
         review_claude_bin="/opt/mimo/claude",
     )
     rules = {v["rule"] for v in _verify.check_routing(cfg)}
-    assert "mimo_exec_only" in rules
+    assert "cheap_exec_only" in rules
 
 
 def test_routing_mimo_case_insensitive():
@@ -121,7 +121,7 @@ def test_routing_mimo_case_insensitive():
         review_claude_model="MiMo-Pro",
     )
     rules = {v["rule"] for v in _verify.check_routing(cfg)}
-    assert "mimo_exec_only" in rules
+    assert "cheap_exec_only" in rules
 
 
 def test_routing_mimo_in_review_engine_violation():
@@ -131,11 +131,11 @@ def test_routing_mimo_in_review_engine_violation():
     cfg = _cfg(coder_backend="claude", review_engine="codex")
     object.__setattr__(cfg.review, "engine", "mimo")
     rules = {v["rule"] for v in _verify.check_routing(cfg)}
-    assert "mimo_exec_only" in rules
+    assert "cheap_exec_only" in rules
 
 
 def test_routing_mimo_in_both_model_and_bin_single_violation():
-    # claude_model 与 claude_bin 都含 mimo → 只 1 条 mimo_exec_only（不重复 append）
+    # claude_model 与 claude_bin 都含 mimo → 只 1 条 cheap_exec_only（不重复 append）
     cfg = _cfg(
         coder_backend="mimo",
         review_engine="claude",
@@ -143,7 +143,7 @@ def test_routing_mimo_in_both_model_and_bin_single_violation():
         review_claude_model="mimo-v2.5-pro",
     )
     mimo_violations = [
-        v for v in _verify.check_routing(cfg) if v["rule"] == "mimo_exec_only"
+        v for v in _verify.check_routing(cfg) if v["rule"] == "cheap_exec_only"
     ]
     assert len(mimo_violations) == 1
 
@@ -201,6 +201,58 @@ def test_routing_mimo_coder_claude_non_mimo_review_benign():
         review_claude_model="claude-opus-4-8",
     )
     assert _verify.check_routing(cfg) == []
+
+
+# ============================================================
+# provider 注册表泛化（v1.6：自定义廉价层 provider）
+# ============================================================
+
+
+def _cfg_with_providers(extra_providers: tuple, **kwargs) -> _config.Config:
+    cfg = _cfg(**kwargs)
+    return _config.Config(
+        review=cfg.review,
+        coder=cfg.coder,
+        providers=_config.BUILTIN_PROVIDERS + extra_providers,
+    )
+
+
+def test_routing_custom_provider_backend_supported():
+    kimi = _config.ProviderConfig(name="kimi", env_file="~/x/kimi.env", model="kimi-k3")
+    cfg = _cfg_with_providers((kimi,), coder_backend="kimi", review_engine="codex")
+    assert _verify.check_routing(cfg) == []
+
+
+def test_routing_unregistered_backend_violation():
+    cfg = _cfg(coder_backend="claude", review_engine="codex")
+    object.__setattr__(cfg.coder, "backend", "kimi")  # 绕过加载期校验模拟脏 state
+    rules = {v["rule"] for v in _verify.check_routing(cfg)}
+    assert "backend_unsupported" in rules
+
+
+def test_routing_cheap_provider_name_in_review_model_violation():
+    kimi = _config.ProviderConfig(name="kimi", env_file="~/x/kimi.env", model="kimi-k3")
+    cfg = _cfg_with_providers(
+        (kimi,),
+        coder_backend="kimi",
+        review_engine="claude",
+        review_claude_model="kimi-k3",
+    )
+    rules = {v["rule"] for v in _verify.check_routing(cfg)}
+    assert "cheap_exec_only" in rules
+
+
+def test_routing_cheap_provider_without_env_file_not_flagged():
+    """无 env_file 的自定义 provider 不属于廉价层，review 撞名不触发 cheap_exec_only。"""
+    local = _config.ProviderConfig(name="local", model="claude-opus-4-8")
+    cfg = _cfg_with_providers(
+        (local,),
+        coder_backend="local",
+        review_engine="claude",
+        review_claude_model="claude-opus-4-8",
+    )
+    rules = {v["rule"] for v in _verify.check_routing(cfg)}
+    assert "cheap_exec_only" not in rules
 
 
 # ============================================================

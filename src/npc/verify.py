@@ -6,7 +6,7 @@
   而是在 repo_root 实际执行测试命令、捕获退出码与输出末尾，emit 结构化判定。
   这是"不裸信 RESULT"硬轨的家。
 
-- ``npc verify routing``：把路由不变量编进代码（生成⊥验证 + MiMo 只许执行）。
+- ``npc verify routing``：把路由不变量编进代码（生成⊥验证 + 廉价层只许执行）。
   纯函数 :func:`check_routing` 校验 coder/review 后端配置，发现"自己评自己"
   或"MiMo 越权到 review"等违规则报 violation。
 
@@ -183,8 +183,8 @@ def run_tests(args: argparse.Namespace, runner=subprocess.run) -> None:
 # ============================================================
 
 
-def _contains_mimo(value: str | None) -> bool:
-    return value is not None and "mimo" in value.lower()
+def _contains_token(value: str | None, token: str) -> bool:
+    return value is not None and token.lower() in value.lower()
 
 
 def check_routing(cfg: _config.Config) -> list[dict]:
@@ -192,31 +192,34 @@ def check_routing(cfg: _config.Config) -> list[dict]:
 
     每项 ``{"rule", "detail"}``。规则：
 
-    1. ``backend_unsupported`` / ``engine_unsupported``：coder.backend 与
-       review.engine 必须在各自 SUPPORTED 列表（backend 用 effective_backend）。
+    1. ``backend_unsupported`` / ``engine_unsupported``：coder backend 必须是已
+       注册 provider（内置 + [providers.*]）；review.engine 必须在 SUPPORTED_ENGINES
+       （review 恒留 premium，结构上不接受 provider 名）。
     2. ``gen_not_orthogonal``：coder 与 review 解析到同一执行身份 → 等于自己评
        自己，违反 生成⊥验证。覆盖 (a) 都是 claude 且同 bin+model；(b) 都是 mimo。
-    3. ``mimo_exec_only``：review 路由到 MiMo（engine 含 'mimo'，或 claude_model
-       / claude_bin 含 'mimo'）→ 违反 MiMo 仅限 coder。合并为单条 violation。
+    3. ``cheap_exec_only``（v1.5 名 ``mimo_exec_only``）：review 路由沾上任何带
+       env_file 的廉价层 provider（engine / claude_bin / claude_model 含其名或
+       model）→ 违反 不变量 4「廉价层只许执行」。每个命中 provider 一条。
     """
     violations: list[dict] = []
     coder = cfg.coder
     review = cfg.review
     effective_backend = coder.effective_backend
+    provider_names = sorted({p.name for p in cfg.providers})
 
     # coder 实际会用到的全部后端 = 全局 effective + 每个 per-phase 覆盖。
     # 校验必须覆盖 per-phase 路由，否则 [coder.phase].fix=mimo 这类「只把某阶段给
-    # mimo」会绕过下面的 gen⊥verify 校验——而这正是本校验存在的根本目的。
+    # 廉价层」会绕过下面的 gen⊥verify 校验——而这正是本校验存在的根本目的。
     backends_in_play = {effective_backend}
     backends_in_play.update(be for _ph, be in coder.phase_backends)
 
     # 规则 1：后端有效性（覆盖全局 + 每个 phase 覆盖）
     for be in sorted(backends_in_play):
-        if be not in _config.SUPPORTED_CODER_BACKENDS:
+        if cfg.provider(be) is None:
             violations.append(
                 {
                     "rule": "backend_unsupported",
-                    "detail": f"coder.backend={be!r} 不在支持列表 {_config.SUPPORTED_CODER_BACKENDS}",
+                    "detail": f"coder.backend={be!r} 不在 provider 注册表 {provider_names}",
                 }
             )
     if review.engine not in _config.SUPPORTED_ENGINES:
@@ -243,18 +246,24 @@ def check_routing(cfg: _config.Config) -> list[dict]:
             }
         )
 
-    # 规则 3：MiMo 只许执行（无条件顶层挡：engine 或 claude_bin/model 含 mimo）→ 单条
-    if (
-        _contains_mimo(review.engine)
-        or _contains_mimo(review.claude_model)
-        or _contains_mimo(review.claude_bin)
-    ):
-        violations.append(
-            {
-                "rule": "mimo_exec_only",
-                "detail": "review 路由含 MiMo（engine/claude_bin/claude_model 含 'mimo'），违反 MiMo 仅限 coder",
-            }
-        )
+    # 规则 3：廉价层只许执行。带 env_file 的 provider（mimo / kimi / deepseek ...）
+    # 定位为第三方执行端点，review 路由沾上其名或 model 即 violation；每 provider 单条。
+    review_fields = (review.engine, review.claude_model, review.claude_bin)
+    for p in cfg.providers:
+        if not p.env_file:
+            continue
+        tokens = {p.name} | ({p.model} if p.model else set())
+        if any(_contains_token(f, t) for f in review_fields for t in tokens):
+            violations.append(
+                {
+                    "rule": "cheap_exec_only",
+                    "detail": (
+                        f"review 路由含廉价层 provider {p.name!r}"
+                        "（engine/claude_bin/claude_model 命中其名或 model），"
+                        "违反 廉价层仅限 coder"
+                    ),
+                }
+            )
 
     return violations
 
