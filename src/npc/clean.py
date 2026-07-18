@@ -1,6 +1,6 @@
 """npc clean：清理 task_log 里陈旧/已中止的 run 目录与 state 文件。
 
-基石工具，删除操作保守安全：默认 dry-run，只有 --yes 才真删。
+基础工具，删除操作保守安全：默认 dry-run，只有 --yes 才真删。
 
 可清理判定（保守，三条件全满足才删）：
   1. 该 run 不是 active（≠ active.json 的 current_run_ts）；
