@@ -2044,6 +2044,7 @@ npc index append
 
 | 版本 | 关键变化 |
 |---|---|
+| **1.7.1** | 文档：宿主支持列表明确为 Claude Code / Kimi CLI / Qwen Code / Codex / OpenCode（README / INSTALL / usage / playbook 宿主适配表口径统一） |
 | **1.7** | 宿主中立化 + 去 plugin 发布：新增 `hosts.py` 宿主抽象与 `[host]` 配置（name/session_dir；探测顺序 config > CLAUDECODE env > generic），init payload 增 `host` 字段、generic 宿主跳过 auto 授权、session 识别按宿主分流（generic 只走 by-cwd hook）；focus/templates 项目上下文 `CLAUDE.md`→`AGENTS.md` fallback、prompt 措辞去工具专名；新增 `playbook list/show/install`（§9d），原 plugin 内容收编进包资源，删除 marketplace/plugin manifest；`doctor` 新增 `host` 检查 |
 | **1.6** | Provider 注册表：config 新增 `[providers.*]`（runner/env_file/model/bin，内置 claude/mimo/codex），coder 可路由到任意 Anthropic 兼容端点（kimi/qwen/deepseek/...）与 `codex exec`（coder 的 codex-cli 路径补齐）；配置查找链改为分层深合并（全局定义 provider、项目只写路由）；`--backend` 接受 provider 名；`verify routing` 规则 3 更名 `cheap_exec_only` 并泛化到全部带 env_file 的 provider；`doctor` 新增 `providers` 检查 |
 | **1.5** | 内环与整合下沉（§8f）：新增 `change run`（单 change 内环编排）与 `integrate`（worktree 产物整合进 main），上下文预算重构 |
