@@ -86,11 +86,11 @@ harness 会：
 
 ## 切 review 引擎到 claude（或自定义后端）
 
-见仓库根 [README — Review 引擎配置](../README.md#review-引擎配置)。常见：用 `.npc/config.toml` 把 `engine` 切到 `claude`，`bin` + `extra_args` 路由到经 `--settings` 配置的 qwen / deepseek 后端。
+见 [configuration.md — Review 引擎配置](configuration.md#review-引擎配置)。常见：用 `.npc/config.toml` 把 `engine` 切到 `claude`，`bin` + `extra_args` 路由到经 `--settings` 配置的 qwen / deepseek 后端。
 
 ## 配 coder 多模型：每工程独立选型（v1.6+，可选）
 
-完整四步照做指南见 [README — Coder 多模型配置](../README.md#coder-多模型配置每工程独立选型)。速记：
+完整四步照做指南见 [configuration.md — Coder 多模型配置](configuration.md#coder-多模型配置每工程独立选型)。速记：
 
 ```bash
 # 1. 每个模型一个凭据文件（全局，chmod 600，勿入 git）
