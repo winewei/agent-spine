@@ -6,10 +6,12 @@
 
 v1.7 起本仓库**宿主中立、不再以 Claude Code plugin 形态发布**：`npc` 是唯一分发物，原 plugin 的 commands / skills / agents 内容以宿主中立措辞收编为包内 playbook（`src/npc/playbooks/`），任何 agent CLI 经 `npc playbook` 取用。
 
+**推荐用法是 playbook + npc 配合**：`npc` 单独可用，但它只是确定性执行层底座；智能层调度由 playbook 承载，两层合起来才是完整形态。批量推进 active changes 用 `new-plan-changes-v4`，单目标 / 单 change 自主闭环用 `spine-run`。
+
 - **智能层**：[`spine-run`](src/npc/playbooks/spine-run.md) 编排 plan→implement→review→fix→archive；[`spine-analyze`](src/npc/playbooks/spine-analyze.md) 自迭代。
+- **批量入口（首选 v4）**：[`new-plan-changes-v4`](src/npc/playbooks/new-plan-changes-v4.md) 按依赖顺序批量推进 OpenSpec active changes——DAG 波次并行 + worktree 隔离，整合与单 change 内环各一条 npc 命令（`npc integrate` / `npc change run`），主 session 只在决策分叉点出场。[`new-plan-changes-v2`](src/npc/playbooks/new-plan-changes-v2.md)（串行）与 [`new-plan-changes-v3`](src/npc/playbooks/new-plan-changes-v3.md)（波次并行初版）为历史演进版本，共享同一个 `npc` 底座。
 - **执行层**：[`spine-coder`](src/npc/playbooks/agents/spine-coder.md)（Claude Code subagent 定义；其它宿主作 coder persona prompt，或直接 `npc implement/fix run` headless 子进程）。
 - **底座**：安装后的 `npc` 命令（代码在 `src/npc`）。
-- **批量入口**：[`new-plan-changes-v2`](src/npc/playbooks/new-plan-changes-v2.md)（串行）、[`new-plan-changes-v3`](src/npc/playbooks/new-plan-changes-v3.md)（波次并行 worktree）与 [`new-plan-changes-v4`](src/npc/playbooks/new-plan-changes-v4.md)（v1.5 上下文预算版：每 change 三条 npc 命令——spawn / `npc integrate` / `npc change run`，主 session 只在决策分叉点出场）——按依赖顺序批量推进 OpenSpec active changes，共享同一个 `npc` 底座。
 - **原则**：[docs/principles.md](docs/principles.md) 4 条不变量。
 
 ---
