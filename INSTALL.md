@@ -33,7 +33,7 @@ test -f pyproject.toml && test -d src/npc && echo "src/npc OK"
 ### 2. 装 npc 命令（从 src/npc）
 ```bash
 uv tool install --force --from . npc
-npc --version          # 期望：npc 1.7.1
+npc --version          # 期望：npc 1.7.0
 ```
 验证：`npc --version` 有输出即成功。`--force` 必需（覆盖旧版）。
 

@@ -1,6 +1,6 @@
 [project]
 name = "npc"
-version = "1.7.1"
+version = "1.7.0"
 description = "确定性执行层 CLI：把脚本化的确定性逻辑下沉到 Python（执行机械动作的 NPC，让 LLM 专注决策）。从 agent-spine 仓库安装为 npc 命令。"
 requires-python = ">=3.11"
 authors = [{ name = "alpha" }]
