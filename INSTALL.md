@@ -1,6 +1,6 @@
 # 安装 spine agent（面向 LLM 的逐步指南）
 
-本指南给 **执行安装的 agent**（任意 agent CLI 宿主：Claude Code / Kimi / Codex / …）用。下面是一句话安装 + 每步验证 + 失败处置，便于 agent 自检与排错。
+本指南给 **执行安装的 agent**（任意 agent CLI 宿主：Claude Code / Kimi CLI / Qwen Code / Codex / OpenCode / …）用。下面是一句话安装 + 每步验证 + 失败处置，便于 agent 自检与排错。
 
 > spine agent = 安装后的 `npc` 命令（确定性执行层，代码在 `src/npc`；**唯一分发物**）+ 随包发行的宿主中立 playbooks（`spine-run` / `spine-analyze` / `spine-coder` / `new-plan-changes-v2/v3/v4`），经 `npc playbook install` 物化到宿主。v1.7 起不再有 Claude Code plugin。
 
@@ -12,7 +12,7 @@
 uv tool install --force --from . npc && npc playbook install --host claude
 ```
 
-第二段按宿主替换：Claude Code 用 `--host claude`；Codex CLI 用 `--host codex`；其它宿主（kimi 等）用 `--dest <该宿主的自定义命令目录>`。装完 `npc doctor` 体检。若要逐步执行 / 排错，按下面来。
+第二段按宿主替换：Claude Code 用 `--host claude`；Codex CLI 用 `--host codex`；其它宿主（kimi / qwen / opencode 等）用 `--dest <该宿主的自定义命令目录>`。装完 `npc doctor` 体检。若要逐步执行 / 排错，按下面来。
 
 ---
 
@@ -41,7 +41,7 @@ npc --version          # 期望：npc 1.7.0
 ```bash
 npc playbook install --host claude       # Claude Code：~/.claude/{commands,skills,agents}/
 npc playbook install --host codex        # Codex CLI：~/.codex/prompts/
-npc playbook install --dest <DIR>        # 其它宿主：平铺 md 到任意目录，按宿主机制挂载
+npc playbook install --dest <DIR>        # 其它宿主（kimi / qwen / opencode 等）：平铺 md 到任意目录，按宿主机制挂载
 ```
 - 验证：stdout JSON 的 `.installed` 非空、`.ok == true`；`npc playbook list` 可枚举全部。
 - 幂等覆盖：升级 npc 后重跑同一条命令即同步 playbook 内容。
