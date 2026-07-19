@@ -5,7 +5,7 @@ category: OpenSpec
 tags: [openspec, plan, implement, parallel, worktree, v3]
 ---
 
-> **宿主适配**：本 playbook 是宿主中立的主 session 指令，可在任意 agent CLI（Claude Code / Kimi / Codex / …）内执行。文中的宿主机制按下表映射，宿主缺某机制时用通用回退：
+> **宿主适配**：本 playbook 是宿主中立的主 session 指令，可在任意 agent CLI（Claude Code / Kimi CLI / Qwen Code / Codex / OpenCode / …）内执行。文中的宿主机制按下表映射，宿主缺某机制时用通用回退：
 >
 > | 文中写法 | Claude Code | 其它宿主通用回退 |
 > |---|---|---|

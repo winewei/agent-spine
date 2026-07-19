@@ -1,6 +1,6 @@
 # agent-spine
 
-> 人驾驭的自主 harness（跑在任意 agent CLI 宿主进程内：Claude Code / Kimi / Codex / …）——从 spec 到结果交付。
+> 人驾驭的自主 harness（跑在任意 agent CLI 宿主进程内：Claude Code / Kimi CLI / Qwen Code / Codex / OpenCode / …）——从 spec 到结果交付。
 >
 > 主 session 调度、coder 执行、确定性动作委托给安装后的 `npc` 命令（代码在 `src/npc`）。
 
@@ -22,18 +22,19 @@ cd agent-spine
 
 # 1) 装 npc 命令（从当前仓库根安装 src/npc；唯一分发物）
 uv tool install --force --from . npc
-npc --version          # npc 1.7.0
+npc --version          # npc 1.7.1
 
 # 2) 把 playbooks 物化到你的宿主 CLI（按需，三选一）
 npc playbook install --host claude    # Claude Code：commands/skills/agents 目录
 npc playbook install --host codex     # Codex CLI：~/.codex/prompts/
-npc playbook install --dest <DIR>     # 其它宿主（kimi 等）：平铺到任意目录，自行挂载
+npc playbook install --dest <DIR>     # 其它宿主（kimi / qwen / opencode 等）：平铺到任意目录，自行挂载
 ```
 
 > **推荐三层配置**（CLI + playbooks + 项目上下文片段）见 [docs/usage.md](docs/usage.md)。`npc` 完整契约见 [docs/cli.md](docs/cli.md)。
 
 ### 宿主中立怎么工作
 
+- **支持的宿主**：Claude Code、Kimi CLI、Qwen Code、Codex CLI、OpenCode；其它 agent CLI 经 `npc playbook install --dest` 挂载后同样可用。
 - **playbook 分发**：`npc playbook list` 枚举、`npc playbook show <name>` 输出原文（宿主可直接拉进 context 执行）、`npc playbook install` 物化到宿主目录。升级 npc 后重跑 install 即同步。
 - **宿主探测**：`npc init` 经 `[host]` 配置或 `CLAUDECODE` env 识别宿主。claude 宿主有完整能力（session 目录扫描 + `--auto` 项目授权写 `.claude/settings.json`）；其它宿主自动降级（session 识别走 by-cwd hook 索引、授权跳过），也可用 `[host].session_dir` 补 session 目录模板升级识别能力。
 - **项目上下文**：review / coder prompt 引用 `CLAUDE.md` 时一律带 `AGENTS.md` fallback，非 Claude 宿主的工程只维护 `AGENTS.md` 即可。
@@ -548,7 +549,7 @@ uv run pytest --cov=npc                   # 覆盖率
 - **stdout JSON + exit code 是通信契约**：主 session 用 `jq` 取字段，用 `$?` 分支错误；不再解析自然语言
 - **状态原子化 + 可自愈**：每次 STATE_JSON 改动用 tmp + `os.replace` 并同步重写 STATE_MD，杜绝漂移；当 git HEAD 与 task_log 漂移时，`npc state repair` 把对应 progress 退回 pending 重新对齐
 - **运行轨迹外置 + 学习入口结构化**：`~/task_log/<PROJ_KEY>/index.jsonl` 是跨 run 学习的稳定入口
-- **宿主中立（v1.7）**：`npc` 是独立 CLI 程序，可在 CI / 普通终端手工调试时单独运行，也可被任意 agent CLI 宿主（Claude Code / Kimi / Codex / …）调用——宿主差异收敛在 `hosts.py` 一个模块与每份 playbook 顶部的适配表；harness 工作流不再以某家 plugin 形态发布
+- **宿主中立（v1.7）**：`npc` 是独立 CLI 程序，可在 CI / 普通终端手工调试时单独运行，也可被任意 agent CLI 宿主（Claude Code / Kimi CLI / Qwen Code / Codex / OpenCode / …）调用——宿主差异收敛在 `hosts.py` 一个模块与每份 playbook 顶部的适配表；harness 工作流不再以某家 plugin 形态发布
 
 ---
 
