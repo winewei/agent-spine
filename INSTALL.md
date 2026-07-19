@@ -6,10 +6,10 @@
 
 ## 一句话安装
 
-在 agent-spine 仓库根执行（幂等，可重复跑）：
+任意目录执行，无需 clone 仓库（幂等，可重复跑）：
 
 ```bash
-uv tool install --force --from . npc && npc playbook install --host claude
+uv tool install --force --from git+https://github.com/winewei/agent-spine.git npc && npc playbook install --host claude
 ```
 
 第二段按宿主替换：Claude Code 用 `--host claude`；Codex CLI 用 `--host codex`；其它宿主（kimi / qwen / opencode 等）用 `--dest <该宿主的自定义命令目录>`。装完 `npc doctor` 体检。若要逐步执行 / 排错，按下面来。
@@ -24,20 +24,16 @@ command -v git && command -v uv && echo OK
 ```
 - 缺 `uv` → 装：`curl -LsSf https://astral.sh/uv/install.sh | sh`
 
-### 1. 校验 npc 源码
+### 1. 装 npc 命令（从 GitHub 远程安装）
 ```bash
-test -f pyproject.toml && test -d src/npc && echo "src/npc OK"
-```
-- `npc` 命令由本仓库的 `src/npc` 安装得到，无需子模块；直接从本仓库根安装即可。
-
-### 2. 装 npc 命令（从 src/npc）
-```bash
-uv tool install --force --from . npc
+uv tool install --force --from git+https://github.com/winewei/agent-spine.git npc
 npc --version          # 期望：npc 1.7.0
 ```
 验证：`npc --version` 有输出即成功。`--force` 必需（覆盖旧版）。
 
-### 3. 物化 playbooks 到宿主（按宿主三选一）
+本地开发 / 改源码时改为从 checkout 安装：在 agent-spine 仓库根执行 `uv tool install --force --from . npc`（`src/npc` 即源码，无需子模块）。
+
+### 2. 物化 playbooks 到宿主（按宿主三选一）
 ```bash
 npc playbook install --host claude       # Claude Code：~/.claude/{commands,skills,agents}/
 npc playbook install --host codex        # Codex CLI：~/.codex/prompts/
@@ -48,7 +44,7 @@ npc playbook install --dest <DIR>        # 其它宿主（kimi / qwen / opencode
 - Claude Code 装完**重启后生效**（`/spine-run` 等 slash command 与 skills）。
 - 不想物化也行：任何宿主可直接 `npc playbook show spine-run` 把原文拉进 context 执行。
 
-### 4. 环境体检
+### 3. 环境体检
 ```bash
 npc doctor
 ```

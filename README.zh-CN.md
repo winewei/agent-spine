@@ -38,11 +38,8 @@ agent-spine 把一次自主编码 run 拆成两层，层间以严格契约通信
 ## 快速开始
 
 ```bash
-git clone https://github.com/winewei/agent-spine.git
-cd agent-spine
-
-# 1) 装 npc 命令（唯一分发物）
-uv tool install --force --from . npc
+# 1) 直接从 GitHub 远程安装 npc 命令（无需 clone）
+uv tool install --force --from git+https://github.com/winewei/agent-spine.git npc
 npc --version          # npc 1.7.0
 
 # 2) 把 playbooks 物化到你的宿主 CLI（三选一）
@@ -50,6 +47,8 @@ npc playbook install --host claude    # Claude Code：commands/skills/agents 目
 npc playbook install --host codex     # Codex CLI：~/.codex/prompts/
 npc playbook install --dest <DIR>     # 其它宿主：平铺到任意目录，自行挂载
 ```
+
+升级即重跑同样两条命令。本地开发时改为在仓库根从 checkout 安装：`uv tool install --force --from . npc`。
 
 然后在一个带 `openspec/` 目录的 git 工程内：
 
