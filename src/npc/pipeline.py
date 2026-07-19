@@ -464,12 +464,20 @@ def _render_focus(
     implement_commit: str | None,
     base: Path | None = None,
     project_context_override: Path | None = None,
+    entry: dict | None = None,
 ) -> tuple[str, str, int]:
-    """渲染 focus 文本；返回 (text, project_context_source, fixed_history_count)。"""
+    """渲染 focus 文本；返回 (text, project_context_source, fixed_history_count)。
+
+    ``entry`` 为 state 中本 change 的 progress 条目；给出时按本 change 自身提交
+    （implement + fix-rN）生成逐提交 ``git show``，与 ``focus render`` CLI 行为
+    一致；缺省退回 range diff。
+    """
     ctx, src = _focus.load_project_context(p.repo_root, project_context_override)
     fixed_count = 0
+    # review-rN 之前 fix-rN 已落地（fix-rN 后接 review-rN），上界取 N+1
+    own = _focus._own_commits(entry, 1 if round_n == 0 else round_n + 1)
     if round_n == 0:
-        text = _focus._round_0_template(change_id, ctx)
+        text = _focus._round_0_template(change_id, ctx, own_commits=own)
     else:
         if not implement_commit:
             raise ValueError("round>=1 时必须提供 implement_commit")
@@ -481,7 +489,12 @@ def _render_focus(
                 history_md = _focus.render_fixed_history_section(items)
                 _focus.write_fixed_history_json(base, items)
         text = _focus._round_n_template(
-            change_id, round_n, implement_commit, ctx, fixed_history_md=history_md
+            change_id,
+            round_n,
+            implement_commit,
+            ctx,
+            fixed_history_md=history_md,
+            own_commits=own,
         )
     return text, src, fixed_count
 
@@ -525,7 +538,7 @@ def run_review_round(
 
     # 1. focus（round>=1 时自动注入 Already-Fixed History）
     focus_text, ctx_src, fixed_history_count = _render_focus(
-        p, change_id, round_n, implement_commit, base=base
+        p, change_id, round_n, implement_commit, base=base, entry=entry
     )
     (base / f"round-{round_n}.focus.md").write_text(focus_text, encoding="utf-8")
 
