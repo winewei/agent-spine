@@ -365,7 +365,8 @@ def render(args: argparse.Namespace) -> None:
             args.implement_commit,
             ctx,
             fixed_history_md=history_md,
-            own_commits=_own_commits(entry, round_n),
+            # review-rN 之前 fix-rN 已落地（fix-rN 后接 review-rN），上界取 N+1
+            own_commits=_own_commits(entry, round_n + 1),
         )
 
     output.write_text(text, encoding="utf-8")

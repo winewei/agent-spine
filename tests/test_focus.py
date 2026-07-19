@@ -135,6 +135,77 @@ def test_render_round_n_includes_history_hints(env_setup, capsys, make_args, tmp
 
 
 # ============================================================
+# v1.2 own_commits：并行 worktree 下按本 change 自身提交出 git show
+# ============================================================
+
+
+def _write_state_with_commits(p, change_id: str = "add-foo") -> None:
+    state = {
+        "progress": [
+            {
+                "seq": 1,
+                "change_id": change_id,
+                "implement_commit": "aaa1111",
+                "phases": {
+                    "fix-r1": {"commit": "bbb2222"},
+                    "fix-r2": {"commit": "ccc3333"},
+                },
+            }
+        ]
+    }
+    p.state_json.write_text(json.dumps(state), encoding="utf-8")
+
+
+def test_own_commits_orders_implement_then_fix_rounds():
+    entry = {
+        "implement_commit": "aaa1111",
+        "phases": {"fix-r2": {"commit": "ccc3333"}, "fix-r1": {"commit": "bbb2222"}},
+    }
+    assert _focus._own_commits(entry, 3) == ["aaa1111", "bbb2222", "ccc3333"]
+    assert _focus._own_commits(entry, 1) == ["aaa1111"]
+    assert _focus._own_commits(None, 3) == []
+
+
+def test_render_round_0_uses_own_commit_show(env_setup, capsys, make_args, tmp_path):
+    _write_state_with_commits(env_setup)
+    out = tmp_path / "focus.md"
+    _focus.render(
+        make_args(
+            round_n=0,
+            change_id="add-foo",
+            implement_commit=None,
+            output=str(out),
+            project_context=None,
+        )
+    )
+    capsys.readouterr()
+    text = out.read_text()
+    assert "git --no-pager show aaa1111" in text
+    assert "HEAD~1..HEAD" not in text
+
+
+def test_render_round_n_includes_current_fix_commit(env_setup, capsys, make_args, tmp_path):
+    """review-rN 起跑时 fix-rN 已落地，git show 列表必须包含 fix-rN 的 commit。"""
+    _write_state_with_commits(env_setup)
+    out = tmp_path / "focus.md"
+    _focus.render(
+        make_args(
+            round_n=2,
+            change_id="add-foo",
+            implement_commit="aaa1111",
+            output=str(out),
+            project_context=None,
+        )
+    )
+    capsys.readouterr()
+    text = out.read_text()
+    assert "git --no-pager show aaa1111" in text
+    assert "git --no-pager show bbb2222" in text
+    assert "git --no-pager show ccc3333" in text
+    assert "aaa1111~1..HEAD" not in text
+
+
+# ============================================================
 # v1.7 AGENTS.md fallback
 # ============================================================
 

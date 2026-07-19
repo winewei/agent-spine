@@ -175,3 +175,37 @@ def test_run_manifest_sha_mismatch_stays_code_verdict(tmp_path, capsys):
     out = json.loads(capsys.readouterr().out)
     # 代码确实写了（verdict=code），但与声明不符 → ok=false, reason=sha_mismatch
     assert out["verdict"] == "code" and out["reason"] == "sha_mismatch"
+
+
+# ============================================================
+# git_ref 模式：对 commit tree 核验（v1.7）
+# ============================================================
+
+
+def test_manifest_git_ref_file_present_directory_rejected(fake_repo, tmp_path):
+    """git_ref 模式下 blob 计 present；目录（tree 对象）不计，进 missing。"""
+    import subprocess
+
+    (fake_repo / "src").mkdir()
+    (fake_repo / "src" / "mod.py").write_text("x = 1\n")
+    subprocess.run(["git", "add", "."], cwd=fake_repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "add src"], cwd=fake_repo, check=True)
+
+    m = _write_manifest(tmp_path, ["src/mod.py", "src"])
+    out = _verify.check_manifest_files(str(m), repo_root=fake_repo, git_ref="HEAD")
+    assert out["present"] == 1
+    assert out["missing"] == ["src"]
+    assert out["ok"] is False and out["reason"] == "files_missing"
+
+
+def test_manifest_git_ref_sha_verified(fake_repo, tmp_path):
+    import subprocess
+
+    (fake_repo / "a.py").write_text("y = 2\n")
+    subprocess.run(["git", "add", "."], cwd=fake_repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "add a"], cwd=fake_repo, check=True)
+
+    sha = hashlib.sha256(b"y = 2\n").hexdigest()
+    m = _write_manifest(tmp_path, [{"path": "a.py", "sha256": sha}])
+    out = _verify.check_manifest_files(str(m), repo_root=fake_repo, git_ref="HEAD")
+    assert out["ok"] is True and out["present"] == 1 and out["sha_mismatch"] == []

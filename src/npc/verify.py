@@ -404,11 +404,13 @@ def check_manifest_files(
         if git_ref and not Path(rel).is_absolute():
             root = repo_root or Path.cwd()
             probe = runner(
-                ["git", "-C", str(root), "cat-file", "-e", f"{git_ref}:{rel}"],
+                ["git", "-C", str(root), "cat-file", "-t", f"{git_ref}:{rel}"],
                 capture_output=True,
                 text=True,
             )
-            if probe.returncode != 0:
+            # manifest 是不可信输出：cat-file -e 只查对象存在，目录（tree）也会
+            # 通过；要求类型必须是 blob，防止 "src" 这类目录条目被计为 present。
+            if probe.returncode != 0 or probe.stdout.strip() != "blob":
                 missing.append(rel)
                 continue
             present += 1
