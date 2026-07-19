@@ -187,10 +187,42 @@ def load_project_context(
     return DEFAULT_PROJECT_CONTEXT, "default"
 
 
-def _round_0_template(change_id: str, project_context: str) -> str:
-    return f"""本次审查的是 OpenSpec change `{change_id}` 的代码 diff。
+def _own_commits(entry: dict | None, up_to_round_exclusive: int) -> list[str]:
+    """本 change 自身的提交：implement_commit + phases.fix-r{1..N-1}.commit（按轮次升序）。
+
+    并行 worktree 流程里 review 起跑时 HEAD 已被后续 change 的集成提交推进，
+    HEAD~1..HEAD / implement~1..HEAD 都会把别的 change 的提交包进来（评审基准
+    错位）；枚举本 change 自己的提交在串行与并行流程下都正确。
+    """
+    commits: list[str] = []
+    impl = (entry or {}).get("implement_commit")
+    if impl:
+        commits.append(impl)
+    phases = (entry or {}).get("phases") or {}
+    for r in range(1, up_to_round_exclusive):
+        c = (phases.get(f"fix-r{r}") or {}).get("commit")
+        if c:
+            commits.append(c)
+    return commits
+
+
+def _diff_commands(commits: list[str], fallback_range: str) -> str:
+    """评审用 git 命令块：commits 非空时逐提交 git show，否则退回 range diff。"""
+    if not commits:
+        return f"    git --no-pager diff {fallback_range}"
+    return "\n".join(f"    git --no-pager show {c}" for c in commits)
+
+
+def _round_0_template(
+    change_id: str, project_context: str, own_commits: list[str] | None = None
+) -> str:
+    commits = own_commits or []
+    scope_note = ""
+    if commits:
+        scope_note = f"\n本 change 的提交为：{', '.join(commits)}（HEAD 上可能混有其它并行 change 的提交，只审列出的提交）。"
+    return f"""本次审查的是 OpenSpec change `{change_id}` 的代码 diff。{scope_note}
 请先在仓库内运行：
-    git --no-pager diff HEAD~1..HEAD
+{_diff_commands(commits, "HEAD~1..HEAD")}
 查看本次 change 引入的全部 diff，再开始审查。
 
 请你在评审前先读取以下文件了解需求、规格与设计约束：
@@ -227,12 +259,17 @@ def _round_n_template(
     implement_commit: str,
     project_context: str,
     fixed_history_md: str = "",
+    own_commits: list[str] | None = None,
 ) -> str:
     history_block = f"\n{fixed_history_md}" if fixed_history_md else ""
-    return f"""本次审查的是 OpenSpec change `{change_id}` 的代码 diff（base = {implement_commit}~1）。
+    commits = own_commits or []
+    scope_note = ""
+    if commits:
+        scope_note = f"\n本 change 的累计提交为：{', '.join(commits)}（HEAD 上可能混有其它并行 change 的提交，只审列出的提交）。"
+    return f"""本次审查的是 OpenSpec change `{change_id}` 的代码 diff（base = {implement_commit}~1）。{scope_note}
 这是第 {round_n} 轮 re-review，前 {round_n} 轮 review-fix 历史与已修复 findings 见 $LOG_BASE/change.md。
 请先在仓库内运行：
-    git --no-pager diff {implement_commit}~1..HEAD
+{_diff_commands(commits, f"{implement_commit}~1..HEAD")}
 查看本次 change 累计 diff，再开始评审。
 
 请你在评审前先读取以下文件了解需求、规格与设计约束：
@@ -266,6 +303,10 @@ def render(args: argparse.Namespace) -> None:
     v1.1：round >= 1 时自动从 state 取 base，读 ``round-{1..N-1}.fix.summary.md``
     抽出 Per-Finding Resolution 注入 focus.md，避免 Codex 跨轮重报已修问题。
     同时序列化 ``<base>/fixed-history.json`` 供调试。
+
+    v1.2：round 0/round N 均从 state 枚举本 change 自身提交（implement + fix-rN），
+    生成逐提交 ``git show`` 指令；并行 worktree 流程下 HEAD 已被后续 change 推进，
+    不再假设 ``HEAD~1..HEAD`` 即本 change。state 缺失时退回原 range diff 行为。
     """
     try:
         p = _paths.load_paths(args)
@@ -286,8 +327,21 @@ def render(args: argparse.Namespace) -> None:
     round_n = args.round_n
     fixed_count = 0
     fixed_json_path: str | None = None
+
+    # 两轮共用：从 state 取本 change 条目（取不到时 entry=None，模板走 fallback）
+    from .state import read_state as _read_state
+
+    entry: dict | None = None
+    try:
+        state = _read_state(p.state_json)
+        progress = state.get("progress") or []
+        entry = next((e for e in progress if e.get("change_id") == args.change_id), None)
+    except (FileNotFoundError, OSError):
+        # state 缺失或读取失败：focus 仍可渲染，退回 range diff 行为
+        entry = None
+
     if round_n == 0:
-        text = _round_0_template(args.change_id, ctx)
+        text = _round_0_template(args.change_id, ctx, own_commits=_own_commits(entry, 1))
     else:
         if not args.implement_commit:
             _io.emit_error(
@@ -296,27 +350,22 @@ def render(args: argparse.Namespace) -> None:
                 exit_code=2,
             )
             return
-        # 从 state 取 base 以便读 fix.summary.md
-        from .state import read_state as _read_state
-
         history_md = ""
-        try:
-            state = _read_state(p.state_json)
-            progress = state.get("progress") or []
-            entry = next((e for e in progress if e.get("change_id") == args.change_id), None)
-            if entry is not None:
-                base = Path(entry.get("base") or _paths.base_for(p, entry["seq"], args.change_id))
-                items = extract_fixed_history(base, round_n)
-                fixed_count = len(items)
-                if items:
-                    history_md = render_fixed_history_section(items)
-                    fixed_json_path = str(write_fixed_history_json(base, items))
-        except (FileNotFoundError, OSError):
-            # state 缺失或读取失败：focus 仍可渲染，只是不注入历史
-            pass
+        if entry is not None:
+            base = Path(entry.get("base") or _paths.base_for(p, entry["seq"], args.change_id))
+            items = extract_fixed_history(base, round_n)
+            fixed_count = len(items)
+            if items:
+                history_md = render_fixed_history_section(items)
+                fixed_json_path = str(write_fixed_history_json(base, items))
 
         text = _round_n_template(
-            args.change_id, round_n, args.implement_commit, ctx, fixed_history_md=history_md
+            args.change_id,
+            round_n,
+            args.implement_commit,
+            ctx,
+            fixed_history_md=history_md,
+            own_commits=_own_commits(entry, round_n),
         )
 
     output.write_text(text, encoding="utf-8")
