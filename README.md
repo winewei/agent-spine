@@ -22,7 +22,7 @@ cd agent-spine
 
 # 1) 装 npc 命令（从当前仓库根安装 src/npc；唯一分发物）
 uv tool install --force --from . npc
-npc --version          # npc 1.7.1
+npc --version          # npc 1.7.0
 
 # 2) 把 playbooks 物化到你的宿主 CLI（按需，三选一）
 npc playbook install --host claude    # Claude Code：commands/skills/agents 目录
