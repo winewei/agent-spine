@@ -24,8 +24,8 @@ def test_render_implementer_substitutes_runtime_vars():
 
 def test_render_implementer_includes_dual_artifact_contract():
     text = templates.render_implementer("c", "/b", "/r")
-    # 双产物契约：summary 文件路径 + RESULT 行
-    assert "Write" in text
+    # 双产物契约：summary 文件路径 + RESULT 行（措辞宿主中立，不出现具体工具名）
+    assert "写摘要文件" in text
     assert "RESULT:" in text
     # summary path 必须出现在 RESULT 模板里
     assert "/b/implement.summary.md" in text

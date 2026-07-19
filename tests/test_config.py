@@ -279,3 +279,59 @@ def test_legacy_coder_mimo_env_file_flows_into_provider(tmp_path: Path):
     cfg = _config.load_config(repo, home=home)
     assert cfg.coder.mimo_env_file == "/legacy/mimo.env"
     assert cfg.provider("mimo").env_file == "/legacy/mimo.env"
+
+
+# ============================================================
+# v1.7 [host] 配置
+# ============================================================
+
+
+def test_host_section_defaults_to_none(tmp_path):
+    cfg = _config.load_config(tmp_path, home=tmp_path / "home")
+    assert cfg.host.name is None
+    assert cfg.host.session_dir is None
+
+
+def test_host_section_parsed(tmp_path):
+    (tmp_path / ".npc").mkdir()
+    (tmp_path / ".npc" / "config.toml").write_text(
+        '[host]\nname = "kimi"\nsession_dir = ".kimi/s/{proj_key}"\n',
+        encoding="utf-8",
+    )
+    cfg = _config.load_config(tmp_path, home=tmp_path / "home")
+    assert cfg.host.name == "kimi"
+    assert cfg.host.session_dir == ".kimi/s/{proj_key}"
+
+
+def test_host_session_dir_rejects_unknown_placeholder(tmp_path):
+    (tmp_path / ".npc").mkdir()
+    (tmp_path / ".npc" / "config.toml").write_text(
+        '[host]\nsession_dir = ".kimi/{project}"\n', encoding="utf-8"
+    )
+    with pytest.raises(_config.ConfigError, match="不支持的占位符"):
+        _config.load_config(tmp_path, home=tmp_path / "home")
+
+
+def test_host_session_dir_rejects_malformed_template(tmp_path):
+    (tmp_path / ".npc").mkdir()
+    (tmp_path / ".npc" / "config.toml").write_text(
+        '[host]\nsession_dir = ".kimi/{proj_key"\n', encoding="utf-8"
+    )
+    with pytest.raises(_config.ConfigError, match="模板语法错误"):
+        _config.load_config(tmp_path, home=tmp_path / "home")
+
+
+def test_host_session_dir_allows_literal_without_placeholder(tmp_path):
+    (tmp_path / ".npc").mkdir()
+    (tmp_path / ".npc" / "config.toml").write_text(
+        '[host]\nsession_dir = ".kimi/sessions"\n', encoding="utf-8"
+    )
+    cfg = _config.load_config(tmp_path, home=tmp_path / "home")
+    assert cfg.host.session_dir == ".kimi/sessions"
+
+
+def test_host_section_must_be_table(tmp_path):
+    (tmp_path / ".npc").mkdir()
+    (tmp_path / ".npc" / "config.toml").write_text('host = "kimi"\n', encoding="utf-8")
+    with pytest.raises(_config.ConfigError):
+        _config.load_config(tmp_path, home=tmp_path / "home")

@@ -1,9 +1,11 @@
-"""CC session_id 识别。
+"""宿主 session_id 识别。
 
 按以下顺序尝试：
-1. mtime 启发：~/.claude/projects/<PROJ_KEY>/ 下最近 1 分钟内被触碰的 .jsonl
-   （skill 调用时 cc 已 append 当前 session 的 jsonl，mtime 最新）
-2. by-cwd hook 索引最后一行 + jsonl 存在性 + mtime < 6h
+1. mtime 启发：宿主 session 目录（Claude Code：~/.claude/projects/<PROJ_KEY>/）下
+   最近 1 分钟内被触碰的 .jsonl（调用 npc 时宿主已 append 当前 session 的
+   transcript，mtime 最新）。宿主无 session 目录（generic）→ 跳过。
+2. by-cwd hook 索引最后一行 + transcript 存在性 + mtime < 6h（宿主中立：任何
+   CLI 的 SessionStart hook 都可往 ~/task_log/.session-cache/by-cwd/ 追加）
 3. 都不行 → ('-', '-', 'unknown')
 
 设计为纯函数（除 mtime/文件系统访问外不写状态），由 init 调用后注入环境变量。
@@ -15,16 +17,28 @@ import json
 import time
 from pathlib import Path
 
+from . import hosts as _hosts
+
 
 SOURCE_MTIME = "mtime-1min"
 SOURCE_HOOK = "hook-by-cwd-tail"
 SOURCE_UNKNOWN = "unknown"
 
 
-def detect_via_mtime(proj_key: str, home: Path, *, window_seconds: int = 60) -> tuple[str, str] | None:
-    """路径 A：扫 cc projects 找最近 mtime jsonl。返回 (session_id, transcript_path) 或 None。"""
-    cc_dir = home / ".claude" / "projects" / proj_key
-    if not cc_dir.is_dir():
+def detect_via_mtime(
+    proj_key: str,
+    home: Path,
+    *,
+    window_seconds: int = 60,
+    host: _hosts.ResolvedHost | None = None,
+) -> tuple[str, str] | None:
+    """路径 A：扫宿主 session 目录找最近 mtime jsonl。返回 (session_id, transcript_path) 或 None。
+
+    ``host`` 未传时按 claude 宿主目录布局（向后兼容既有调用方）。
+    """
+    h = host or _hosts.resolve_host(_hosts.HOST_CLAUDE)
+    cc_dir = h.session_dir(home, proj_key)
+    if cc_dir is None or not cc_dir.is_dir():
         return None
     now = time.time()
     candidates: list[tuple[float, Path]] = []
@@ -77,11 +91,17 @@ def detect_via_hook(proj_key: str, home: Path, *, max_age_seconds: int = 6 * 360
 
 
 def detect_session(
-    proj_key: str, home: Path | None = None
+    proj_key: str,
+    home: Path | None = None,
+    *,
+    host: _hosts.ResolvedHost | None = None,
 ) -> tuple[str, str, str]:
-    """返回 (session_id, transcript_path, source)；找不到返回 ('-', '-', 'unknown')。"""
+    """返回 (session_id, transcript_path, source)；找不到返回 ('-', '-', 'unknown')。
+
+    ``host`` 未传时按 claude 宿主（向后兼容）；generic 宿主自动跳过 mtime 启发。
+    """
     h = home or Path.home()
-    res = detect_via_mtime(proj_key, h)
+    res = detect_via_mtime(proj_key, h, host=host)
     if res:
         return res[0], res[1], SOURCE_MTIME
     res = detect_via_hook(proj_key, h)

@@ -23,7 +23,7 @@ import os
 import shutil
 from pathlib import Path
 
-from . import _io, config as _config, paths as _paths
+from . import _io, config as _config, hosts as _hosts, paths as _paths
 
 
 # (name, required) —— 在 PATH 中可执行文件的体检清单
@@ -223,6 +223,25 @@ def _check_providers(*, home: Path, repo_root: Path, which) -> dict:
     }
 
 
+def _check_host(*, home: Path, repo_root: Path, env: dict | None = None) -> dict:
+    """宿主解析结果（信息级，永不 missing）：名字、来源、session 识别能力。"""
+    try:
+        cfg = _config.load_config(repo_root, home=home)
+        host = _hosts.resolve_host_from_config(cfg, env=env)
+    except Exception:
+        host = _hosts.resolve_host(env=env)
+    if host.session_dir_template:
+        cap = f"session 目录模板 {host.session_dir_template}"
+    else:
+        cap = "无 session 目录（session 识别仅走 by-cwd hook 索引）"
+    return {
+        "name": "host",
+        "status": "ok",
+        "detail": f"宿主 {host.name}（来源 {host.source}）；{cap}",
+        "required": False,
+    }
+
+
 def _check_principles(*, repo_root: Path | None) -> dict:
     """工程级 docs/principles.md 是否在（warn 级）。"""
     if repo_root is None:
@@ -270,6 +289,7 @@ def gather_checks(
     cfg_root = repo_root if repo_root is not None else Path.cwd()
     checks.append(_check_config(home=home, repo_root=cfg_root))
     checks.append(_check_providers(home=home, repo_root=cfg_root, which=which))
+    checks.append(_check_host(home=home, repo_root=cfg_root))
     checks.append(_check_principles(repo_root=repo_root))
     return checks
 

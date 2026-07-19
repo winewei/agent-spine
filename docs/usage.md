@@ -1,16 +1,16 @@
-# 推荐用法：CLI + plugin + CLAUDE.md 三层配置
+# 推荐用法：CLI + playbooks + 项目上下文三层配置
 
-`npc` 单独可用，但它作为**自主 harness 底座**的价值要靠 **CLI + plugin + CLAUDE.md 三层一起配** 才能兑现。本文给出可直接照做的完整步骤。
+`npc` 单独可用，但它作为**自主 harness 底座**的价值要靠 **CLI + playbooks + 项目上下文片段 三层一起配** 才能兑现。本文给出可直接照做的完整步骤。宿主可以是任意 agent CLI（Claude Code / Kimi / Codex / …）；宿主间差异只在层 2 的物化目标与层 3 的文件名。
 
 ---
 
-## 层 1：装 `npc` 命令（机器级，所有 Claude Code session 共享）
+## 层 1：装 `npc` 命令（机器级，所有宿主 session 共享）
 
 `npc` 是从当前 agent-spine 仓库安装出来的 CLI 命令，代码在 `src/npc`。直接从仓库根安装：
 
 ```bash
 uv tool install --force --from . npc              # 从当前仓库根安装 src/npc 为 npc 命令
-npc --version          # 应输出 npc 1.6.0
+npc --version          # 应输出 npc 1.7.0
 ```
 
 首次在某工程内 `npc init` 时会自举 `~/task_log/.new-plan-review-schema.json` 与 `~/.local/bin/portable-timeout`。
@@ -19,39 +19,41 @@ npc --version          # 应输出 npc 1.6.0
 
 ---
 
-## 层 2：装 harness plugin（用户级，所有 project 共享）
+## 层 2：物化 playbooks 到宿主（用户级，所有 project 共享）
 
-```text
-# 在 Claude Code 中：
-/plugin marketplace add winewei/agent-spine
-/plugin install agent-spine@agent-spine
+playbooks 随 npc 包发行（宿主中立措辞，每份顶部带宿主适配表），按宿主三选一：
+
+```bash
+npc playbook install --host claude    # Claude Code：commands/skills/agents 目录（重启后生效）
+npc playbook install --host codex     # Codex CLI：~/.codex/prompts/
+npc playbook install --dest <DIR>     # 其它宿主（kimi 等）：平铺到其自定义命令目录
 ```
 
-装完得到五个能力：`/spine-run`、`/spine-analyze`、`/new-plan-changes-v2`（串行推进全部 active changes）、`new-plan-changes-v3`（skill，波次并行版）、`spine-coder`（subagent）。
+装完得到六个能力：`spine-run`、`spine-analyze`、`new-plan-changes-v2`（串行推进全部 active changes）、`new-plan-changes-v3`（波次并行版）、`new-plan-changes-v4`（上下文预算版）、`spine-coder`（coder 执行体定义）。
 
-> CLI 与 plugin 版本应保持一致；升级 CLI（在仓库根重跑 `uv tool install --force --from . npc`）后建议同步 `/plugin update agent-spine@agent-spine`。
+> playbook 内容以 npc 包内版本为准：升级 CLI（在仓库根重跑 `uv tool install --force --from . npc`）后重跑同一条 `npc playbook install` 即同步。不想物化时，任何宿主也可 `npc playbook show <name>` 把原文直接拉进 context 执行。
 
 ---
 
-## 层 3：CLAUDE.md 片段（项目级，让主 session 知道何时该用 harness）
+## 层 3：项目上下文片段（项目级，让主 session 知道何时该用 harness）
 
-把下面这段粘到目标工程的 `CLAUDE.md`（或 `~/.claude/CLAUDE.md` 全局）：
+把下面这段粘到目标工程的项目上下文文件——Claude Code 为 `CLAUDE.md`（或 `~/.claude/CLAUDE.md` 全局），其它宿主为 `AGENTS.md` 或其等价文件（npc 的 review / coder prompt 对两者都认）：
 
 ```markdown
 ## 自主 harness（agent-spine）
 
 当用户要"实现一批 openspec change"、"把某目标自主跑完"、"长时无人值守地 plan→implement→review→archive"时，
-用 `/spine-run`，不要手工逐步操作：
+用 `spine-run` playbook（Claude Code 中即 `/spine-run`），不要手工逐步操作：
 
-- `/spine-run <目标>` —— 自由目标，harness 自动拆解成 change 再跑（交互档）
-- `/spine-run <change名…>` —— 已有 openspec change，直接跑
-- `/spine-run <…> --auto` —— 全自主档，fire-and-forget
+- `spine-run <目标>` —— 自由目标，harness 自动拆解成 change 再跑（交互档）
+- `spine-run <change名…>` —— 已有 openspec change，直接跑
+- `spine-run <…> --auto` —— 全自主档，fire-and-forget
 
 规则：
 - 主 session 只调度与决策；实现/修复一律 spawn `spine-coder` subagent。
 - 确定性动作（状态/事件/模板/review/archive）一律走 `npc` 子命令，看一行 JSON 做分支。
 - 不在 context 里搬运 prompt 模板 / review.json / summary.md 原文。
-- 跑过几个 run 后，用 `/spine-analyze` 读跨 run 指标迭代 harness 自身。
+- 跑过几个 run 后，用 `spine-analyze` playbook 读跨 run 指标迭代 harness 自身。
 ```
 
 ---
@@ -59,8 +61,8 @@ npc --version          # 应输出 npc 1.6.0
 ## 端到端：第一次跑
 
 ```text
-# 在一个带 openspec/ 的 git 工程内
-/spine-run 给认证模块加请求限流和审计日志 --auto
+# 在一个带 openspec/ 的 git 工程内（Claude Code 为 /spine-run；其它宿主按其命令机制触发同名 playbook）
+spine-run 给认证模块加请求限流和审计日志 --auto
 ```
 
 harness 会：
@@ -77,7 +79,7 @@ harness 会：
 
 ## 续跑
 
-中断后再次 `/spine-run`（同工程）会自动检测 `needs_resume` 并从断点（next_seq / next_phase）接着跑，不会重复已 archived 的 change。
+中断后再次跑 `spine-run`（同工程）会自动检测 `needs_resume` 并从断点（next_seq / next_phase）接着跑，不会重复已 archived 的 change。
 
 ## 切 review 引擎到 claude（或自定义后端）
 

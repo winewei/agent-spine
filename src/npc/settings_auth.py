@@ -1,6 +1,10 @@
 """auto 模式授权：`npc init --auto` 时给项目 `<repo>/.claude/settings.json` 授足够权限，
 让 harness 无人值守跑时不被 Claude Code 的工具授权弹窗打断。
 
+本模块是 **claude 宿主专属**：仅当 hosts.resolve_host().settings_grant 为真时由
+init 调用；其他宿主（kimi / codex / …）权限模型各异，npc 不代写，由用户按宿主
+文档自行放行（init 会在结果里标注 skipped）。
+
 设计纪律：
 - **只在 --auto 时调用**（交互档保留人确认）。
 - **项目级、可逆**：只动 `<repo>/.claude/settings.json`。

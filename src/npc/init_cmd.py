@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 
 from . import _io, paths as _paths, schema, session, resume, git_chain as _git_chain, state as _state
-from . import settings_auth as _settings_auth
+from . import config as _config, hosts as _hosts, settings_auth as _settings_auth
 
 
 PORTABLE_TIMEOUT_REL = ".local/bin/portable-timeout"
@@ -120,6 +120,13 @@ def run(args: argparse.Namespace) -> None:
         _io.emit_error("not_git_repo", str(e), exit_code=3)
         return
 
+    # 1b. 解析宿主（配置加载失败不阻塞 init：warn 后按 env 探测默认）
+    try:
+        host = _hosts.resolve_host_from_config(_config.load_config(repo_root, home=home))
+    except _config.ConfigError as e:
+        _io.warn(f"配置加载失败，宿主按默认探测：{e}")
+        host = _hosts.resolve_host()
+
     # 2. 续跑探测（在生成 run_ts 之前）
     proj_key = _paths.proj_key_for(repo_root)
     task_log_dir = home / "task_log" / proj_key
@@ -156,13 +163,14 @@ def run(args: argparse.Namespace) -> None:
     pt_path, pt_created = ensure_portable_timeout(home)
 
     # 7. session 识别
-    sid, tx, src = session.detect_session(p.proj_key, home=home)
+    sid, tx, src = session.detect_session(p.proj_key, home=home, host=host)
 
-    # 8. sanity check：cc projects 目录
-    if not (home / ".claude" / "projects" / p.proj_key).is_dir():
+    # 8. sanity check：宿主 session 目录（仅宿主声明了该能力时检查）
+    host_session_dir = host.session_dir(home, p.proj_key)
+    if host_session_dir is not None and not host_session_dir.is_dir():
         _io.warn(
-            f"cc projects 目录不存在：{home / '.claude' / 'projects' / p.proj_key}，"
-            "session 串联可能受限"
+            f"宿主 session 目录不存在：{host_session_dir}，"
+            "session 串联退化为 by-cwd hook 索引"
         )
 
     if schema_created:
@@ -172,18 +180,25 @@ def run(args: argparse.Namespace) -> None:
 
     mode = "auto" if args.auto else "interactive"
 
-    # 8b. auto 授权：仅 --auto 时给项目 .claude/settings.json 授足够权限（不阻塞 init）
+    # 8b. auto 授权：仅 --auto 且宿主支持 settings 授权（claude）时写项目级权限（不阻塞 init）
     auto_auth: dict | None = None
     if args.auto:
-        try:
-            auto_auth = _settings_auth.grant_auto_permissions(p.repo_root)
-            if auto_auth.get("ok"):
-                _io.info(f"已为 auto 模式授权：{auto_auth['path']}")
-            else:
-                _io.warn(f"auto 授权跳过（{auto_auth.get('skipped')}）：{auto_auth.get('path')}")
-        except OSError as e:
-            _io.warn(f"auto 授权失败（不阻塞 init）：{e}")
-            auto_auth = {"ok": False, "error": str(e)}
+        if not host.settings_grant:
+            auto_auth = {"ok": False, "skipped": f"host-{host.name}-no-settings-grant"}
+            _io.info(
+                f"auto 授权跳过：宿主 {host.name} 无 npc 可写的权限配置，"
+                "请按宿主自身机制放行工具权限"
+            )
+        else:
+            try:
+                auto_auth = _settings_auth.grant_auto_permissions(p.repo_root)
+                if auto_auth.get("ok"):
+                    _io.info(f"已为 auto 模式授权：{auto_auth['path']}")
+                else:
+                    _io.warn(f"auto 授权跳过（{auto_auth.get('skipped')}）：{auto_auth.get('path')}")
+            except OSError as e:
+                _io.warn(f"auto 授权失败（不阻塞 init）：{e}")
+                auto_auth = {"ok": False, "error": str(e)}
 
     # 9. state_drift 扫描（仅 needs_resume 时执行）
     state_drift: dict | None = None
@@ -215,6 +230,11 @@ def run(args: argparse.Namespace) -> None:
         "session_id": sid,
         "transcript_path": tx,
         "session_source": src,
+        "host": {
+            "name": host.name,
+            "source": host.source,
+            "session_dir": str(host_session_dir) if host_session_dir else None,
+        },
         "needs_resume": needs_resume,
         "resume_state_json": str(resume_state_json) if resume_state_json else None,
         "state_drift": state_drift,

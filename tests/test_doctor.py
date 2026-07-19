@@ -626,3 +626,20 @@ def test_providers_check_runner_bin_missing_warn(tmp_path: Path):
     by = {c["name"]: c for c in checks}
     assert by["providers"]["status"] == "warn"
     assert "codex" in by["providers"]["detail"]
+
+
+# ============================================================
+# v1.7 宿主检查项
+# ============================================================
+
+
+def test_host_check_present_and_ok(tmp_path: Path):
+    home = _make_home(tmp_path)
+    repo = _make_repo(tmp_path)
+    checks = doctor.gather_checks(
+        home=home, repo_root=repo, which=_which_factory(ALL_BINS)
+    )
+    host = next(c for c in checks if c["name"] == "host")
+    assert host["status"] == "ok"
+    assert host["required"] is False
+    assert "宿主" in host["detail"]

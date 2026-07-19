@@ -44,19 +44,19 @@ def render_implementer(
 - openspec/changes/{change_id}/specs/ 下所有 spec.md（如存在）
 - openspec/changes/{change_id}/design.md（如存在）
 - openspec/AGENTS.md / openspec/project.md
-- 项目根 CLAUDE.md
+- 项目根 CLAUDE.md 或 AGENTS.md（存在哪个读哪个）
 
 ## 实施约束
 
 - spec.md 的 Requirements / Scenarios 是**唯一的实现与测试验收标准**；自行从 spec 提取细节
 - 测试策略由你决定，但 spec 标注的"必须真实并发回归"、"必须覆盖此 Scenario"等硬约束不可降级为 mock
 - 逐项完成 tasks.md，每完成一项更新对应行为 `[x]`
-- 通过项目验收测试（参考 CLAUDE.md / project.md 的测试命令）
+- 通过项目验收测试（参考 CLAUDE.md / AGENTS.md / project.md 的测试命令）
 - 提交：`git commit -m "<type>(<scope>): <简要描述>"`，正文说明 change-id；**不要 archive**
 
 ## 双产物契约（缺一视为失败）
 
-(1) 用 Write 工具创建摘要到 `{summary_path}`（≤ 80 行）：
+(1) 写摘要文件到 `{summary_path}`（≤ 80 行）：
 
 ```markdown
 # Implement Summary — {change_id}
@@ -88,7 +88,7 @@ RESULT: commit=<hash> tasks=<count> tests=<pass|fail> summary={summary_path} not
 RESULT: commit=- tasks=<已完成数> tests=fail summary=<path or -> notes=<关键错误一行>
 ```
 
-两条产物缺一不可：summary 文件必须真的 Write，RESULT 行必须出现在 message 最后一行。
+两条产物缺一不可：summary 文件必须真的写到 disk，RESULT 行必须出现在 message 最后一行。
 """
 
 
@@ -162,7 +162,7 @@ def render_fixer(
 
 ## 双产物契约
 
-(1) 用 Write 工具创建修复摘要到 `{summary_path}`（≤ 120 行）：
+(1) 写修复摘要文件到 `{summary_path}`（≤ 120 行）：
 
 ```markdown
 # Fix Round {round_n} Summary — {change_id}
@@ -217,10 +217,11 @@ def render_spawn_prompt(
     prompt_file: str,
     extension: str | None = None,
 ) -> str:
-    """渲染给 Claude `Agent` 工具 `prompt` 字段的薄引导语。
+    """渲染给宿主 sub-agent 派发机制（Claude Code 的 Agent 工具、其它 CLI 的
+    等价物或 `npc implement/fix run` 子进程）的薄引导语。
 
-    主 session 拿到这条字符串（~150 tokens）作为 Agent.prompt 传入，
-    sub-agent 启动后自己 Read prompt_file 拿到完整指令——这样原本 ~2500 tokens
+    主 session 拿到这条字符串（~150 tokens）作为 sub-agent 的 prompt 传入，
+    sub-agent 启动后自己读 prompt_file 拿到完整指令——这样原本 ~2500 tokens
     的 §A/§B 模板内容不再流过主 session context。
 
     phase 仅用于 description 文案；实际指令完全来自 prompt_file。
@@ -230,7 +231,7 @@ def render_spawn_prompt(
     else:
         action_phrase = f"修复 change `{change_id}` 的 review findings"
 
-    base = f"""请先用 Read 工具读取并严格按 {prompt_file} 里的指令执行任务（{action_phrase}）。
+    base = f"""请先读取 {prompt_file}，并严格按其中的指令执行任务（{action_phrase}）。
 
 该文件包含完整的实施 / 修复指令、Runtime Variables、双产物契约（summary 文件 + RESULT 行）。请逐项遵循，最终 message 的最后一行必须是 RESULT 行。"""
 

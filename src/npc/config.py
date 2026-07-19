@@ -42,6 +42,10 @@ TOML 示例：
     model = "claude-opus-4-7"  # 可省略；省略则使用 claude 的默认 model
     extra_args = ["--permission-mode", "default"]
 
+    [host]                     # 宿主 CLI（可省略；默认 env 探测：CLAUDECODE → claude，否则 generic）
+    name = "generic"           # claude | generic | 任意自定义名
+    session_dir = ".kimi/sessions/{proj_key}"  # 可选：为非 Claude 宿主补 session 目录模板
+
 内置 provider（无需声明即可用，可被 ``[providers.*]`` 同名覆盖）：
 
 - ``claude``：claude-cli，无 env_file（订阅 / 当前 provider）
@@ -51,6 +55,7 @@ TOML 示例：
 
 from __future__ import annotations
 
+import string
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -157,6 +162,20 @@ class CoderConfig:
 
 
 @dataclass(frozen=True)
+class HostConfig:
+    """宿主（调用 npc 的 agent CLI）配置。
+
+    - ``name``：``claude`` / ``generic`` / 任意自定义名；None = 自动探测
+      （``CLAUDECODE`` env → claude，否则 generic）。
+    - ``session_dir``：相对 home 的 session 目录模板（``{proj_key}`` 占位），
+      为非 Claude 宿主补 mtime 启发识别能力；None = 用宿主内置默认。
+    """
+
+    name: str | None = None
+    session_dir: str | None = None
+
+
+@dataclass(frozen=True)
 class VerifyConfig:
     """质量门命令覆盖；任一省略则由 ``npc verify`` 按 repo 清单自动探测。"""
 
@@ -173,6 +192,7 @@ class Config:
     review: ReviewEngineConfig = field(default_factory=ReviewEngineConfig)
     coder: CoderConfig = field(default_factory=CoderConfig)
     verify: VerifyConfig = field(default_factory=VerifyConfig)
+    host: HostConfig = field(default_factory=HostConfig)
     providers: tuple[ProviderConfig, ...] = BUILTIN_PROVIDERS
     source: str = "<default>"
 
@@ -320,6 +340,10 @@ def _build(data: dict, source: str) -> Config:
     if not isinstance(verify_raw, dict):
         raise ConfigError(f"[verify] 节必须是 table（{source}）")
 
+    host_raw = data.get("host") or {}
+    if not isinstance(host_raw, dict):
+        raise ConfigError(f"[host] 节必须是 table（{source}）")
+
     return Config(
         providers=providers,
         review=ReviewEngineConfig(
@@ -341,6 +365,10 @@ def _build(data: dict, source: str) -> Config:
             lint=_opt_str(verify_raw.get("lint"), "verify.lint", source),
             typecheck=_opt_str(verify_raw.get("typecheck"), "verify.typecheck", source),
             build=_opt_str(verify_raw.get("build"), "verify.build", source),
+        ),
+        host=HostConfig(
+            name=_opt_str(host_raw.get("name"), "host.name", source),
+            session_dir=_session_dir_template(host_raw.get("session_dir"), source),
         ),
         source=source,
     )
@@ -382,6 +410,28 @@ def _build_providers(
         except ConfigError as e:
             raise ConfigError(f"[providers.{name}]：{e}（{source}）") from e
     return tuple(by_name.values())
+
+
+def _session_dir_template(val: object, source: str) -> str | None:
+    """校验 ``host.session_dir`` 模板：仅允许 ``{proj_key}`` 占位符。
+
+    在加载期拦截语法错误 / 未知占位符，避免 init / session 识别路径上的
+    ``str.format`` 抛 KeyError（届时 run.json 可能已写盘，只能以 traceback 收场）。
+    """
+    tpl = _opt_str(val, "host.session_dir", source)
+    if tpl is None:
+        return None
+    try:
+        fields = [f for _, f, _, _ in string.Formatter().parse(tpl) if f is not None]
+    except ValueError as e:
+        raise ConfigError(f"host.session_dir 模板语法错误：{e}（{source}）")
+    bad = [f for f in fields if f != "proj_key"]
+    if bad:
+        raise ConfigError(
+            f"host.session_dir 含不支持的占位符 {{{bad[0]}}}"
+            f"（仅支持 {{proj_key}}；{source}）"
+        )
+    return tpl
 
 
 def _opt_str(val: object, name: str, source: str) -> str | None:

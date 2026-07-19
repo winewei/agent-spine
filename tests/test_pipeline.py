@@ -119,6 +119,49 @@ def test_run_review_round_success(
     assert entry["blocking_trend"] == [0]
 
 
+def test_run_review_round_focus_uses_own_commits(
+    env_setup, make_args, capsys, monkeypatch, fake_repo: Path
+):
+    """review run 路径下 focus 也按本 change 自身提交出 git show（含当轮 fix-rN）。"""
+    _bootstrap_run(env_setup, make_args, capsys, "add-foo")
+    s = json.loads(env_setup.state_json.read_text())
+    s["progress"][0]["implement_commit"] = "aaa1111"
+    s["progress"][0]["phases"] = {
+        "implement": {"commit": "aaa1111"},
+        "fix-r1": {"commit": "bbb2222"},
+    }
+    env_setup.state_json.write_text(json.dumps(s))
+
+    monkeypatch.setattr(
+        _pipeline, "_codex_exec", _stub_codex_writes_review({"verdict": "approve", "findings": []})
+    )
+    monkeypatch.setattr(_pipeline, "_find_codex_bin", lambda override=None: "/fake/codex")
+    monkeypatch.setattr(
+        _pipeline, "_portable_timeout_bin", lambda override=None: Path("/fake/portable-timeout")
+    )
+
+    p = env_setup
+    p_with_repo = type(p)(
+        repo_root=fake_repo,
+        proj_key=p.proj_key,
+        task_log_dir=p.task_log_dir,
+        run_ts=p.run_ts,
+        run_dir=p.run_dir,
+        state_json=p.state_json,
+        state_md=p.state_md,
+        index_file=p.index_file,
+        schema_path=p.schema_path,
+        run_events=p.run_events,
+    )
+
+    result = _pipeline.run_review_round(p_with_repo, 1, 1)
+    assert result["ok"] is True
+    text = (Path(result["review_json"]).parent / "round-1.focus.md").read_text()
+    assert "git --no-pager show aaa1111" in text
+    assert "git --no-pager show bbb2222" in text
+    assert "aaa1111~1..HEAD" not in text
+
+
 def test_run_review_round_with_blocking_renders_findings(
     env_setup, make_args, capsys, monkeypatch, fake_repo: Path
 ):

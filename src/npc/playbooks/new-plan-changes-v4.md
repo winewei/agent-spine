@@ -5,6 +5,16 @@ category: OpenSpec
 tags: [openspec, plan, implement, parallel, worktree, v4]
 ---
 
+> **宿主适配**：本 playbook 是宿主中立的主 session 指令，可在任意 agent CLI（Claude Code / Kimi / Codex / …）内执行。文中的宿主机制按下表映射，宿主缺某机制时用通用回退：
+>
+> | 文中写法 | Claude Code | 其它宿主通用回退 |
+> |---|---|---|
+> | `Agent(...)`（spawn sub-agent） | `Agent` 工具 | 宿主的 sub-agent 派发机制；没有则改用 `npc implement run` / `npc fix run`（headless coder 子进程，效果等价） |
+> | `isolation="worktree"` | Agent 工具参数 | 用 Bash `git worktree add` 手建隔离工作区，或把该波降级为串行 `npc implement run` |
+> | `AskUserQuestion` | 同名工具 | 直接向用户提问并等待回复 |
+> | `TodoWrite` | 同名工具 | 宿主的任务清单机制；没有则维护一份 markdown 清单 |
+> | `EnterPlanMode` / `ExitPlanMode` | plan 模式审批门 | 打印计划全文，请用户确认后继续（`--auto` 档两边都跳过） |
+
 # new-plan-changes-v4
 
 ## 前置（不满足即报错退出）
@@ -13,7 +23,7 @@ tags: [openspec, plan, implement, parallel, worktree, v4]
 - `npc doctor` 通过；缺 codex → 跳 review，记降级项、不阻塞
 - `openspec` 可用（`openspec list --json` 是计划入口）
 - git 工作树 clean
-- `worktree.baseRef=head`（`.claude/settings.json` 或 `~/.claude/settings.json`）；否则报错退出，不静默退化
+- worktree 隔离可用：Claude Code 宿主要求 `worktree.baseRef=head`（`.claude/settings.json` 或 `~/.claude/settings.json`），否则报错退出、不静默退化；其它宿主用 Bash `git worktree add`（基于 HEAD）等价实现
 
 ## 参数
 
@@ -33,7 +43,7 @@ INIT=$(npc init ${AUTO:+--auto} ${FRESH:+--fresh})   # needs_resume / state_drif
 
 - `state_drift.total_drifted > 0` → `npc state repair --auto`。
 - `needs_resume=true`、经历过 context compaction、或接手他人 session → 先跑 `npc status --brief`，以其 `pending_decisions / notes / next_action` 重建盘面，不信任记忆里的进度。
-- `init --auto` 弄脏 `.claude/settings.json` 时：tracked → `npc git commit --message "chore: npc auto-auth settings"`；untracked → 写入 `.git/info/exclude`。
+- `init --auto` 弄脏 `.claude/settings.json` 时（仅 claude 宿主会写；其它宿主 init 自动跳过）：tracked → `npc git commit --message "chore: npc auto-auth settings"`；untracked → 写入 `.git/info/exclude`。
 
 ## Step 2 — 计划（全部在 sub-agent 里）
 

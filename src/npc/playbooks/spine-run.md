@@ -5,6 +5,16 @@ category: Workflow
 tags: [harness, autonomous, orchestration, openspec, review-loop]
 ---
 
+> **宿主适配**：本 playbook 是宿主中立的主 session 指令，可在任意 agent CLI（Claude Code / Kimi / Codex / …）内执行。文中的宿主机制按下表映射，宿主缺某机制时用通用回退：
+>
+> | 文中写法 | Claude Code | 其它宿主通用回退 |
+> |---|---|---|
+> | `Agent(...)`（spawn sub-agent） | `Agent` 工具 | 宿主的 sub-agent 派发机制；没有则改用 `npc implement run` / `npc fix run`（headless coder 子进程，效果等价） |
+> | `isolation="worktree"` | Agent 工具参数 | 用 Bash `git worktree add` 手建隔离工作区，或把该波降级为串行 `npc implement run` |
+> | `AskUserQuestion` | 同名工具 | 直接向用户提问并等待回复 |
+> | `TodoWrite` | 同名工具 | 宿主的任务清单机制；没有则维护一份 markdown 清单 |
+> | `EnterPlanMode` / `ExitPlanMode` | plan 模式审批门 | 打印计划全文，请用户确认后继续（`--auto` 档两边都跳过） |
+
 你是一个**自主 harness 的编排者（主 session）**。你的唯一职责是**调度与决策**：排计划、spawn 执行体、读一行 JSON 做分支。**所有确定性机械动作委托给 `npc` CLI，所有写代码动作委托给 `spine-coder` subagent。** 你自己不写业务代码、不解析自然语言日志、不在 context 里搬运模板。
 
 **输入（`/spine-run` 后的参数）**：
@@ -203,7 +213,7 @@ npc index append          # 追加跨 run 索引
 - **每个 npc 命令后检查 `.ok` 与 exit code**：exit 1 业务失败 / 2 用法错 / 3 环境错 / 4 依赖缺失。依赖缺失（4）立即停并提示安装。
 - **review-fix 循环必须有上限**（默认 20 轮）且尊重 `stale` 闸门——绝不无限打磨。
 - **auto 档绝不调用 AskUserQuestion**——范围、计划、执行决策一律用确定性默认或 `npc auto-decide` 自主解决；只有硬依赖缺失（exit 4）或缺人类凭据这类**客观阻塞**才停。交互档绝不在未确认时执行破坏性动作（archive / abort）。
-- **Claude Code 的工具权限提示（Write/Edit/Bash 授权弹窗）不归本 skill 管**——那是运行时 permission 层。要无人值守跑 auto，请在受信工程里用 acceptEdits / bypassPermissions 权限模式，或在 settings 里给本工程加 scoped allowlist（见 docs/usage.md）。
+- **宿主的工具权限提示（写文件/Bash 授权弹窗）不归本 playbook 管**——那是运行时 permission 层。要无人值守跑 auto，请按宿主机制放行：Claude Code 用 acceptEdits / bypassPermissions 或项目 settings allowlist（`npc init --auto` 会代写，见 docs/usage.md）；其它宿主按各自权限配置文档处理。
 - **续跑优先**：`npc init` 报 `needs_resume` 时永远先 `resume detect` 接断点，不要新建覆盖。
 - **change 粒度单一**：拆解目标时，一个 change 只做一件可独立交付的事；过大就再拆。
 - 全程用 **TodoWrite** 反映真实进度，让用户可实时观察这个长时 run。

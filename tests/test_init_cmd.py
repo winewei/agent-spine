@@ -147,3 +147,50 @@ def test_init_non_git_repo(monkeypatch, tmp_path, capsys, make_args):
     assert ei.value.code == 3
     payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
     assert payload["error"] == "not_git_repo"
+
+
+# ============================================================
+# v1.7 宿主抽象：payload.host 与 auto 授权 gating
+# ============================================================
+
+
+def test_init_payload_reports_claude_host(init_env, capsys, make_args):
+    # conftest 的 pin_host_env 固定 CLAUDECODE=1 → claude 宿主
+    _init.run(make_args(auto=False, fresh=False, shell_exports=False))
+    payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert payload["host"]["name"] == "claude"
+    assert payload["host"]["source"] == "env"
+    assert payload["host"]["session_dir"].endswith(payload["proj_key"])
+
+
+def test_init_generic_host_skips_auto_auth(init_env, capsys, make_args, monkeypatch):
+    monkeypatch.delenv("CLAUDECODE", raising=False)
+    repo, _home = init_env
+    _init.run(make_args(auto=True, fresh=False, shell_exports=False))
+    payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert payload["host"]["name"] == "generic"
+    assert payload["host"]["session_dir"] is None
+    assert payload["auto_auth"]["ok"] is False
+    assert "no-settings-grant" in payload["auto_auth"]["skipped"]
+    # 未写 claude 专属 settings
+    assert not (repo / ".claude" / "settings.json").exists()
+
+
+def test_init_claude_host_auto_auth_writes_settings(init_env, capsys, make_args):
+    repo, _home = init_env
+    _init.run(make_args(auto=True, fresh=False, shell_exports=False))
+    payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert payload["auto_auth"]["ok"] is True
+    assert (repo / ".claude" / "settings.json").is_file()
+
+
+def test_init_host_from_project_config(init_env, capsys, make_args):
+    repo, _home = init_env
+    (repo / ".npc").mkdir()
+    (repo / ".npc" / "config.toml").write_text(
+        '[host]\nname = "kimi"\n', encoding="utf-8"
+    )
+    _init.run(make_args(auto=False, fresh=False, shell_exports=False))
+    payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert payload["host"]["name"] == "kimi"
+    assert payload["host"]["source"] == "config"
