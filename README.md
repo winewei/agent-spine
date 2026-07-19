@@ -38,11 +38,8 @@ agent-spine splits an autonomous coding run into two layers with a strict contra
 ## Quick start
 
 ```bash
-git clone https://github.com/winewei/agent-spine.git
-cd agent-spine
-
-# 1) Install the npc command (the only distributed artifact)
-uv tool install --force --from . npc
+# 1) Install the npc command straight from GitHub (no clone needed)
+uv tool install --force --from git+https://github.com/winewei/agent-spine.git npc
 npc --version          # npc 1.7.0
 
 # 2) Materialize playbooks into your host CLI (pick one)
@@ -50,6 +47,8 @@ npc playbook install --host claude    # Claude Code: commands/skills/agents dirs
 npc playbook install --host codex     # Codex CLI: ~/.codex/prompts/
 npc playbook install --dest <DIR>     # any other host: flat files, mount yourself
 ```
+
+To upgrade, rerun the same two commands. For local development, install from a checkout instead: `uv tool install --force --from . npc` at the repo root.
 
 Then, inside a git project that has an `openspec/` directory:
 
