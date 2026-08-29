@@ -390,6 +390,7 @@ def check_manifest_files(
         return fail("manifest_empty_files")
 
     present, missing, sha_mismatch = 0, [], []
+    delete_not_applied: list[str] = []
     for entry in files:
         if isinstance(entry, str):
             entry = {"path": entry}
@@ -399,6 +400,23 @@ def check_manifest_files(
             return fail("manifest_malformed_entry")
         rel = entry["path"]
         declared = entry.get("sha256")
+        # action=delete 的条目语义是"该文件应已被删除"：核验目标是不存在。
+        if entry.get("action") == "delete":
+            if git_ref and not Path(rel).is_absolute():
+                root = repo_root or Path.cwd()
+                probe = runner(
+                    ["git", "-C", str(root), "cat-file", "-t", f"{git_ref}:{rel}"],
+                    capture_output=True,
+                    text=True,
+                )
+                still_exists = probe.returncode == 0 and probe.stdout.strip() == "blob"
+            else:
+                still_exists = Path(rel).is_file()
+            if still_exists:
+                delete_not_applied.append(rel)
+            else:
+                present += 1
+            continue
         # 绝对路径（v3 契约：指向仍存活的 worktree）走磁盘核验；
         # 相对路径在给定 git_ref 时对 worktree commit 的 tree 核验。
         if git_ref and not Path(rel).is_absolute():
@@ -430,14 +448,17 @@ def check_manifest_files(
         if declared and _sha256_of(path) != declared:
             sha_mismatch.append(str(path))
 
-    ok = not missing and not sha_mismatch
-    reason = None if ok else ("files_missing" if missing else "sha_mismatch")
+    ok = not missing and not sha_mismatch and not delete_not_applied
+    reason = None if ok else (
+        "files_missing" if missing else ("sha_mismatch" if sha_mismatch else "delete_not_applied")
+    )
     return {
         "ok": ok,
         "reason": reason,
         "present": present,
         "missing": missing,
         "sha_mismatch": sha_mismatch,
+        "delete_not_applied": delete_not_applied,
         "total": len(files),
     }
 
