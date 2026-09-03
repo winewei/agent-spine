@@ -520,6 +520,48 @@ def test_run_archive_success(env_setup, make_args, capsys, fake_repo: Path, monk
     assert entry["phases"]["archive"]["status"] == "done"
 
 
+def test_run_archive_detects_silent_openspec_abort(env_setup, make_args, capsys, fake_repo: Path, monkeypatch):
+    """openspec archive 因 delta 标题与基线冲突打印 Aborted 却 exit 0：change 目录仍在即判归档失败。"""
+    _bootstrap_run(env_setup, make_args, capsys, "add-foo")
+    (fake_repo / "i.txt").write_text("a")
+    subprocess.run(["git", "add", "."], cwd=fake_repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "impl"], cwd=fake_repo, check=True)
+    impl_commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=fake_repo, capture_output=True, text=True
+    ).stdout.strip()
+    p = env_setup
+    p_with_repo = type(p)(**{**p.__dict__, "repo_root": fake_repo})
+
+    def mutate(s):
+        e = s["progress"][0]
+        e["implement_commit"] = impl_commit
+        e["phases"] = {"implement": {"status": "done", "commit": impl_commit, "started_ms": 0, "started_at": "x"}}
+
+    _state.update_state(p.state_json, p.state_md, mutate)
+    # change 目录在 archive 后仍存在 → 模拟 openspec 静默中止
+    (fake_repo / "openspec" / "changes" / "add-foo").mkdir(parents=True)
+    real_run = subprocess.run
+
+    def fake_run(cmd, *args, **kwargs):
+        if isinstance(cmd, list) and len(cmd) >= 2 and cmd[0].endswith("openspec"):
+            r = MagicMock()
+            r.returncode = 0
+            r.stdout = 'foundation ADDED failed for header "### Requirement: NFR-X" - already exists\nAborted. No files were changed.\n' if cmd[1] == "archive" else ""
+            r.stderr = ""
+            return r
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(_pipeline, "_find_openspec_bin", lambda override=None: "/fake/openspec")
+
+    result = _pipeline.run_archive(p_with_repo, 1)
+    assert result["ok"] is False
+    assert result["error"] == "openspec-archive-failed"
+    assert "already exists" in result["stderr_tail"]
+    entry = json.loads(p.state_json.read_text())["progress"][0]
+    assert entry["status"] == "failed" and entry["reason"] == "openspec-archive"
+
+
 def test_run_archive_precheck_fails(env_setup, make_args, capsys, fake_repo: Path):
     _bootstrap_run(env_setup, make_args, capsys, "add-foo")
 

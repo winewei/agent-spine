@@ -819,13 +819,17 @@ def run_archive(
         capture_output=True,
         text=True,
     )
-    if arc.returncode != 0:
+    # openspec archive 在 delta 标题与基线 spec 冲突（如 ADDED 已存在的 Requirement）时
+    # 打印 "Aborted. No files were changed." 却仍 exit 0；以 change 目录是否仍在为准。
+    arc_aborted = (p.repo_root / "openspec" / "changes" / change_id).is_dir()
+    if arc.returncode != 0 or arc_aborted:
+        arc_out = ((arc.stdout or "") + (arc.stderr or "")).strip()
         _do_phase_exit(
             p,
             seq,
             "archive",
             status="failed",
-            extra={"reason": "openspec-archive-failed", "stderr": arc.stderr.strip()[:2000]},
+            extra={"reason": "openspec-archive-failed", "stderr": arc_out[:2000]},
             progress_updates={"status": "failed", "reason": "openspec-archive"},
         )
         return {
@@ -833,7 +837,7 @@ def run_archive(
             "seq": seq,
             "change_id": change_id,
             "error": "openspec-archive-failed",
-            "stderr_tail": arc.stderr.strip()[-1000:],
+            "stderr_tail": arc_out[-1000:],
         }
 
     # 4. git add + commit
