@@ -190,3 +190,128 @@ def test_integrate_verify_tests_failure_reverts(
     entry = _state.read_state(p.state_json)["progress"][0]
     assert entry["status"] == "failed"
     assert entry["reason"] == "verify-tests-failed"
+
+
+# ============================================================
+# [verify].test_baseline = "diff"
+# ============================================================
+
+
+def _setup_diff_cfg(fake_repo: Path) -> None:
+    (fake_repo / ".npc").mkdir()
+    (fake_repo / ".npc" / "config.toml").write_text(
+        '[verify]\ntest = "fake-test"\ntest_baseline = "diff"\n'
+    )
+    subprocess.run(["git", "add", "."], cwd=fake_repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "chore: npc config"], cwd=fake_repo, check=True)
+
+
+def _pytest_like_output(failed: list[str]) -> str:
+    rows = [f"FAILED {f}" for f in failed]
+    rows.append(f"{len(failed)} failed, 10 passed in 1.0s")
+    return "\n".join(rows) + "\n"
+
+
+def test_integrate_diff_baseline_passes_when_failures_subset(
+    env_setup, fake_repo, make_args, capsys, tmp_path, summary_file
+):
+    p = env_setup
+    _bootstrap_run(make_args, capsys, "add-foo")
+    wc = _side_branch_commit(fake_repo)
+    manifest = _manifest_for(tmp_path, tmp_path, wc, ["implement.summary.md"])
+    _setup_diff_cfg(fake_repo)
+
+    calls: list[str] = []
+
+    def runner(argv, **kwargs):
+        if argv[0] == "git":
+            return subprocess.run(argv, **{k: v for k, v in kwargs.items() if k != "shell"})
+        calls.append("test")
+        # 基线与整合后失败集合一致（既有污染），exit 非 0
+        out = _pytest_like_output(["tests/test_a.py::test_x[asyncio]", "tests/test_b.py::test_y"])
+        return subprocess.CompletedProcess(argv, 1, stdout=out, stderr="")
+
+    out = _integrate.run_integrate(p, 1, _result_line(wc, summary_file), manifest, runner=runner)
+    assert out["ok"] is True, out
+    assert calls == ["test", "test"], "diff 模式应整合前后各跑一次"
+    assert out["verify_tests"] == "pass-baseline-diff"
+    assert out["tests"] == {"mode": "diff", "failed": 2, "new_failures": []}
+    assert (fake_repo / "feature.py").exists()
+
+
+def test_integrate_diff_baseline_reverts_on_new_failure(
+    env_setup, fake_repo, make_args, capsys, tmp_path, summary_file
+):
+    p = env_setup
+    _bootstrap_run(make_args, capsys, "add-foo")
+    wc = _side_branch_commit(fake_repo)
+    manifest = _manifest_for(tmp_path, tmp_path, wc, ["implement.summary.md"])
+    _setup_diff_cfg(fake_repo)
+
+    n = {"test": 0}
+
+    def runner(argv, **kwargs):
+        if argv[0] == "git":
+            return subprocess.run(argv, **{k: v for k, v in kwargs.items() if k != "shell"})
+        n["test"] += 1
+        failed = ["tests/test_a.py::test_x"]
+        if n["test"] == 2:
+            failed.append("tests/test_new.py::test_regression")
+        return subprocess.CompletedProcess(argv, 1, stdout=_pytest_like_output(failed), stderr="")
+
+    out = _integrate.run_integrate(p, 1, _result_line(wc, summary_file), manifest, runner=runner)
+    assert out["ok"] is False, out
+    assert out["step"] == "verify-tests"
+    assert out["tests"]["new_failures"] == ["tests/test_new.py::test_regression"]
+    assert out["reverted"] is not None
+    assert not (fake_repo / "feature.py").exists()
+    assert _git(fake_repo, "status", "--porcelain") == ""
+
+
+def test_integrate_diff_baseline_unparseable_failure_reverts(
+    env_setup, fake_repo, make_args, capsys, tmp_path, summary_file
+):
+    p = env_setup
+    _bootstrap_run(make_args, capsys, "add-foo")
+    wc = _side_branch_commit(fake_repo)
+    manifest = _manifest_for(tmp_path, tmp_path, wc, ["implement.summary.md"])
+    _setup_diff_cfg(fake_repo)
+
+    def runner(argv, **kwargs):
+        if argv[0] == "git":
+            return subprocess.run(argv, **{k: v for k, v in kwargs.items() if k != "shell"})
+        return subprocess.CompletedProcess(argv, 2, stdout="", stderr="ImportError while loading conftest")
+
+    out = _integrate.run_integrate(p, 1, _result_line(wc, summary_file), manifest, runner=runner)
+    assert out["ok"] is False, out
+    assert out["step"] == "verify-tests"
+    assert out["tests"]["reason"] == "unparseable-failures"
+    assert not (fake_repo / "feature.py").exists()
+
+
+def test_integrate_strict_default_unchanged(
+    env_setup, fake_repo, make_args, capsys, tmp_path, summary_file
+):
+    """未配置 test_baseline 时仍是 strict：只跑一次，exit 0 才通过。"""
+    p = env_setup
+    _bootstrap_run(make_args, capsys, "add-foo")
+    wc = _side_branch_commit(fake_repo)
+    manifest = _manifest_for(tmp_path, tmp_path, wc, ["implement.summary.md"])
+    (fake_repo / ".npc").mkdir()
+    (fake_repo / ".npc" / "config.toml").write_text('[verify]\ntest = "fake-test"\n')
+    subprocess.run(["git", "add", "."], cwd=fake_repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "chore: npc config"], cwd=fake_repo, check=True)
+
+    calls: list[str] = []
+
+    def runner(argv, **kwargs):
+        if argv[0] == "git":
+            return subprocess.run(argv, **{k: v for k, v in kwargs.items() if k != "shell"})
+        calls.append("test")
+        return subprocess.CompletedProcess(argv, 0, stdout="ok", stderr="")
+
+    out = _integrate.run_integrate(p, 1, _result_line(wc, summary_file), manifest, runner=runner)
+    assert out["ok"] is True, out
+    assert calls == ["test"]
+    assert out["verify_tests"] == "pass"
+    assert out["tests"] == {"mode": "strict", "failed": None, "new_failures": []}

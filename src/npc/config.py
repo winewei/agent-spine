@@ -183,6 +183,12 @@ class VerifyConfig:
     lint: str | None = None
     typecheck: str | None = None
     build: str | None = None
+    # strict：测试命令必须 exit 0；diff：整合后失败集合 ⊆ 整合前基线失败集合即通过
+    # （适用于存在既有污染失败、以"零新增失败"判零回归的仓库）。
+    test_baseline: str = "strict"
+
+
+SUPPORTED_TEST_BASELINE_MODES: tuple[str, ...] = ("strict", "diff")
 
 
 @dataclass(frozen=True)
@@ -339,6 +345,12 @@ def _build(data: dict, source: str) -> Config:
     verify_raw = data.get("verify") or {}
     if not isinstance(verify_raw, dict):
         raise ConfigError(f"[verify] 节必须是 table（{source}）")
+    test_baseline = _opt_str(verify_raw.get("test_baseline"), "verify.test_baseline", source) or "strict"
+    if test_baseline not in SUPPORTED_TEST_BASELINE_MODES:
+        raise ConfigError(
+            f"verify.test_baseline 不支持：{test_baseline!r}"
+            f"（合法值 = {'/'.join(SUPPORTED_TEST_BASELINE_MODES)}；{source}）"
+        )
 
     host_raw = data.get("host") or {}
     if not isinstance(host_raw, dict):
@@ -365,6 +377,7 @@ def _build(data: dict, source: str) -> Config:
             lint=_opt_str(verify_raw.get("lint"), "verify.lint", source),
             typecheck=_opt_str(verify_raw.get("typecheck"), "verify.typecheck", source),
             build=_opt_str(verify_raw.get("build"), "verify.build", source),
+            test_baseline=test_baseline,
         ),
         host=HostConfig(
             name=_opt_str(host_raw.get("name"), "host.name", source),

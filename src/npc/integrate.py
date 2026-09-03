@@ -119,6 +119,27 @@ def run_integrate(
         )
     worktree_commit = parsed["commit"]
 
+    # 1b. diff 基线：整合前在当前 HEAD 记录失败集合（仅 [verify].test_baseline="diff"）
+    test_cmd: str | None = None
+    baseline_failed: set[str] | None = None
+    if verify_tests:
+        try:
+            cfg = _config.load_config(p.repo_root)
+        except _config.ConfigError:
+            cfg = _config.Config()
+        test_cmd = _verify.resolve_test_cmd(p.repo_root, cfg)
+        if test_cmd is not None and cfg.verify.test_baseline == "diff":
+            base_proc = _verify.run_test_cmd(p.repo_root, test_cmd, runner=runner)
+            baseline_failed = (
+                set() if base_proc.returncode == 0
+                else _verify.parse_failed_ids(base_proc.stdout or "", base_proc.stderr or "")
+            )
+            _emit_run_event(
+                p, seq, change_id,
+                {"event": "integrate.baseline", "head": _head(p.repo_root, runner=runner),
+                 "baseline_failed": len(baseline_failed)},
+            )
+
     # 2. cherry-pick
     cp = _git(p.repo_root, "cherry-pick", worktree_commit, runner=runner)
     if cp.returncode != 0:
@@ -154,20 +175,14 @@ def run_integrate(
 
     # 5. verify tests（真实复跑；探测不到命令 → skipped）
     tests_status = "skipped"
+    tests_detail: dict | None = None
     if verify_tests:
-        try:
-            cfg = _config.load_config(p.repo_root)
-        except _config.ConfigError:
-            cfg = _config.Config()
-        cmd = _verify.resolve_test_cmd(p.repo_root, cfg)
+        cmd = test_cmd
         if cmd is not None:
-            import shlex
-
-            proc = runner(
-                shlex.split(cmd), shell=False, cwd=str(p.repo_root),
-                capture_output=True, text=True,
-            )
-            if proc.returncode != 0:
+            proc = _verify.run_test_cmd(p.repo_root, cmd, runner=runner)
+            judged = _verify.judge_against_baseline(proc, baseline_failed)
+            tests_detail = {k: v for k, v in judged.items() if k != "passed"}
+            if not judged["passed"]:
                 reverted = _revert(p.repo_root, integrated, runner=runner)
 
                 def mut(st: dict) -> None:
@@ -190,10 +205,11 @@ def run_integrate(
                     reverted=integrated if reverted else None,
                     extra={
                         "cmd": cmd,
+                        "tests": tests_detail,
                         "tail": _verify._tail(proc.stdout or "", proc.stderr or ""),
                     },
                 )
-            tests_status = "pass"
+            tests_status = "pass" if judged["mode"] == "strict" or judged["failed"] == 0 else "pass-baseline-diff"
         else:
             _io.warn("integrate: 未探测到测试命令，verify tests 跳过")
 
@@ -204,6 +220,7 @@ def run_integrate(
             "worktree_commit": worktree_commit,
             "integrated_commit": integrated,
             "verify_tests": tests_status,
+            "tests": tests_detail,
         },
     )
     return {
@@ -213,6 +230,7 @@ def run_integrate(
         "worktree_commit": worktree_commit,
         "integrated_commit": integrated,
         "verify_tests": tests_status,
+        "tests": tests_detail,
         "files": {"present": files["present"], "total": files["total"]},
     }
 

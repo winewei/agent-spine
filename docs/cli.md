@@ -1587,12 +1587,16 @@ worktree 产物整合进 main 的多步编排（替代 v3 skill Step 9 伪 bash 
 4. `implement record` 装订，失败 → `git revert` 摘除；
 5. verify tests 真实复跑（探测不到测试命令 → skipped 警告），失败 → revert + progress 回退 `failed/verify-tests-failed`。
 
+**基线 diff 模式**（1.7.1+，`[verify].test_baseline = "diff"`）：存在既有污染失败、以"零新增失败"判零回归的仓库使用。整合前先在当前 HEAD 跑一遍测试记录基线失败集合（run.events `integrate.baseline`），整合后要求失败集合 ⊆ 基线；exit 0 直接通过；输出抽不出失败 id（非 pytest `FAILED path::name` / go `--- FAIL: Name` 格式，或崩在收集阶段）按失败处理。代价是每次整合跑两遍测试。默认 `"strict"`（exit 0 才通过）。
+
 冲突与 revert 均落 telemetry `deviation` record 与 run.events（`integrate.conflict` / `integrate.verify_tests_failed`）。
 
 ```text
 stdout（成功）:
   {"ok": true, "seq": N, "change_id": "...", "worktree_commit": "...",
-   "integrated_commit": "...", "verify_tests": "pass|skipped", "files": {"present","total"}}
+   "integrated_commit": "...", "verify_tests": "pass|pass-baseline-diff|skipped",
+   "tests": {"mode": "strict|diff", "failed": <int|null>, "new_failures": [...]} | null,
+   "files": {"present","total"}}
 stdout（失败）:
   {"ok": false, "seq": N, "step": "verify-manifest|cherry-pick|record|verify-tests",
    "reason": "...", "reverted": "<hash>|null", ...}
@@ -2044,6 +2048,7 @@ npc index append
 
 | 版本 | 关键变化 |
 |---|---|
+| **1.7.1** | `[verify].test_baseline = "strict|diff"`：`npc integrate` 的 verify tests 支持基线 diff（整合前记录 HEAD 失败集合，整合后失败集合 ⊆ 基线即通过），适配存在既有污染失败的仓库；成功输出新增 `tests` 字段与 `pass-baseline-diff` 状态 |
 | **1.7** | 宿主中立化 + 去 plugin 发布：宿主支持列表明确为 Claude Code / Kimi CLI / Qwen Code / Codex / OpenCode（README / INSTALL / usage / playbook 宿主适配表口径统一）；新增 `hosts.py` 宿主抽象与 `[host]` 配置（name/session_dir；探测顺序 config > CLAUDECODE env > generic），init payload 增 `host` 字段、generic 宿主跳过 auto 授权、session 识别按宿主分流（generic 只走 by-cwd hook）；focus/templates 项目上下文 `CLAUDE.md`→`AGENTS.md` fallback、prompt 措辞去工具专名；新增 `playbook list/show/install`（§9d），原 plugin 内容收编进包资源，删除 marketplace/plugin manifest；`doctor` 新增 `host` 检查 |
 | **1.6** | Provider 注册表：config 新增 `[providers.*]`（runner/env_file/model/bin，内置 claude/mimo/codex），coder 可路由到任意 Anthropic 兼容端点（kimi/qwen/deepseek/...）与 `codex exec`（coder 的 codex-cli 路径补齐）；配置查找链改为分层深合并（全局定义 provider、项目只写路由）；`--backend` 接受 provider 名；`verify routing` 规则 3 更名 `cheap_exec_only` 并泛化到全部带 env_file 的 provider；`doctor` 新增 `providers` 检查 |
 | **1.5** | 内环与整合下沉（§8f）：新增 `change run`（单 change 内环编排）与 `integrate`（worktree 产物整合进 main），上下文预算重构 |

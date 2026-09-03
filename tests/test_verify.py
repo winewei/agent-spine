@@ -529,3 +529,57 @@ def test_run_tests_repo_locate_failure_exit_3(make_args, capsys, monkeypatch):
     out = json.loads(capsys.readouterr().out)
     assert out["ok"] is False
     assert out["error"] == "env_missing"
+
+
+# ============================================================
+# parse_failed_ids / judge_against_baseline
+# ============================================================
+
+
+def test_parse_failed_ids_pytest_and_go():
+    from npc import verify as _verify
+
+    out = (
+        "some log FAILED not-at-line-start\n"
+        "FAILED tests/unit/test_a.py::TestX::test_y[asyncio]\n"
+        "ERROR tests/unit/test_b.py::test_setup\n"
+        "--- FAIL: TestGoThing (0.00s)\n"
+        "3 failed in 1s\n"
+    )
+    assert _verify.parse_failed_ids(out) == {
+        "tests/unit/test_a.py::TestX::test_y[asyncio]",
+        "tests/unit/test_b.py::test_setup",
+        "TestGoThing",
+    }
+    assert _verify.parse_failed_ids("") == set()
+
+
+def test_judge_against_baseline_modes():
+    import subprocess
+
+    from npc import verify as _verify
+
+    ok = subprocess.CompletedProcess(["t"], 0, stdout="", stderr="")
+    bad = subprocess.CompletedProcess(["t"], 1, stdout="FAILED a::b\nFAILED c::d\n", stderr="")
+
+    assert _verify.judge_against_baseline(ok, None)["passed"] is True
+    assert _verify.judge_against_baseline(bad, None) == {
+        "passed": False, "mode": "strict", "failed": None, "new_failures": []}
+    assert _verify.judge_against_baseline(bad, {"a::b", "c::d", "e::f"})["passed"] is True
+    j = _verify.judge_against_baseline(bad, {"a::b"})
+    assert j["passed"] is False and j["new_failures"] == ["c::d"]
+    assert _verify.judge_against_baseline(ok, {"a::b"}) == {
+        "passed": True, "mode": "diff", "failed": 0, "new_failures": []}
+
+
+def test_config_rejects_bad_test_baseline(tmp_path):
+    import pytest
+
+    from npc import config as _config
+
+    (tmp_path / ".npc").mkdir()
+    (tmp_path / ".npc" / "config.toml").write_text('[verify]\ntest_baseline = "lenient"\n')
+    with pytest.raises(_config.ConfigError):
+        _config.load_config(tmp_path)
+    (tmp_path / ".npc" / "config.toml").write_text('[verify]\ntest_baseline = "diff"\n')
+    assert _config.load_config(tmp_path).verify.test_baseline == "diff"
