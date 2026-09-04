@@ -113,22 +113,35 @@ def _detect_stack(repo_root: Path) -> str:
 
 
 def _proposal_title(repo_root: Path, change_id: str) -> str:
-    """proposal.md 的首个 ``# `` 标题；无标题时退化为首个非空行。"""
+    """proposal.md 的检索摘要：首个 ``# `` 标题 + ``## Why`` / ``## What Changes`` 段各自首句。
+
+    只拼 change_id 会让 query 退化为标识符本身（对语义检索几乎无信息量）；
+    Why / What 的首句才承载"这是什么问题、改了什么"。
+    """
     path = repo_root / "openspec" / "changes" / change_id / "proposal.md"
     try:
         text = path.read_text(encoding="utf-8")
     except OSError:
         return ""
-    first_line = ""
+    title = ""
+    sections: dict[str, str] = {}
+    current = None
     for line in text.splitlines():
         s = line.strip()
         if not s:
             continue
-        if s.startswith("# "):
-            return s[2:].strip()
-        if not first_line:
-            first_line = s
-    return first_line
+        if s.startswith("# ") and not title:
+            title = s[2:].strip()
+            continue
+        if s.startswith("## "):
+            current = s[3:].strip().lower()
+            continue
+        if current and current not in sections:
+            sections[current] = s.lstrip("-* ").strip()
+    why = next((v for k, v in sections.items() if k.startswith("why")), "")
+    what = next((v for k, v in sections.items() if k.startswith("what")), "")
+    parts = [p for p in (title, why[:80], what[:80]) if p]
+    return " ".join(parts)
 
 
 def _short_head(repo_root: Path) -> str:

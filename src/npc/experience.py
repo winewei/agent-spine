@@ -747,20 +747,36 @@ def recall(
         if not isinstance(item, dict):
             continue
         uri = str(item.get("uri") or "")
-        text = str(item.get("text") or "").strip()
-        if EXPERIENCE_URI_MARKER not in uri or not text:
+        if EXPERIENCE_URI_MARKER not in uri:
             continue
-        entries.append(
-            {
-                "uri": uri,
-                "score": float(item.get("score") or 0.0),
-                "text": text,
-                "detail": str(item.get("detail") or ""),
-            }
-        )
+        score = float(item.get("score") or 0.0)
+        text = str(item.get("text") or "").strip()
+        tier = str(item.get("detail") or "")
+        # 服务端按总预算分档：预算紧时只回 uri / abstract / overview 档，而 coder 需要的
+        # 是 Approach / Reflect 规则正文。非 full 档按 uri 单独读全文，预算由 render_block
+        # 以"按 score 从低到高丢弃整条"的方式在本地执行，不做截断。
+        if tier != "full":
+            full = _read_full(client, uri)
+            if full:
+                text, tier = full, "full"
+        if not text:
+            continue
+        entries.append({"uri": uri, "score": score, "text": text, "detail": tier})
     entries.sort(key=lambda e: e["score"], reverse=True)
     tokens = sum(estimate_tokens(e["text"]) for e in entries)
     return RecallResult(entries=tuple(entries), tokens=tokens, query=q)
+
+
+def _read_full(client: Client, uri: str) -> str:
+    """``GET /api/v1/content/read?uri=`` 取经验正文（已剥离 MEMORY_FIELDS 注释）；失败返回空串。"""
+    try:
+        payload = client.get("/api/v1/content/read", params={"uri": uri})
+    except ExperienceError:
+        return ""
+    result = payload.get("result") if isinstance(payload, dict) else None
+    if isinstance(result, dict):
+        result = result.get("content") or result.get("text") or ""
+    return str(result or "").strip()
 
 
 BLOCK_HEADING = "## 历史经验（外部召回，非本 change 的规格）"

@@ -890,3 +890,29 @@ def make_ns():
     import argparse
 
     return argparse.Namespace(state_json=None, run_ts=None, task_log_dir=None)
+
+
+def test_recall_upgrades_non_full_tier_via_content_read(monkeypatch):
+    """服务端按预算降档（overview/uri）时，按 uri 单独读全文；读失败保留原文本。"""
+    seen: list[str] = []
+
+    def responder(req, body):
+        url = req.full_url
+        seen.append(url)
+        if "/content/read" in url:
+            if "experiences%2Fa.md" in url or "experiences/a.md" in url:
+                return {"status": "ok", "result": "## Situation\n甲全文\n## Approach\n- 规则"}
+            raise urllib.error.HTTPError(url, 500, "boom", hdrs=None, fp=None)
+        return _entries(
+            {"uri": EXP_URI, "score": 0.7, "text": "摘要甲", "detail": "overview"},
+            {"uri": EXP_URI2, "score": 0.6, "text": "摘要乙", "detail": "overview"},
+            {"uri": EXP_URI.replace("a.md", "c.md"), "score": 0.5, "text": "全文丙", "detail": "full"},
+        )
+
+    fake_urlopen(monkeypatch, responder)
+    res = _exp.recall(make_client(), _config.ExperienceConfig(), phase="implement", query="q")
+    by_uri = {e["uri"]: e for e in res.entries}
+    assert by_uri[EXP_URI]["detail"] == "full" and "## Approach" in by_uri[EXP_URI]["text"]
+    assert by_uri[EXP_URI2]["text"] == "摘要乙" and by_uri[EXP_URI2]["detail"] == "overview"
+    # full 档不再额外请求
+    assert sum(1 for u in seen if "/content/read" in u) == 2

@@ -1,7 +1,7 @@
 # v1.8 迭代设计：OpenViking 经验层——轨迹回流为 coder 先验
 
 - 日期：2026-09-05
-- 状态：**待实施**（本文为实施蓝本；Phase 0 spike 是进入 Phase 1 的硬闸门）
+- 状态：**P0 通过、P1 已实施**（分支 `feat/experience-layer`）——P0 五项验收在合成输入与真实 change 轨迹上均成立；P1 落地 `experience.py`、`npc experience {commit,recall,status,doctor}`、`npc verify deps`、prompt render 召回注入、record 回抄检测、archive 提交钩子、doctor 检查、telemetry 两类 record、`policy_snapshot_id`。P2 / P3 待 3–5 个真实 run 的 A/B 数据后决定
 - 关联：[principles.md](../principles.md)（四条不变量）、[design.md](../design.md) §11.6（telemetry 派生指标）/ §11.10（上下文预算契约）/ §11.12（打地鼠治理）、[2026-07-05-orchestration-context-budget.md](2026-07-05-orchestration-context-budget.md)（O(1) 主 session 不变量）
 - 外部依赖：[volcengine/OpenViking](https://github.com/volcengine/OpenViking)（AGPLv3；本方案只经 HTTP API 调用，不引入其任何 Python 包）
 - 基线：`main` @ `40ffa6c`（v1.7.1）
@@ -198,6 +198,7 @@ npc 每个 run 在 `~/task_log/<PROJ_KEY>/<run>/<seq>-<change>/` 落盘完整轨
 - 凭据文件：`~/.openviking/npc-client.env`（`OPENVIKING_BASE_URL` / `OPENVIKING_ACCOUNT` / `OPENVIKING_USER` / `OPENVIKING_API_KEY`，用户 key，npc 读取）；`~/.openviking/root.env`（`OPENVIKING_ROOT_API_KEY`，仅 doctor 查 `GET /api/v1/admin/agent-evolution` 与签发用户 key 时用）。均 `chmod 600`，不入 git。
 - 路由（均在 `/api/v1` 下）：`POST /sessions`（body `{session_id, memory_policy}`）→ `POST /sessions/{id}/messages`（`{role, content}`）→ `POST /sessions/{id}/commit`（`{}`，返回 `result.task_id / archive_uri`）→ `GET /tasks/{task_id}`（`result.status ∈ {..., completed}`，`result.result.memories_extracted / effective_memory_types / agent_evolution_enabled / token_usage`）。召回 `POST /search/search`（注意是 `/search/search`，不是 `/search`）；`POST /search/find` 为纯检索。
 - fast path 实测：首消息为 `# OpenViking Batch Training CaseSpec v1` + ```json 围栏 Case，配 `memory_policy={"memory_types":["experiences"]}`，commit 后 `effective_memory_types = [cases, experiences, trajectories]`，一次 commit 约 13.6k tokens（Codex `gpt-5.4`，reasoning medium），约 60s 完成；产物 `viking://user/<uid>/memories/experiences/<name>.md`（Situation / Approach / Reflect 三段，末尾 `MEMORY_FIELDS` JSON 注释含 `derived_from` 链接），磁盘路径 `~/.openviking/data/viking/<account>/user/<uid>/memories/experiences/`。
+- 召回分档处理（P1 实现）：服务端按总预算分档，预算紧时返回 overview / uri 档；npc 对非 `full` 档按 uri 调 `GET /api/v1/content/read?uri=` 取全文，再由 `render_block` 在本地按 score 从低到高整条丢弃直至 ≤ 预算——coder 需要的是 Approach / Reflect 规则正文，截断或只给摘要都无价值。实测 800 tokens 可容纳 2 条完整经验。
 - 召回实测：`{"query", "mode":"context", "quotas":{"experiences":3}, "max_tokens", "score_threshold":0.35, "rewrite":false, "query_expansion":"off", "detail":{"experiences":"full"}}`，返回 `result.entries[]`（`uri / score / category / detail(tier) / text`）与 `result.rendered`（`<memory uri= type= score= detail= />` 片段）与 `result.stats`。`max_tokens` 为硬预算：150 时降至 `uri` 档（text 为空），600 时给 `overview` 档；要拿完整正文需给到约 1000 或对单条 uri 走 `GET /content/read?uri=`。`detail` 不传时默认只给 uri 档。
 - 项目隔离：experiences 以 OpenViking user 为隔离单位。P1 用单一用户 `npc`，项目信息进 Case 的 `task_signature=<proj_key>:<change_id>` 与 `input`；`[experience].user` 预留为可配置项，P3 若需硬隔离再按 `PROJ_KEY` 派生用户并用 root key 签发。
 - 凭据与配额：VLM 走 Codex OAuth（读 `~/.codex/auth.json`），与 review 的 codex 共用同一账号额度——试点期接受，telemetry 记 `token_usage` 以便核算。
