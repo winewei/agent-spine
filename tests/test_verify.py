@@ -612,3 +612,88 @@ def test_config_rejects_bad_test_baseline(tmp_path):
         _config.load_config(tmp_path)
     (tmp_path / ".npc" / "config.toml").write_text('[verify]\ntest_baseline = "diff"\n')
     assert _config.load_config(tmp_path).verify.test_baseline == "diff"
+
+
+# ============================================================
+# deps：check_deps 纯函数（依赖不变量执法）
+# ============================================================
+
+
+def _fake_pkg(tmp_path: Path, deps: str = "[]", *, sources: dict[str, str] | None = None) -> Path:
+    repo = tmp_path / "pkg"
+    (repo / "src" / "npc").mkdir(parents=True)
+    (repo / "pyproject.toml").write_text(
+        f'[project]\nname = "npc"\ndependencies = {deps}\n', encoding="utf-8"
+    )
+    for name, body in (sources or {"ok.py": "import json\nfrom . import _io\n"}).items():
+        target = repo / "src" / "npc" / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(body, encoding="utf-8")
+    return repo
+
+
+def test_deps_clean_repo_has_no_violation(tmp_path: Path):
+    assert _verify.check_deps(_fake_pkg(tmp_path)) == []
+
+
+def test_deps_rejects_non_empty_dependencies(tmp_path: Path):
+    repo = _fake_pkg(tmp_path, deps='["httpx>=0.27"]')
+    rules = {v["rule"] for v in _verify.check_deps(repo)}
+    assert rules == {"dependencies_not_empty"}
+
+
+def test_deps_rejects_missing_pyproject(tmp_path: Path):
+    repo = _fake_pkg(tmp_path)
+    (repo / "pyproject.toml").unlink()
+    assert [v["rule"] for v in _verify.check_deps(repo)] == ["pyproject_missing"]
+
+
+def test_deps_rejects_malformed_pyproject(tmp_path: Path):
+    repo = _fake_pkg(tmp_path)
+    (repo / "pyproject.toml").write_text("[project\n", encoding="utf-8")
+    assert [v["rule"] for v in _verify.check_deps(repo)] == ["pyproject_unreadable"]
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "import openviking",
+        "from openviking.client import X",
+        "import httpx",
+        "from httpx import Client",
+        "import requests",
+        "    import requests",
+    ],
+)
+def test_deps_detects_forbidden_imports(tmp_path: Path, line: str):
+    repo = _fake_pkg(tmp_path, sources={"bad.py": f"import json\n{line}\n"})
+    violations = _verify.check_deps(repo)
+    assert [v["rule"] for v in violations] == ["forbidden_import"]
+    assert "src/npc/bad.py:2" in violations[0]["detail"]
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "# import openviking 只是注释",
+        'DOC = "import requests"',
+        "import requests_stub",
+        "from openviking_shim import X",
+    ],
+)
+def test_deps_ignores_non_import_mentions(tmp_path: Path, line: str):
+    repo = _fake_pkg(tmp_path, sources={"ok.py": f"{line}\n"})
+    assert _verify.check_deps(repo) == []
+
+
+def test_deps_scans_nested_packages(tmp_path: Path):
+    repo = _fake_pkg(tmp_path, sources={"sub/mod.py": "import httpx\n"})
+    violations = _verify.check_deps(repo)
+    assert len(violations) == 1
+    assert "src/npc/sub/mod.py:1" in violations[0]["detail"]
+
+
+def test_deps_self_check_on_real_repo():
+    """本仓库自身必须通过——经验层只经 HTTP，不得引入任何运行时依赖。"""
+    repo_root = Path(__file__).resolve().parents[1]
+    assert _verify.check_deps(repo_root) == []

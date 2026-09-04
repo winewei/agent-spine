@@ -1005,6 +1005,30 @@ exit code:
     p_verify_manifest.set_defaults(
         handler=_make_handler("verify", "run_manifest"), _cmd_path="verify manifest"
     )
+    p_verify_deps = sub_verify.add_parser(
+        "deps",
+        help="依赖不变量：dependencies == [] 且 src/npc 无 openviking/httpx/requests import",
+        formatter_class=_EPILOG_FMT,
+        epilog="""\
+经验层只经 HTTP 调 OpenViking（其主仓与 Python SDK 为 AGPLv3，npc 为 MIT），
+且 dependencies = [] 是发布契约。本命令把两条做成机器可执行的禁令：
+1) pyproject.toml 的 [project].dependencies 必须是空数组；
+2) src/npc/**/*.py 不得出现 openviking / httpx / requests 的 import（逐处报 file:line）。
+
+stdout:
+  {"ok": <bool>, "repo_root": "<str>",
+   "violations": [{"rule": "dependencies_not_empty|forbidden_import|pyproject_missing|
+                            pyproject_unreadable|source_unreadable", "detail": "<str>"}, ...]}
+
+exit code:
+  0  无 violation
+  1  有 violation
+  3  repo_root 定位失败
+""",
+    )
+    p_verify_deps.set_defaults(
+        handler=_make_handler("verify", "run_deps"), _cmd_path="verify deps"
+    )
     p_verify_tasks = sub_verify.add_parser(
         "tasks",
         help="tasks.md checkbox 完成度派生计数（可与 implement 自报交叉验证）",
@@ -1031,6 +1055,174 @@ exit code:
     )
     p_verify_tasks.set_defaults(
         handler=_make_handler("verify", "run_tasks_check"), _cmd_path="verify tasks"
+    )
+
+    # ===== experience =====（v1.8：OpenViking 经验层，旁路软失败增强）
+    p_exp = sub.add_parser(
+        "experience",
+        help="OpenViking 经验层：archived 轨迹回流为 coder 先验（默认关闭）",
+        formatter_class=_EPILOG_FMT,
+        epilog="""\
+定位是旁路增强：缺失只降低 prompt 质量、不影响正确性，任何 phase 都不因它失败。
+未启用（[experience].enabled=false）或缺凭据时 commit/recall 一律
+{"ok":false,"skipped":true,"reason":"disabled|no_client"} 且 exit 0；只有
+--strict 与 doctor 才对不可用返回非 0。集成面只有 HTTP（禁 import openviking，
+由 `npc verify deps` 执法）。
+""",
+    )
+    sub_exp = p_exp.add_subparsers(dest="experience_cmd", required=True)
+
+    p_exp_commit = sub_exp.add_parser(
+        "commit",
+        help="把一个 archived change 的轨迹提交为经验语料",
+        formatter_class=_EPILOG_FMT,
+        epilog="""\
+组装 CaseSpec v1 五段 messages（CaseSpec header / implement summary / review
+findings / fix summary / outcome），三步提交：POST /sessions（memory_policy 只允许
+experiences）→ 逐条 POST /sessions/{id}/messages → POST /sessions/{id}/commit。
+session 已存在（409）幂等继续；fire-and-forget，不等异步抽取。
+
+闸门（--gate，默认取 [experience].write_gate）：
+  verified  status=archived ∧ blocking_trend[-1]==0 ∧ 非 force-archive/override
+            ∧ 未被回抄污染
+  any       只要求 status=archived
+
+脱敏白名单：只读 implement.summary.md / round-N.review.json / round-N.fix.summary.md
+的指定段；绝不提交 diff、代码正文、events.jsonl、*.prompt.md / *.focus.md。
+所有正文先过注入块剥离（切断经验→prompt→summary→经验自激环）。
+
+写盘：<base>/experience.commit.json（成功与失败都落）；--dry-run 落
+<base>/experience.messages.json 且不发任何请求。
+
+stdout:
+  {"ok": true, "session_id": "<str>", "task_id": "<str>|null",
+   "archive_uri": "<str>|null", "messages": <int>, "seq": <int>, "change_id": "<str>"}
+  {"ok": true, "dry_run": true, "session_id", "path", "messages", "seq", "change_id"}
+  {"ok": false, "skipped": true, "reason": "disabled|no_client|not-archived|
+   blocking-nonzero|no-blocking-trend|override|force-archive|contaminated"}
+  {"ok": false, "reason": "unreachable|timeout|http_<status>|bad_json", "detail": "<str>"}
+
+exit code:
+  0  提交成功，或被闸门/未启用跳过（非 strict）
+  1  --strict 且跳过或请求失败
+  3  未定位 run / state 中无该 seq
+""",
+    )
+    p_exp_commit.add_argument("--seq", type=int, required=True, help="change 序号")
+    p_exp_commit.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        help="只组装 messages 落盘，不发任何请求",
+    )
+    p_exp_commit.add_argument(
+        "--strict", action="store_true", help="跳过或失败时返回非 0"
+    )
+    p_exp_commit.add_argument(
+        "--gate",
+        choices=("verified", "any"),
+        default=None,
+        help="覆盖 [experience].write_gate",
+    )
+    p_exp_commit.set_defaults(
+        handler=_make_handler("experience", "cli_commit"), _cmd_path="experience commit"
+    )
+
+    p_exp_recall = sub_exp.add_parser(
+        "recall",
+        help="召回历史经验并渲染注入块到 <base>/<phase>[-rM].experience.md",
+        formatter_class=_EPILOG_FMT,
+        epilog="""\
+POST /api/v1/search/search（mode=context，quotas.experiences，score_threshold，
+rewrite=false，query_expansion=off）；客户端按 uri 前缀过滤为 experiences 并按
+score 降序，超 max_tokens 时从最低分丢弃。经验只注入 coder（implement / fix），
+绝不进 review focus——否则独立评估器退化为共享先验的相关评估器（不变量 1）。
+
+不传 --query 时按 entry 自动构造：fix 用各轮 in_scope findings 的
+"category: title"；implement 用 change_id + proposal 标题。exclude_uris 取本 run
+内已注入过的全部 uri，避免反复注入同一条。
+
+写盘：<base>/<phase>[-rM].experience.md（注入块正文）与同名 .experience.json
+（query / uris+score / tokens / 当时 HEAD / 块 sha256，prompt 可完整重放）。
+
+stdout:
+  {"ok": <bool>, "entries": <int>, "tokens": <int>, "uris": [...],
+   "path": "<str>", "record": "<str>", "error": "<code>|null"}
+  {"ok": false, "skipped": true, "reason": "disabled"}
+
+exit code:
+  0  召回成功或软失败降级（entries=0，注入块为空串）
+  1  --strict 且召回失败
+  3  未定位 run / state 中无该 seq
+""",
+    )
+    p_exp_recall.add_argument(
+        "--phase", choices=("implement", "fix"), required=True, help="注入目标阶段"
+    )
+    p_exp_recall.add_argument("--seq", type=int, required=True, help="change 序号")
+    p_exp_recall.add_argument(
+        "--round", dest="round_n", type=int, default=None, help="fix 轮次（决定文件名后缀）"
+    )
+    p_exp_recall.add_argument("--query", default=None, help="覆盖自动构造的检索 query")
+    p_exp_recall.add_argument("--strict", action="store_true", help="召回失败时返回非 0")
+    p_exp_recall.set_defaults(
+        handler=_make_handler("experience", "cli_recall"), _cmd_path="experience recall"
+    )
+
+    p_exp_status = sub_exp.add_parser(
+        "status",
+        help="各 change 的经验流状态（committed / task_id / 注入量）",
+        formatter_class=_EPILOG_FMT,
+        epilog="""\
+读各 <base>/experience.commit.json 与 <base>/*.experience.json 汇总；task_id 存在
+且经验层已启用时在线查 GET /api/v1/tasks/{id}（失败则 task_status 为 null，不报错）。
+不带 --seq 时汇总本 run 全部 change。
+
+stdout:
+  {"ok": true, "enabled": <bool>,
+   "items": [{"seq": <int>, "change_id": "<str>", "committed": <bool>,
+              "task_id": "<str>|null", "task_status": "<str>|null",
+              "injected_count": <int>, "injected_tokens": <int>}, ...]}
+
+exit code:
+  0  正常
+  3  未定位 run / state 读取失败
+""",
+    )
+    p_exp_status.add_argument(
+        "--seq", type=int, default=None, help="只看某个 change；省略则全部"
+    )
+    p_exp_status.set_defaults(
+        handler=_make_handler("experience", "cli_status"), _cmd_path="experience status"
+    )
+
+    p_exp_doctor = sub_exp.add_parser(
+        "doctor",
+        help="经验层探活：/health + agent_evolution + experiences 计数 + 声明比对",
+        formatter_class=_EPILOG_FMT,
+        epilog="""\
+不需要 active run（只需 git 仓库）。依次检查：env_file 可读且含 api key →
+GET /health（免鉴权，取 version / auth_mode）→ GET /api/v1/fs/ls 数 experiences →
+GET /api/v1/admin/agent-evolution（用 root_env_file 的 root key；无则跳过）。
+
+warnings 触发条件：auth_mode != api_key（dev 模式，本机任意进程具 ROOT 权限）；
+base_url 非 127.0.0.1/localhost（数据流出本机）；agent_evolution.enabled=false；
+[experience].extraction_model_declared 未声明（不变量 4 无法核对）。
+
+stdout:
+  {"ok": <bool>, "enabled": <bool>, "env_file": "<str>", "env_file_found": <bool>,
+   "base_url": "<str>",
+   "health": {"ok": <bool>, "version": "<str>", "auth_mode": "<str>"}|null,
+   "agent_evolution": <bool>|null, "experiences_count": <int>|null,
+   "warnings": [...], "notes": [...]}
+
+exit code:
+  0  health 连通（即使有 warnings）
+  1  health 不通 / 缺凭据 / 配置加载失败
+""",
+    )
+    p_exp_doctor.set_defaults(
+        handler=_make_handler("experience", "cli_doctor"), _cmd_path="experience doctor"
     )
 
     # ===== doctor =====

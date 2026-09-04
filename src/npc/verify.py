@@ -1,6 +1,6 @@
 """npc verify —— 把"不裸信自报"做成确定性笼子。
 
-三个子命令：
+子命令（tests / routing / manifest / tasks / deps）：
 
 - ``npc verify tests``：真实复跑测试（质量门）。绝不读 LLM 的 RESULT 自报，
   而是在 repo_root 实际执行测试命令、捕获退出码与输出末尾，emit 结构化判定。
@@ -14,6 +14,12 @@
   解析 RESULT 行（npc key=value 或 legacy JSON 两种格式）判定 plan-only，
   再对 manifest JSON 里声明的 files_written 做存在性 + sha256 核对。
   这是 /new-plan-changes-v3 波次并行的"写没写真代码"硬轨。
+
+- ``npc verify tasks``：tasks.md checkbox 完成度派生计数，与 implement 自报交叉验证。
+
+- ``npc verify deps``：依赖不变量执法——``dependencies == []`` 且 ``src/npc``
+  不得 import openviking / httpx / requests。经验层只经 HTTP 调 OpenViking
+  （AGPLv3 vs MIT），这条禁令是许可证与零依赖发布契约的机器化表达。
 """
 
 from __future__ import annotations
@@ -640,4 +646,96 @@ def run_tasks_check(args: argparse.Namespace) -> None:
         }
     )
     if consistent is False:
+        raise SystemExit(1)
+
+
+# ============================================================
+# 子命令 5：npc verify deps（v1.8）
+# ============================================================
+
+# 经验层只经 HTTP 调 OpenViking：其主仓与 Python SDK 为 AGPLv3，而 npc 是 MIT；
+# 同时 dependencies = [] 是发布契约（宿主中立、零安装摩擦）。两条一起把
+# "import 任何第三方 HTTP / OpenViking 包" 变成硬违规，由本子命令执法。
+FORBIDDEN_IMPORT_RES: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("openviking", re.compile(r"^\s*(?:from|import)\s+openviking\b")),
+    ("httpx", re.compile(r"^\s*(?:from|import)\s+httpx\b")),
+    ("requests", re.compile(r"^\s*(?:from|import)\s+requests\b")),
+)
+
+
+def check_deps(repo_root: Path) -> list[dict]:
+    """校验依赖不变量，返回 violations 列表（纯函数，只读文件）。
+
+    每项 ``{"rule", "detail"}``。规则：
+
+    1. ``dependencies_not_empty``：``pyproject.toml`` 的 ``[project].dependencies``
+       必须是空数组。
+    2. ``forbidden_import``：``src/npc/**/*.py`` 不得出现 ``openviking`` / ``httpx``
+       / ``requests`` 的 import（每处一条，含 ``file:line``）。
+    """
+    violations: list[dict] = []
+
+    pyproject = repo_root / "pyproject.toml"
+    if not pyproject.is_file():
+        violations.append(
+            {"rule": "pyproject_missing", "detail": f"未找到 pyproject.toml：{pyproject}"}
+        )
+    else:
+        try:
+            import tomllib
+
+            data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+        except (OSError, tomllib.TOMLDecodeError) as e:
+            violations.append(
+                {"rule": "pyproject_unreadable", "detail": f"pyproject.toml 解析失败：{e}"}
+            )
+        else:
+            deps = (data.get("project") or {}).get("dependencies")
+            if deps != []:
+                violations.append(
+                    {
+                        "rule": "dependencies_not_empty",
+                        "detail": f"[project].dependencies 必须为 []，实得 {deps!r}",
+                    }
+                )
+
+    src = repo_root / "src" / "npc"
+    for path in sorted(src.rglob("*.py")) if src.is_dir() else []:
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError as e:
+            violations.append(
+                {"rule": "source_unreadable", "detail": f"{path} 读取失败：{e}"}
+            )
+            continue
+        rel = path.relative_to(repo_root)
+        for lineno, line in enumerate(lines, start=1):
+            for name, pattern in FORBIDDEN_IMPORT_RES:
+                if pattern.match(line):
+                    violations.append(
+                        {
+                            "rule": "forbidden_import",
+                            "detail": f"{rel}:{lineno} 出现禁止的 import {name}：{line.strip()}",
+                        }
+                    )
+    return violations
+
+
+def run_deps(args: argparse.Namespace) -> None:
+    """``npc verify deps``：emit 依赖不变量检查结果。0 无违规 / 1 有违规。"""
+    try:
+        repo_root = _resolve_repo_root(args)
+    except _paths.PathsError as e:
+        _io.emit_error("env_missing", f"未能定位 repo_root：{e}", exit_code=3)
+        return
+
+    violations = check_deps(repo_root)
+    _io.emit(
+        {
+            "ok": len(violations) == 0,
+            "repo_root": str(repo_root),
+            "violations": violations,
+        }
+    )
+    if violations:
         raise SystemExit(1)
