@@ -209,3 +209,152 @@ def test_run_duplicate_nodes_exit_2(monkeypatch, capsys):
     assert ei.value.code == 2
     out = json.loads(capsys.readouterr().out)
     assert out["error"] == "invalid_input"
+
+
+# ============================================================
+# ready（流水化增量调度）
+# ============================================================
+
+
+def test_ready_no_done_returns_only_roots():
+    out = _waves.ready(
+        {"nodes": ["a", "b", "c"], "edges": [["a", "b"], ["b", "c"]]}
+    )
+    assert out["ready"] == ["a"]
+    assert out["blocked"] == {"b": ["dep-pending:a"], "c": ["dep-pending:b"]}
+    assert out["remaining"] == 3
+    assert out["warnings"] == []
+
+
+def test_ready_done_releases_downstream():
+    out = _waves.ready(
+        {"nodes": ["a", "b", "c"], "edges": [["a", "b"], ["b", "c"]], "done": ["a"]}
+    )
+    assert out["ready"] == ["b"]
+    assert out["blocked"] == {"c": ["dep-pending:b"]}
+    assert out["remaining"] == 2
+
+
+def test_ready_multi_pred_needs_all_done():
+    out = _waves.ready(
+        {"nodes": ["a", "b", "c"], "edges": [["a", "c"], ["b", "c"]], "done": ["a"]}
+    )
+    assert out["ready"] == ["b"]
+    assert out["blocked"]["c"] == ["dep-pending:b"]
+
+
+def test_ready_active_file_conflict_blocks():
+    out = _waves.ready(
+        {
+            "nodes": ["a", "b"],
+            "files": {"a": ["src/svc/"], "b": ["src/svc/api.py"]},
+            "active": ["a"],
+        }
+    )
+    assert out["ready"] == []
+    assert out["blocked"] == {"b": ["file-conflict:a"]}
+    assert out["remaining"] == 2  # active 未进终态，仍计入 remaining
+
+
+def test_ready_active_without_conflict_does_not_block():
+    out = _waves.ready(
+        {"nodes": ["a", "b"], "files": {"a": ["src/x.py"], "b": ["src/y.py"]}, "active": ["a"]}
+    )
+    assert out["ready"] == ["b"]
+    assert out["blocked"] == {}
+
+
+def test_ready_intra_batch_conflict_keeps_tie_break_winner():
+    out = _waves.ready(
+        {
+            "nodes": ["a", "b"],
+            "files": {"a": ["src/x.py"], "b": ["src/x.py"]},
+            "tie_break": {"a": [2, 1], "b": [1, 1]},
+        }
+    )
+    assert out["ready"] == ["b"]  # tier 小者先选中，冲突方被挤出本批
+    assert out["blocked"] == {"a": ["file-conflict:b"]}
+
+
+def test_ready_limit_truncates():
+    out = _waves.ready({"nodes": ["a", "b", "c"], "limit": 2})
+    assert out["ready"] == ["a", "b"]
+    assert out["blocked"] == {"c": ["limit"]}
+    assert out["remaining"] == 3
+
+
+def test_ready_limit_zero_blocks_all():
+    out = _waves.ready({"nodes": ["a"], "limit": 0})
+    assert out["ready"] == []
+    assert out["blocked"] == {"a": ["limit"]}
+
+
+def test_ready_unknown_cids_go_to_warnings():
+    out = _waves.ready({"nodes": ["a"], "done": ["ghost"], "active": ["phantom"]})
+    assert out["ready"] == ["a"]
+    assert out["warnings"] == ["unknown-active:phantom", "unknown-done:ghost"]
+
+
+def test_ready_finished_defaults_to_done_and_excludes():
+    out = _waves.ready({"nodes": ["a", "b"], "done": ["a"], "finished": ["b"]})
+    assert out["ready"] == []
+    assert out["blocked"] == {}
+    assert out["remaining"] == 0
+
+
+def test_ready_dep_pending_short_circuits_file_conflict():
+    out = _waves.ready(
+        {
+            "nodes": ["a", "b", "c"],
+            "edges": [["a", "c"]],
+            "files": {"b": ["src/x.py"], "c": ["src/x.py"]},
+            "active": ["b"],
+        }
+    )
+    assert out["ready"] == ["a"]
+    assert out["blocked"]["c"] == ["dep-pending:a"]  # 依赖层先短路，不报 file-conflict
+
+
+def test_ready_bad_limit_raises():
+    with pytest.raises(ValueError):
+        _waves.ready({"nodes": ["a"], "limit": -1})
+    with pytest.raises(ValueError):
+        _waves.ready({"nodes": ["a"], "limit": "2"})
+
+
+def test_ready_bad_done_type_raises():
+    with pytest.raises(ValueError):
+        _waves.ready({"nodes": ["a"], "done": "a"})
+
+
+def _run_ready(monkeypatch, capsys, stdin_text=None, input_file=None):
+    if stdin_text is not None:
+        monkeypatch.setattr("sys.stdin", io.StringIO(stdin_text))
+    args = argparse.Namespace(input=str(input_file) if input_file else None)
+    _waves.run_ready(args)
+    return capsys.readouterr()
+
+
+def test_run_ready_emits_single_line_json(monkeypatch, capsys):
+    payload = {"nodes": ["a", "b"], "edges": [["a", "b"]], "done": ["a"]}
+    captured = _run_ready(monkeypatch, capsys, stdin_text=json.dumps(payload))
+    assert len(captured.out.strip().splitlines()) == 1
+    out = json.loads(captured.out)
+    assert out["ready"] == ["b"]
+
+
+def test_run_ready_invalid_input_exit_2(monkeypatch, capsys):
+    with pytest.raises(SystemExit) as ei:
+        _run_ready(monkeypatch, capsys, stdin_text=json.dumps({"nodes": ["a"], "limit": -1}))
+    assert ei.value.code == 2
+    assert json.loads(capsys.readouterr().out)["error"] == "invalid_input"
+
+
+def test_cli_registers_plan_ready():
+    from npc import cli as _cli
+
+    parser = _cli._build_parser()
+    args = parser.parse_args(["plan", "ready", "--input", "dag.json"])
+    assert args._cmd_path == "plan ready"
+    assert args.input == "dag.json"
+    assert callable(args.handler)

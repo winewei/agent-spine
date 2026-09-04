@@ -8,7 +8,9 @@
 from __future__ import annotations
 
 import argparse
+import importlib.metadata
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -119,9 +121,21 @@ def test_only_git_is_required(tmp_path: Path):
 # ============================================================
 
 
-def test_all_green(tmp_path: Path):
+def test_all_green(tmp_path: Path, monkeypatch):
     home = _make_home(tmp_path, mimo=True, schema=True)
     repo = _make_repo(tmp_path, principles=True)
+    # install-source 取决于本机真实安装来源（可能装自未合并分支）→ 打桩，保持本例
+    # "构造出的环境全绿"的语义；该检查项自身另有专门用例覆盖。
+    monkeypatch.setattr(
+        doctor,
+        "_check_install_source",
+        lambda **_kw: {
+            "name": "install-source",
+            "status": "ok",
+            "detail": "stub",
+            "required": False,
+        },
+    )
     checks = doctor.gather_checks(
         home=home, repo_root=repo, which=_which_factory(ALL_BINS)
     )
@@ -643,3 +657,148 @@ def test_host_check_present_and_ok(tmp_path: Path):
     assert host["status"] == "ok"
     assert host["required"] is False
     assert "宿主" in host["detail"]
+
+
+# ============================================================
+# install-source 检查项（安装来源与 main 的一致性）
+# ============================================================
+
+
+class _FakeDist:
+    """最小 importlib.metadata.Distribution 替身：只需 version + read_text。"""
+
+    def __init__(self, version: str, direct_url: str | None):
+        self.version = version
+        self._direct_url = direct_url
+
+    def read_text(self, filename: str):
+        if filename == "direct_url.json":
+            return self._direct_url
+        return None
+
+
+def _fake_dist(monkeypatch, version: str, direct_url: str | None) -> None:
+    monkeypatch.setattr(
+        doctor.importlib.metadata,
+        "distribution",
+        lambda name: _FakeDist(version, direct_url),
+    )
+
+
+def _local_src(tmp_path: Path, version: str) -> Path:
+    """造一个"源码 checkout"目录（只需 src/npc/__init__.py 带 __version__）。"""
+    src = tmp_path / "checkout"
+    init = src / "src" / "npc" / "__init__.py"
+    init.parent.mkdir(parents=True, exist_ok=True)
+    init.write_text(f'__version__ = "{version}"\n', encoding="utf-8")
+    return src
+
+
+def _git_runner(*, branch: str, sha: str = "abc1234", ancestor: bool):
+    """假 git：只回答 rev-parse / merge-base，绝不真的调 git。"""
+
+    def _run(argv, **kwargs):
+        assert argv[0] == "git"
+        assert kwargs.get("capture_output") is True
+        assert kwargs.get("text") is True
+        assert kwargs.get("timeout") == 5
+        sub = argv[1:]
+        if sub[:2] == ["rev-parse", "--abbrev-ref"]:
+            return subprocess.CompletedProcess(argv, 0, stdout=f"{branch}\n", stderr="")
+        if sub[:2] == ["rev-parse", "--short"]:
+            return subprocess.CompletedProcess(argv, 0, stdout=f"{sha}\n", stderr="")
+        if sub[0] == "merge-base":
+            return subprocess.CompletedProcess(argv, 0 if ancestor else 1, stdout="", stderr="")
+        raise AssertionError(f"未预期的 git 调用：{argv}")
+
+    return _run
+
+
+def test_install_source_local_main_consistent_ok(tmp_path: Path, monkeypatch):
+    src = _local_src(tmp_path, "1.7.1")
+    _fake_dist(monkeypatch, "1.7.1", json.dumps({"url": f"file://{src}"}))
+
+    c = doctor._check_install_source(
+        which=_which_factory({"git"}), run=_git_runner(branch="main", ancestor=True)
+    )
+    assert c["name"] == "install-source"
+    assert c["status"] == "ok"
+    assert c["required"] is False
+    assert str(src) in c["detail"] and "1.7.1" in c["detail"]
+
+
+def test_install_source_local_unmerged_branch_warn(tmp_path: Path, monkeypatch):
+    src = _local_src(tmp_path, "1.7.1")
+    _fake_dist(monkeypatch, "1.7.1", json.dumps({"url": f"file://{src}"}))
+
+    c = doctor._check_install_source(
+        which=_which_factory({"git"}),
+        run=_git_runner(branch="release/v1.7.1", sha="3ba17c6", ancestor=False),
+    )
+    assert c["status"] == "warn"
+    assert "release/v1.7.1" in c["detail"]
+    assert "未合入 main" in c["detail"]
+
+
+def test_install_source_version_mismatch_warn(tmp_path: Path, monkeypatch):
+    src = _local_src(tmp_path, "1.8.0")
+    _fake_dist(monkeypatch, "1.7.1", json.dumps({"url": f"file://{src}"}))
+
+    c = doctor._check_install_source(
+        which=_which_factory({"git"}), run=_git_runner(branch="main", ancestor=True)
+    )
+    assert c["status"] == "warn"
+    assert "1.7.1" in c["detail"] and "1.8.0" in c["detail"]
+
+
+def test_install_source_no_direct_url_warn(monkeypatch):
+    _fake_dist(monkeypatch, "1.7.1", None)
+
+    def _boom(*a, **k):
+        raise AssertionError("不应触发 subprocess")
+
+    c = doctor._check_install_source(which=_which_factory({"git"}), run=_boom)
+    assert c["status"] == "warn"
+    assert "无法读取安装来源" in c["detail"]
+
+
+def test_install_source_remote_vcs_ok(monkeypatch):
+    _fake_dist(
+        monkeypatch,
+        "1.7.1",
+        json.dumps(
+            {
+                "url": "git+https://github.com/winewei/claude_tools",
+                "vcs_info": {"vcs": "git", "commit_id": "0123456789abcdef"},
+            }
+        ),
+    )
+
+    def _boom(*a, **k):
+        raise AssertionError("不应触发 subprocess")
+
+    c = doctor._check_install_source(which=_which_factory({"git"}), run=_boom)
+    assert c["status"] == "ok"
+    assert "0123456" in c["detail"]
+
+
+def test_install_source_distribution_absent_warn(monkeypatch):
+    def _absent(name):
+        raise importlib.metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(doctor.importlib.metadata, "distribution", _absent)
+    c = doctor._check_install_source(which=_which_factory({"git"}))
+    assert c["status"] == "warn"
+    assert "无法读取安装来源" in c["detail"]
+
+
+def test_install_source_registered_in_gather_checks(tmp_path: Path, monkeypatch):
+    src = _local_src(tmp_path, "1.7.1")
+    _fake_dist(monkeypatch, "1.7.1", json.dumps({"url": f"file://{src}"}))
+    monkeypatch.setattr(doctor.subprocess, "run", _git_runner(branch="main", ancestor=True))
+
+    checks = doctor.gather_checks(
+        home=_make_home(tmp_path), repo_root=_make_repo(tmp_path), which=_which_factory(ALL_BINS)
+    )
+    c = next(c for c in checks if c["name"] == "install-source")
+    assert c["status"] == "ok"

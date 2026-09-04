@@ -887,8 +887,12 @@ stdout（成功）:
    "integrated_commit": "<hash>", "verify_tests": "pass|skipped",
    "files": {"present": <int>, "total": <int>}}
 stdout（失败）:
-  {"ok": false, "seq": <int>, "step": "verify-manifest|cherry-pick|record|verify-tests",
+  {"ok": false, "seq": <int>,
+   "step": "inner-loop-active|verify-manifest|cherry-pick|record|verify-tests",
    "reason": "<str>", "reverted": "<hash>|null", ...}
+  step=inner-loop-active：有其它 change 正在 main 上跑 review/fix/archive（state 中该
+  phase 为 in-progress），未做任何改动即返回，附 active=[{seq,change_id,phase}]；
+  调用方应排队到该内环结束后重试。确认无并发时可 --force 跳过。
 
 exit code:
   0  成功
@@ -908,6 +912,10 @@ exit code:
     p_integrate.add_argument(
         "--no-verify-tests", dest="no_verify_tests", action="store_true",
         help="跳过整合后测试复跑（不推荐）",
+    )
+    p_integrate.add_argument(
+        "--force", action="store_true",
+        help="跳过 main 互斥检查（有 change 正在 main 上跑 review/fix/archive 时默认拒绝整合，step=inner-loop-active）",
     )
     p_integrate.set_defaults(
         handler=_make_handler("integrate", "cli_integrate"), _cmd_path="integrate"
@@ -1229,6 +1237,38 @@ exit code:
     )
     p_plan_waves.add_argument("--input", default=None, help="JSON 输入文件（省略则读 stdin）")
     p_plan_waves.set_defaults(handler=_make_handler("waves", "run"), _cmd_path="plan waves")
+    p_plan_ready = sub_plan.add_parser(
+        "ready",
+        help="流水化调度：给定 done/active 集合，算此刻可起跑的 change（stdin/--input JSON）",
+        formatter_class=_EPILOG_FMT,
+        epilog="""\
+输入 JSON（stdin 或 --input）在 `plan waves` 的 {nodes, edges, files, tie_break}
+之上增加运行时集合：
+
+  "done":     ["<cid>", ...]   已 integrate 进 main（依赖以此判定，不是 archived）
+  "active":   ["<cid>", ...]   implementer 正在 worktree 中跑（只做文件冲突排除）
+  "finished": ["<cid>", ...]   已终态且不再调度；缺省等于 done
+  "limit":    <int>            本批最多返回几个（并发槽位）
+
+ready = 未 done/active/finished 且入边前驱全部 ∈ done、且与任一 active 节点及已选入
+本批者无文件交集冲突的节点，按 tie_break 序取前 limit 个。文件冲突判定与
+`plan waves` 同源（路径前缀重叠）。
+
+stdout:
+  {"ready": ["<cid>", ...], "blocked": {"<cid>": ["<reason>", ...]},
+   "remaining": <int>, "warnings": ["<str>", ...]}
+
+blocked 原因按 dep-pending:<cid> → file-conflict:<cid> → limit 短路，只报首个生效层级；
+remaining 是尚未进入终态（done ∪ finished）的节点数；done/active 中不存在的 cid
+忽略并记入 warnings。
+
+exit code:
+  0  成功
+  2  输入不合法（非 JSON / 缺 nodes / limit 非法 / 文件不可读）
+""",
+    )
+    p_plan_ready.add_argument("--input", default=None, help="JSON 输入文件（省略则读 stdin）")
+    p_plan_ready.set_defaults(handler=_make_handler("waves", "run_ready"), _cmd_path="plan ready")
 
     # ===== git =====
     p_git = sub.add_parser("git", help="SDD git 卫生（分支/脏树/commit）")

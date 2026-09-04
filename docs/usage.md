@@ -31,7 +31,7 @@ npc playbook install --host codex     # Codex CLI：~/.codex/prompts/
 npc playbook install --dest <DIR>     # 其它宿主（kimi / qwen / opencode 等）：平铺到其自定义命令目录
 ```
 
-装完得到六个能力：`spine-run`、`spine-analyze`、`new-plan-changes-v2`（串行推进全部 active changes）、`new-plan-changes-v3`（波次并行版）、`new-plan-changes-v4`（上下文预算版）、`spine-coder`（coder 执行体定义）。
+装完得到六个能力：`spine-run`、`spine-analyze`、`new-plan-changes-v2`（串行推进全部 active changes）、`new-plan-changes-v3`（波次并行版）、`new-plan-changes-v4`（上下文预算 + 流水化调度版）、`spine-coder`（coder 执行体定义）。
 
 > playbook 内容以 npc 包内版本为准：升级 CLI（重跑层 1 的 `uv tool install` 命令）后重跑同一条 `npc playbook install` 即同步。不想物化时，任何宿主也可 `npc playbook show <name>` 把原文直接拉进 context 执行。
 
@@ -48,7 +48,9 @@ npc playbook install --dest <DIR>     # 其它宿主（kimi / qwen / opencode �
 用 playbook 入口，不要手工逐步操作：
 
 - 批量推进全部 active changes → `new-plan-changes-v4` playbook（Claude Code 中即 `/new-plan-changes-v4`）：
-  DAG 波次并行 + worktree 隔离，整合与单 change 内环走 `npc integrate` / `npc change run`
+  DAG 波次并行 + worktree 隔离，整合与单 change 内环走 `npc integrate` / `npc change run`；
+  调度是流水线而非逐波屏障——每次 integrate 成功后立刻 `npc plan ready` 续闸，
+  下一波的 implement 在上一波 review/fix 期间就起跑（`--serial-waves` 可退回逐波屏障）
 - 单目标 / 单 change 自主闭环 → `spine-run` playbook（Claude Code 中即 `/spine-run`）：
   - `spine-run <目标>` —— 自由目标，harness 自动拆解成 change 再跑（交互档）
   - `spine-run <change名…>` —— 已有 openspec change，直接跑

@@ -28,6 +28,7 @@ from pathlib import Path
 from . import _io, paths as _paths, pipeline as _pipeline, state as _state, telemetry as _telemetry, verify as _verify
 from . import config as _config
 from . import events as _events
+from . import locks as _locks
 
 
 def _git(repo_root: Path, *argv: str, runner=subprocess.run) -> subprocess.CompletedProcess:
@@ -86,6 +87,26 @@ def _emit_run_event(p: _paths.Paths, seq: int, change_id: str | None, payload: d
         pass
 
 
+_MAIN_MUTATING_PHASE_RE = re.compile(r"^(review-r\d+|fix-r\d+|archive)$")
+
+
+def inner_loop_active(progress: list[dict], *, exclude_seq: int | None = None) -> list[dict]:
+    """列出仍在 main worktree 上跑内环（review / fix / archive 处于 in-progress）的 change。
+
+    integrate 会在 main 上 cherry-pick、跑测试、读改写 state.json；与 ``npc change run``
+    的 fix commit / archive commit 并发会导致 git 锁冲突、测错 HEAD、state 覆盖写。
+    implement 阶段在 worktree 内进行，不算占用 main。
+    """
+    active: list[dict] = []
+    for idx, entry in enumerate(progress, start=1):
+        if idx == exclude_seq:
+            continue
+        for phase, info in ((entry or {}).get("phases") or {}).items():
+            if _MAIN_MUTATING_PHASE_RE.match(phase) and (info or {}).get("status") == "in-progress":
+                active.append({"seq": idx, "change_id": entry.get("change_id"), "phase": phase})
+    return active
+
+
 def run_integrate(
     p: _paths.Paths,
     seq: int,
@@ -93,14 +114,58 @@ def run_integrate(
     manifest_path: str | None,
     *,
     verify_tests: bool = True,
+    force: bool = False,
     runner=subprocess.run,
 ) -> dict:
-    """整合编排主体。返回结构化结果 dict（ok=false 时带 step 定位）。"""
+    """整合编排主体。返回结构化结果 dict（ok=false 时带 step 定位）。
+
+    **main 互斥**：整合全程持 ``<task_log_dir>/.main.lock``（非阻塞抢锁）。锁被
+    ``npc change run``（fix / archive 在 main 上提交）或另一个 integrate 持有时，未做任何
+    改动即返回 ``step=inner-loop-active, reason=main-busy``，附锁持有者与 state 里处于
+    in-progress 的内环 phase 快照供诊断；调用方排队到内环结束后重试。
+    ``force=True`` 跳过互斥（仅用于人工确认无并发、或清理残留锁后的补偿整合）。
+    """
     state = _state.read_state(p.state_json)
     progress = state.get("progress") or []
     if not (1 <= seq <= len(progress)):
         raise ValueError(f"seq={seq} 超出 progress 数组长度（total={len(progress)}）")
     change_id = progress[seq - 1].get("change_id")
+
+    if force:
+        return _run_integrate_locked(
+            p, seq, change_id, result_line, manifest_path,
+            verify_tests=verify_tests, runner=runner,
+        )
+    lock_path = _locks.main_lock_path(p.task_log_dir)
+    fh = _locks.try_acquire(lock_path, owner=f"integrate seq={seq} {change_id}")
+    if fh is None:
+        return _fail(
+            "inner-loop-active", "main-busy", seq=seq,
+            extra={
+                "holder": _locks.read_holder(lock_path),
+                "active": inner_loop_active(progress, exclude_seq=seq),
+                "hint": "等待 change run / 另一 integrate 结束后重试；确认无并发后可 --force",
+            },
+        )
+    try:
+        return _run_integrate_locked(
+            p, seq, change_id, result_line, manifest_path,
+            verify_tests=verify_tests, runner=runner,
+        )
+    finally:
+        _locks.release(fh)
+
+
+def _run_integrate_locked(
+    p: _paths.Paths,
+    seq: int,
+    change_id: str | None,
+    result_line: str,
+    manifest_path: str | None,
+    *,
+    verify_tests: bool,
+    runner,
+) -> dict:
 
     # 1. verify manifest（plan-only 判定 + 文件核对）
     parsed = _verify.parse_result_verdict(result_line, manifest_path)
@@ -174,26 +239,44 @@ def run_integrate(
         )
 
     # 5. verify tests（真实复跑；探测不到命令 → skipped）
+    #    strict 模式（未取基线）在 cherry-pick 之后重新探测测试命令：change 可能首次
+    #    引入 pyproject / tests/ / Makefile test target，整合前探测不到不代表无测试。
+    #    diff 模式保留整合前的命令，保证与基线可比。
     tests_status = "skipped"
     tests_detail: dict | None = None
     if verify_tests:
         cmd = test_cmd
+        if baseline_failed is None:
+            try:
+                cfg_after = _config.load_config(p.repo_root)
+            except _config.ConfigError:
+                cfg_after = _config.Config()
+            cmd = _verify.resolve_test_cmd(p.repo_root, cfg_after)
         if cmd is not None:
             proc = _verify.run_test_cmd(p.repo_root, cmd, runner=runner)
             judged = _verify.judge_against_baseline(proc, baseline_failed)
             tests_detail = {k: v for k, v in judged.items() if k != "passed"}
             if not judged["passed"]:
                 reverted = _revert(p.repo_root, integrated, runner=runner)
+                # 诊断三件套（命令 / 判定明细 / 输出尾段）——只报 reverted 无法定位失败原因
+                tail = _verify._tail(proc.stdout or "", proc.stderr or "", lines=40)[-4000:]
 
                 def mut(st: dict) -> None:
                     e = (st.get("progress") or [])[seq - 1]
                     e["status"] = "failed"
                     e["reason"] = "verify-tests-failed"
+                    e["verify_tests_detail"] = tests_detail
 
                 _state.update_state(p.state_json, p.state_md, mut)
                 _emit_run_event(
                     p, seq, change_id,
-                    {"event": "integrate.verify_tests_failed", "reverted": integrated},
+                    {
+                        "event": "integrate.verify_tests_failed",
+                        "reverted": integrated,
+                        "cmd": cmd,
+                        "tests": tests_detail,
+                        "tail": tail,
+                    },
                 )
                 _telemetry.emit_deviation(
                     proj_key=p.proj_key, run_ts=p.run_ts, change_seq=seq,
@@ -203,11 +286,7 @@ def run_integrate(
                 return _fail(
                     "verify-tests", "tests-failed", seq=seq,
                     reverted=integrated if reverted else None,
-                    extra={
-                        "cmd": cmd,
-                        "tests": tests_detail,
-                        "tail": _verify._tail(proc.stdout or "", proc.stderr or ""),
-                    },
+                    extra={"cmd": cmd, "tests": tests_detail, "tail": tail},
                 )
             tests_status = "pass" if judged["mode"] == "strict" or judged["failed"] == 0 else "pass-baseline-diff"
         else:
@@ -268,6 +347,7 @@ def cli_integrate(args: argparse.Namespace) -> None:
             result_line,
             getattr(args, "manifest", None),
             verify_tests=not getattr(args, "no_verify_tests", False),
+            force=bool(getattr(args, "force", False)),
         )
     except FileNotFoundError as e:
         _io.emit_error("env_missing", str(e), exit_code=3)

@@ -268,6 +268,49 @@ def test_integrate_diff_baseline_reverts_on_new_failure(
     assert _git(fake_repo, "status", "--porcelain") == ""
 
 
+def test_integrate_verify_tests_failed_event_carries_diagnostics(
+    env_setup, fake_repo, make_args, capsys, tmp_path, summary_file
+):
+    """新增失败时 run event 必须带 cmd / tests.new_failures / tail，state 留 verify_tests_detail。"""
+    p = env_setup
+    _bootstrap_run(make_args, capsys, "add-foo")
+    wc = _side_branch_commit(fake_repo)
+    manifest = _manifest_for(tmp_path, tmp_path, wc, ["implement.summary.md"])
+    _setup_diff_cfg(fake_repo)
+
+    n = {"test": 0}
+
+    def runner(argv, **kwargs):
+        if argv[0] == "git":
+            return subprocess.run(argv, **{k: v for k, v in kwargs.items() if k != "shell"})
+        n["test"] += 1
+        failed = ["tests/test_a.py::test_x"]
+        if n["test"] == 2:
+            failed.append("tests/test_new.py::test_regression")
+        return subprocess.CompletedProcess(argv, 1, stdout=_pytest_like_output(failed), stderr="")
+
+    out = _integrate.run_integrate(p, 1, _result_line(wc, summary_file), manifest, runner=runner)
+    assert out["ok"] is False
+
+    events = [
+        json.loads(line)
+        for line in p.run_events.read_text().splitlines()
+        if line.strip()
+    ]
+    ev = [e for e in events if e.get("event") == "integrate.verify_tests_failed"]
+    assert len(ev) == 1
+    ev = ev[0]
+    assert ev["cmd"] == "fake-test"
+    assert ev["tests"]["mode"] == "diff"
+    assert ev["tests"]["new_failures"] == ["tests/test_new.py::test_regression"]
+    assert "tests/test_new.py::test_regression" in ev["tail"]
+    assert len(ev["tail"]) <= 4000
+    assert ev["reverted"]
+
+    entry = _state.read_state(p.state_json)["progress"][0]
+    assert entry["verify_tests_detail"]["new_failures"] == ["tests/test_new.py::test_regression"]
+
+
 def test_integrate_diff_baseline_unparseable_failure_reverts(
     env_setup, fake_repo, make_args, capsys, tmp_path, summary_file
 ):
@@ -315,3 +358,129 @@ def test_integrate_strict_default_unchanged(
     assert calls == ["test"]
     assert out["verify_tests"] == "pass"
     assert out["tests"] == {"mode": "strict", "failed": None, "new_failures": []}
+
+
+# ============================================================
+# main 互斥：内环在跑时拒绝整合
+# ============================================================
+
+
+def test_inner_loop_active_lists_only_main_mutating_phases():
+    progress = [
+        {"change_id": "a", "phases": {"implement": {"status": "in-progress"}}},
+        {"change_id": "b", "phases": {"review-r1": {"status": "in-progress"}, "fix-r1": {"status": "done"}}},
+        {"change_id": "c", "phases": {"fix-r2": {"status": "in-progress"}}},
+        {"change_id": "d", "phases": {"archive": {"status": "in-progress"}}},
+        {"change_id": "e", "phases": {"archive": {"status": "done"}}},
+    ]
+    active = _integrate.inner_loop_active(progress)
+    assert [(x["seq"], x["change_id"], x["phase"]) for x in active] == [
+        (2, "b", "review-r1"),
+        (3, "c", "fix-r2"),
+        (4, "d", "archive"),
+    ]
+    # 排除自身 seq
+    assert [x["seq"] for x in _integrate.inner_loop_active(progress, exclude_seq=3)] == [2, 4]
+    assert _integrate.inner_loop_active([]) == []
+
+
+def test_integrate_refuses_while_main_lock_held(
+    env_setup, fake_repo, make_args, capsys, tmp_path, summary_file
+):
+    """main 锁被 change run 持有时，integrate 无副作用返回 inner-loop-active（含持有者与 phase 快照）。"""
+    from npc import locks as _locks
+
+    p = env_setup
+    _bootstrap_run(make_args, capsys, "add-foo", "add-bar")
+    s = json.loads(p.state_json.read_text())
+    s["progress"][1]["phases"] = {"fix-r1": {"status": "in-progress"}}
+    p.state_json.write_text(json.dumps(s))
+    head_before = _git(fake_repo, "rev-parse", "HEAD")
+    wc = _side_branch_commit(fake_repo)
+    manifest = _manifest_for(tmp_path, tmp_path, wc, ["implement.summary.md"])
+
+    calls: list[str] = []
+
+    def runner(argv, **kwargs):
+        calls.append(argv[0])
+        return subprocess.run(argv, **{k: v for k, v in kwargs.items() if k != "shell"})
+
+    holder = _locks.try_acquire(_locks.main_lock_path(p.task_log_dir), owner="change run seq=2")
+    assert holder is not None
+    try:
+        out = _integrate.run_integrate(p, 1, _result_line(wc, summary_file), manifest, runner=runner)
+    finally:
+        _locks.release(holder)
+    assert out["ok"] is False
+    assert out["step"] == "inner-loop-active"
+    assert out["reason"] == "main-busy"
+    assert out["holder"]["owner"] == "change run seq=2"
+    assert out["active"] == [{"seq": 2, "change_id": "add-bar", "phase": "fix-r1"}]
+    assert calls == [], "未做任何 git / 测试调用"
+    assert _git(fake_repo, "rev-parse", "HEAD") == head_before
+    assert not (fake_repo / "feature.py").exists()
+
+    # 锁释放后正常整合，且整合结束会放锁
+    out2 = _integrate.run_integrate(p, 1, _result_line(wc, summary_file), manifest, runner=runner)
+    assert out2["ok"] is True, out2
+    assert (fake_repo / "feature.py").exists()
+    again = _locks.try_acquire(_locks.main_lock_path(p.task_log_dir), owner="probe")
+    assert again is not None
+    _locks.release(again)
+
+
+def test_integrate_force_bypasses_main_lock(
+    env_setup, fake_repo, make_args, capsys, tmp_path, summary_file
+):
+    from npc import locks as _locks
+
+    p = env_setup
+    _bootstrap_run(make_args, capsys, "add-foo")
+    wc = _side_branch_commit(fake_repo)
+    manifest = _manifest_for(tmp_path, tmp_path, wc, ["implement.summary.md"])
+    holder = _locks.try_acquire(_locks.main_lock_path(p.task_log_dir), owner="other")
+    try:
+        out = _integrate.run_integrate(p, 1, _result_line(wc, summary_file), manifest, force=True)
+    finally:
+        _locks.release(holder)
+    assert out["ok"] is True, out
+
+
+def test_integrate_strict_mode_reresolves_test_cmd_after_cherry_pick(
+    env_setup, fake_repo, make_args, capsys, tmp_path, summary_file
+):
+    """strict 模式：change 首次引入测试命令时，整合后必须探测到并真实复跑。"""
+    p = env_setup
+    _bootstrap_run(make_args, capsys, "add-foo")
+    assert not (fake_repo / "pyproject.toml").exists()
+    wc = _side_branch_commit(fake_repo, fname="pyproject.toml", content="[project]\nname='x'\n")
+    manifest = _manifest_for(tmp_path, tmp_path, wc, ["implement.summary.md"])
+
+    seen: list[list[str]] = []
+
+    def runner(argv, **kwargs):
+        if argv[0] == "git":
+            return subprocess.run(argv, **{k: v for k, v in kwargs.items() if k != "shell"})
+        seen.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0, stdout="ok", stderr="")
+
+    out = _integrate.run_integrate(p, 1, _result_line(wc, summary_file), manifest, runner=runner)
+    assert out["ok"] is True, out
+    assert out["verify_tests"] == "pass", "整合后新出现 pyproject.toml，应探测到 pytest 并复跑"
+    assert seen, "测试命令未被执行"
+
+
+def test_integrate_ignores_own_and_implement_phases(
+    env_setup, fake_repo, make_args, capsys, tmp_path, summary_file
+):
+    """自身 seq 的 in-progress 与他人的 implement in-progress 都不构成互斥。"""
+    p = env_setup
+    _bootstrap_run(make_args, capsys, "add-foo", "add-bar")
+    s = json.loads(p.state_json.read_text())
+    s["progress"][0]["phases"] = {"implement": {"status": "in-progress"}}
+    s["progress"][1]["phases"] = {"implement": {"status": "in-progress"}}
+    p.state_json.write_text(json.dumps(s))
+    wc = _side_branch_commit(fake_repo)
+    manifest = _manifest_for(tmp_path, tmp_path, wc, ["implement.summary.md"])
+    out = _integrate.run_integrate(p, 1, _result_line(wc, summary_file), manifest)
+    assert out["ok"] is True, out

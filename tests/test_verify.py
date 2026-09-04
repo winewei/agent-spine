@@ -554,6 +554,35 @@ def test_parse_failed_ids_pytest_and_go():
     assert _verify.parse_failed_ids("") == set()
 
 
+def test_parse_failed_ids_go_qualified_by_package():
+    """go test ./... 的用例名只在包内唯一：同名 TestConnect 分属两包必须得到两个 id。"""
+    from npc import verify as _verify
+
+    out = (
+        "--- FAIL: TestConnect (0.01s)\n"
+        "    conn_test.go:12: boom\n"
+        "FAIL\n"
+        "FAIL\texample.com/m/pkga\t0.020s\n"
+        "ok  \texample.com/m/pkgb\t0.010s\n"
+        "--- FAIL: TestConnect (0.00s)\n"
+        "    --- FAIL: TestConnect/sub (0.00s)\n"
+        "FAIL\texample.com/m/pkgc\t0.030s\n"
+        "FAIL\n"
+    )
+    assert _verify.parse_failed_ids(out) == {
+        "example.com/m/pkga::TestConnect",
+        "example.com/m/pkgc::TestConnect",
+        "example.com/m/pkgc::TestConnect/sub",
+    }
+    # 基线只有 pkga 失败，pkgc 新增同名失败必须被判为回归
+    import subprocess
+
+    proc = subprocess.CompletedProcess(["go"], 1, stdout=out, stderr="")
+    judged = _verify.judge_against_baseline(proc, {"example.com/m/pkga::TestConnect"})
+    assert judged["passed"] is False
+    assert "example.com/m/pkgc::TestConnect" in judged["new_failures"]
+
+
 def test_judge_against_baseline_modes():
     import subprocess
 

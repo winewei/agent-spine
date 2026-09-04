@@ -230,3 +230,27 @@ def test_load_project_context_claude_md_wins_over_agents_md(fake_repo: Path):
     assert label == "CLAUDE.md"
     assert "来自 CLAUDE 的约束" in text
     assert "来自 AGENTS 的约束" not in text
+
+
+# ============================================================
+# 不变量枚举要求（打地鼠治理）
+# ============================================================
+
+
+def test_round_0_template_requires_repo_wide_enumeration():
+    text = _focus._round_0_template("add-foo", "ctx")
+    assert "枚举全仓所有违例点" in text
+    assert "不得每轮只报一处" in text
+    assert "已检索的范围与方法" in text
+
+
+def test_round_n_template_requires_repo_wide_enumeration():
+    text = _focus._round_n_template("add-foo", 2, "aaa1111", "ctx")
+    assert "枚举全仓所有违例点" in text
+    assert "不得每轮只报一处" in text
+
+
+def test_round_n_template_requires_invariant_sweep_carry_over():
+    text = _focus._round_n_template("add-foo", 2, "aaa1111", "ctx")
+    assert "Invariant Sweep" in text
+    assert "[carry-over]" in text

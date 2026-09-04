@@ -132,19 +132,38 @@ def _tail(stdout: str, stderr: str, lines: int = TAIL_LINES) -> str:
 
 
 # pytest short summary（-q 默认 -rfE）/ go test 的失败行；行首匹配，避免误吞日志正文。
-_FAILED_LINE_RE = re.compile(r"^(?:FAILED|ERROR)\s+(\S+)|^---\s+FAIL:\s+(\S+)", re.MULTILINE)
+_PYTEST_FAILED_RE = re.compile(r"^(?:FAILED|ERROR)\s+(\S+)")
+_GO_TEST_FAIL_RE = re.compile(r"^\s*---\s+FAIL:\s+(\S+)")
+# go test 的包级汇总行：`FAIL\t<pkg>\t0.12s` / `FAIL\t<pkg> [build failed]`
+_GO_PKG_FAIL_RE = re.compile(r"^FAIL\s+(\S+)")
 
 
 def parse_failed_ids(stdout: str, stderr: str = "") -> set[str]:
     """从测试输出抽取失败用例 id 集合（pytest ``FAILED path::name`` / go ``--- FAIL: Name``）。
 
     参数化 id 的 ``[...]`` 保留，保证同一用例不同参数分别计数。
+    go 的用例名只在包内唯一，``--- FAIL: TestX`` 之后紧跟的 ``FAIL <pkg>`` 汇总行
+    给出所属包，id 记为 ``<pkg>::TestX``；找不到汇总行的孤儿名保持裸名。
     抽不出任何 id 返回空集——调用方须结合 exit code 判定，不可把空集当"全绿"。
     """
     combined = (stdout or "") + "\n" + (stderr or "")
     ids: set[str] = set()
-    for m in _FAILED_LINE_RE.finditer(combined):
-        ids.add(m.group(1) or m.group(2))
+    pending_go: list[str] = []
+    for line in combined.splitlines():
+        m = _PYTEST_FAILED_RE.match(line)
+        if m:
+            ids.add(m.group(1))
+            continue
+        m = _GO_TEST_FAIL_RE.match(line)
+        if m:
+            pending_go.append(m.group(1))
+            continue
+        m = _GO_PKG_FAIL_RE.match(line)
+        if m and pending_go:
+            pkg = m.group(1)
+            ids.update(f"{pkg}::{name}" for name in pending_go)
+            pending_go = []
+    ids.update(pending_go)
     return ids
 
 

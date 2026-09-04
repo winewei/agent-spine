@@ -242,6 +242,10 @@ def _round_0_template(
 4. 测试是否覆盖 spec 列出的验收场景与显式标注的边界情况；对并发 / 事务 / 锁 / 重试 / 竞态 / 部分失败场景，mock-only 测试视为"未充分覆盖"
 5. 与 project.md / CLAUDE.md（或 AGENTS.md）中规定的项目级约束的一致性
 
+**不变量类 finding 的枚举要求（硬性）**：
+- 若某条 finding 陈述的是一条不变量（"任何 / 所有 / 不得 / 一律"），必须在本轮内**枚举全仓所有违例点**，合并为**一条** finding，在 `detail` 中列出完整清单（file:line 逐条）；不得每轮只报一处。
+- 无法穷举时，须在 `detail` 写明已检索的范围与方法（命令 / 目录 / 匹配模式），以及未覆盖的部分。
+
 **输出要求（极重要）**：
 - 你的最终消息必须是**且仅是**一个合法的 JSON 对象，符合本次调用提供的 output-schema。
 - 字段含义：
@@ -285,11 +289,15 @@ def _round_n_template(
 {history_block}
 
 审查重点：
-1. 上轮 findings 是否被 Fixer 真正修复（含同类问题是否扫描完毕，避免「打地鼠」）；对照 fix.summary.md 的 Locations Scanned 段，验证 Fixer 是否真的去看了那些位置
+1. 上轮 findings 是否被 Fixer 真正修复（含同类问题是否扫描完毕，避免「打地鼠」）；对照 fix.summary.md 的 Locations Scanned 段，验证 Fixer 是否真的去看了那些位置。上轮 fix.summary.md 若存在 `Invariant Sweep` 段，核对其枚举是否完整；遗漏的落点作为同一 finding 的 carry-over 报告，`title` 前加 `[carry-over]`
 2. 修复是否引入新的与 spec 冲突的行为或回归
 3. 对并发 / 事务类 finding：Fixer 提供的真实回归是否真的触发了被修复路径；如果只有 mock-only 测试，请在 finding 里明确指出"需补真实回归"
 4. 是否仍存在 spec 列明但实现遗漏的 requirement / 边界场景
 5. 与 project.md / CLAUDE.md（或 AGENTS.md）约束的一致性
+
+**不变量类 finding 的枚举要求（硬性）**：
+- 若某条 finding 陈述的是一条不变量（"任何 / 所有 / 不得 / 一律"），必须在本轮内**枚举全仓所有违例点**，合并为**一条** finding，在 `detail` 中列出完整清单（file:line 逐条）；不得每轮只报一处。
+- 无法穷举时，须在 `detail` 写明已检索的范围与方法（命令 / 目录 / 匹配模式），以及未覆盖的部分。
 
 请直接报告本轮的新 findings 或仍未修复的 carry-over findings；不要重复列已修复的项。**对前几轮已被标注为"spec-aligned 不修"的 finding（见 $LOG_BASE/change.md 的 Carried Over / Advisory 段），不再重报**。
 
