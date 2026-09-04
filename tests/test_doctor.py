@@ -802,3 +802,125 @@ def test_install_source_registered_in_gather_checks(tmp_path: Path, monkeypatch)
     )
     c = next(c for c in checks if c["name"] == "install-source")
     assert c["status"] == "ok"
+
+
+# ============================================================
+# experience 检查项（经验层探活，v1.8）
+# ============================================================
+
+
+def _stub_experience_report(monkeypatch, report: dict) -> None:
+    monkeypatch.setattr(doctor._experience, "doctor_report", lambda _cfg, _root: report)
+
+
+def _stub_experience_cfg(monkeypatch, **overrides):
+    """打桩 load_config，只让 [experience] 生效（避免读到本机真实配置）。"""
+    from npc.config import Config, ExperienceConfig
+
+    cfg = Config(experience=ExperienceConfig(**overrides))
+    monkeypatch.setattr(doctor._config, "load_config", lambda *_a, **_kw: cfg)
+
+
+def _healthy_report(**overrides) -> dict:
+    report = {
+        "enabled": True,
+        "env_file_found": True,
+        "base_url": "http://127.0.0.1:1933",
+        "health": {"ok": True, "version": "0.9.1", "auth_mode": "api_key"},
+        "agent_evolution": True,
+        "experiences_count": 7,
+        "warnings": [],
+        "notes": [],
+    }
+    report.update(overrides)
+    return report
+
+
+def test_experience_disabled_is_ok(tmp_path: Path, monkeypatch):
+    _stub_experience_cfg(monkeypatch, enabled=False)
+
+    def _boom(*_a, **_kw):
+        raise AssertionError("未启用时不得探活")
+
+    monkeypatch.setattr(doctor._experience, "doctor_report", _boom)
+    c = doctor._check_experience(home=tmp_path, repo_root=tmp_path)
+    assert c["status"] == "ok"
+    assert c["required"] is False
+    assert "未启用" in c["detail"]
+
+
+def test_experience_unreachable_is_warn_not_missing(tmp_path: Path, monkeypatch):
+    _stub_experience_cfg(monkeypatch, enabled=True, extraction_model_declared="opus")
+    _stub_experience_report(
+        monkeypatch,
+        _healthy_report(health={"ok": False, "error": "unreachable", "message": "x"}),
+    )
+    c = doctor._check_experience(home=tmp_path, repo_root=tmp_path)
+    assert c["status"] == "warn"
+    assert c["required"] is False
+    assert "http://127.0.0.1:1933" in c["detail"]
+
+
+def test_experience_agent_evolution_disabled_warn(tmp_path: Path, monkeypatch):
+    _stub_experience_cfg(monkeypatch, enabled=True, extraction_model_declared="opus")
+    _stub_experience_report(monkeypatch, _healthy_report(agent_evolution=False))
+    c = doctor._check_experience(home=tmp_path, repo_root=tmp_path)
+    assert c["status"] == "warn"
+    assert "agent_evolution" in c["detail"]
+
+
+def test_experience_dev_mode_warn(tmp_path: Path, monkeypatch):
+    _stub_experience_cfg(monkeypatch, enabled=True, extraction_model_declared="opus")
+    _stub_experience_report(
+        monkeypatch,
+        _healthy_report(health={"ok": True, "version": "0.9.1", "auth_mode": "none"}),
+    )
+    c = doctor._check_experience(home=tmp_path, repo_root=tmp_path)
+    assert c["status"] == "warn"
+    assert "dev 模式" in c["detail"]
+
+
+def test_experience_missing_extraction_model_declaration_warn(tmp_path: Path, monkeypatch):
+    _stub_experience_cfg(monkeypatch, enabled=True)
+    _stub_experience_report(monkeypatch, _healthy_report())
+    c = doctor._check_experience(home=tmp_path, repo_root=tmp_path)
+    assert c["status"] == "warn"
+    assert "extraction_model_declared" in c["detail"]
+
+
+def test_experience_remote_base_url_warn(tmp_path: Path, monkeypatch):
+    _stub_experience_cfg(monkeypatch, enabled=True, extraction_model_declared="opus")
+    _stub_experience_report(monkeypatch, _healthy_report(base_url="http://10.0.0.9:1933"))
+    c = doctor._check_experience(home=tmp_path, repo_root=tmp_path)
+    assert c["status"] == "warn"
+    assert "非本地地址" in c["detail"]
+
+
+def test_experience_all_green_ok(tmp_path: Path, monkeypatch):
+    _stub_experience_cfg(monkeypatch, enabled=True, extraction_model_declared="opus")
+    _stub_experience_report(monkeypatch, _healthy_report())
+    c = doctor._check_experience(home=tmp_path, repo_root=tmp_path)
+    assert c["status"] == "ok"
+    assert "0.9.1" in c["detail"] and "7" in c["detail"]
+
+
+def test_experience_config_unreadable_warn(tmp_path: Path, monkeypatch):
+    def _boom(*_a, **_kw):
+        raise ValueError("bad toml")
+
+    monkeypatch.setattr(doctor._config, "load_config", _boom)
+    c = doctor._check_experience(home=tmp_path, repo_root=tmp_path)
+    assert c["status"] == "warn"
+    assert "不可解析" in c["detail"]
+
+
+def test_experience_registered_in_gather_checks(tmp_path: Path, monkeypatch):
+    home = _make_home(tmp_path, mimo=True, schema=True)
+    repo = _make_repo(tmp_path, principles=True)
+    _stub_experience_cfg(monkeypatch, enabled=False)
+    checks = doctor.gather_checks(
+        home=home, repo_root=repo, which=_which_factory(ALL_BINS)
+    )
+    c = _by_name(checks)["experience"]
+    assert c["status"] == "ok"
+    assert c["required"] is False

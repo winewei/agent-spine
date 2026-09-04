@@ -806,6 +806,104 @@ def emit_deviation(
     emit_event(record)
 
 
+def emit_experience_recall(
+    *,
+    proj_key: str,
+    run_ts: str | None,
+    change_seq: int | None,
+    change_id: str | None,
+    phase: str,
+    round_n: int | None,
+    ok: bool,
+    entries: int,
+    injected_tokens: int,
+    uris: list[str] | tuple[str, ...] | None,
+    error: str | None,
+    duration_ms: int | None,
+    state_json: Path | str | None,
+    run_events: Path | str | None,
+    record_path: Path | str | None,
+    policy_snapshot_id: str | None,
+) -> None:
+    """经验层召回埋点（kind=``experience.recall``）。
+
+    ``uris`` + ``policy_snapshot_id`` 是"经验是否有用"这一问题的可测前提：前者
+    让「同一条经验被注入了几次、之后 review 复发率如何」可聚合，后者把复发率
+    绑定到经验库版本上——否则跨 run 对比的是两个不同的经验库。
+    """
+    record: dict[str, Any] = {
+        "kind": "experience.recall",
+        "proj_key": proj_key,
+        "run_ts": run_ts,
+        "change_seq": change_seq,
+        "change_id": change_id,
+        "phase": phase,
+        "round": round_n,
+        "ok": ok,
+        "entries": entries,
+        "injected_tokens": injected_tokens,
+        "uris": list(uris or []),
+        "error": error,
+        "duration_ms": duration_ms,
+        "policy_snapshot_id": policy_snapshot_id,
+        "pointer": _build_pointer(
+            state_json=state_json,
+            run_events=run_events,
+            experience_json=record_path,
+        ),
+    }
+    emit_event(record)
+
+
+def emit_experience_commit(
+    *,
+    proj_key: str,
+    run_ts: str | None,
+    change_seq: int | None,
+    change_id: str | None,
+    ok: bool,
+    skipped: bool,
+    reason: str | None,
+    session_id: str | None,
+    task_id: str | None,
+    messages: int | None,
+    duration_ms: int | None,
+    state_json: Path | str | None,
+    run_events: Path | str | None,
+    commit_json: Path | str | None,
+) -> None:
+    """经验层写入侧埋点（v1.8）：archive 成功后的一次提交尝试。
+
+    ``skipped=True`` 表示写入闸门未放行（``reason`` 为闸门判据），不是失败——
+    区分这两者才能回答"经验库为何没长大"。异常一律吞掉：埋点绝不影响 archive。
+    """
+    try:
+        emit_event(
+            {
+                "kind": "experience.commit",
+                "proj_key": proj_key,
+                "run_ts": run_ts,
+                "change_seq": change_seq,
+                "change_id": change_id,
+                "phase": "archive",
+                "ok": ok,
+                "skipped": skipped,
+                "reason": reason,
+                "session_id": session_id,
+                "task_id": task_id,
+                "messages": messages,
+                "duration_ms": duration_ms,
+                "pointer": _build_pointer(
+                    state_json=state_json,
+                    run_events=run_events,
+                    experience_commit_json=commit_json,
+                ),
+            }
+        )
+    except Exception:  # pragma: no cover - emit_event 已吞 OSError，这里只兜住意外
+        pass
+
+
 def _build_pointer(**kwargs) -> dict | None:
     """构造 pointer 字段；任何路径都转为绝对字符串；全 None 时返回 None。"""
     out: dict[str, str] = {}

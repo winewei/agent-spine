@@ -476,3 +476,152 @@ def test_hotspots_exposes_whack_a_mole_rounds(isolate_telemetry: Path):
     hs = _telemetry.hotspots(_telemetry.iter_events(), top=5)
     row = next(h for h in hs if h["phase"] == "review-r2")
     assert row["whack_a_mole_rounds"] == 1
+
+
+# ============================================================
+# 经验层召回埋点（蓝本 §3.8）
+# ============================================================
+
+
+def test_emit_experience_recall_persists_fields_and_pointer(
+    isolate_telemetry: Path, tmp_path: Path
+):
+    record_path = tmp_path / "implement.experience.json"
+    record_path.write_text("{}", encoding="utf-8")
+    state_json = tmp_path / "state.json"
+    state_json.write_text("{}", encoding="utf-8")
+
+    _telemetry.emit_experience_recall(
+        proj_key="p",
+        run_ts="2026-09-05-1200",
+        change_seq=2,
+        change_id="add-foo",
+        phase="implement",
+        round_n=None,
+        ok=True,
+        entries=2,
+        injected_tokens=180,
+        uris=["viking://~/memories/experiences/e1.md"],
+        error=None,
+        duration_ms=42,
+        state_json=state_json,
+        run_events=None,
+        record_path=record_path,
+        policy_snapshot_id="a" * 64,
+    )
+
+    rec = list(_telemetry.iter_events())[-1]
+    assert rec["kind"] == "experience.recall"
+    assert rec["schema_version"] == 1
+    assert rec["change_seq"] == 2
+    assert rec["phase"] == "implement"
+    assert rec["round"] is None
+    assert rec["ok"] is True
+    assert rec["entries"] == 2
+    assert rec["injected_tokens"] == 180
+    assert rec["uris"] == ["viking://~/memories/experiences/e1.md"]
+    assert rec["error"] is None
+    assert rec["duration_ms"] == 42
+    assert rec["policy_snapshot_id"] == "a" * 64
+    assert rec["pointer"]["experience_json"] == str(record_path.resolve())
+
+
+def test_emit_experience_recall_failure_keeps_error_and_empty_uris(
+    isolate_telemetry: Path,
+):
+    _telemetry.emit_experience_recall(
+        proj_key="p",
+        run_ts=None,
+        change_seq=1,
+        change_id="add-foo",
+        phase="fix",
+        round_n=2,
+        ok=False,
+        entries=0,
+        injected_tokens=0,
+        uris=None,
+        error="timeout",
+        duration_ms=3001,
+        state_json=None,
+        run_events=None,
+        record_path=None,
+        policy_snapshot_id=None,
+    )
+
+    rec = list(_telemetry.iter_events())[-1]
+    assert rec["ok"] is False
+    assert rec["error"] == "timeout"
+    assert rec["round"] == 2
+    assert rec["uris"] == []
+    assert rec["pointer"] is None
+
+
+def test_experience_recall_kind_declared_in_schema():
+    schema = json.loads(
+        (Path(_telemetry.__file__).with_name("telemetry_schema_v1.json")).read_text(
+            encoding="utf-8"
+        )
+    )
+    assert "experience.recall" in schema["properties"]["kind"]["enum"]
+
+
+# ============================================================
+# 经验层写入侧埋点（v1.8）
+# ============================================================
+
+
+def test_emit_experience_commit_writes_record(isolate_telemetry: Path, tmp_path: Path):
+    state_json = tmp_path / "run.json"
+    state_json.write_text("{}", encoding="utf-8")
+    commit_json = tmp_path / "experience.commit.json"
+    commit_json.write_text("{}", encoding="utf-8")
+
+    _telemetry.emit_experience_commit(
+        proj_key="demo",
+        run_ts="2026-09-05-1000",
+        change_seq=2,
+        change_id="add-foo",
+        ok=True,
+        skipped=False,
+        reason=None,
+        session_id="npc-demo-2026-09-05-1000-2-add-foo",
+        task_id="t-1",
+        messages=5,
+        duration_ms=120,
+        state_json=state_json,
+        run_events=None,
+        commit_json=commit_json,
+    )
+
+    rec = json.loads(_telemetry.events_path().read_text(encoding="utf-8").splitlines()[-1])
+    assert rec["kind"] == "experience.commit"
+    assert rec["schema_version"] == 1
+    assert rec["proj_key"] == "demo" and rec["change_seq"] == 2
+    assert rec["phase"] == "archive"
+    assert rec["ok"] is True and rec["skipped"] is False and rec["reason"] is None
+    assert rec["task_id"] == "t-1" and rec["messages"] == 5
+    assert rec["duration_ms"] == 120
+    assert rec["pointer"]["experience_commit_json"] == str(commit_json.resolve())
+    assert "run_events" not in rec["pointer"]
+
+
+def test_emit_experience_commit_skipped_records_reason(isolate_telemetry: Path):
+    _telemetry.emit_experience_commit(
+        proj_key="demo",
+        run_ts=None,
+        change_seq=1,
+        change_id="add-foo",
+        ok=False,
+        skipped=True,
+        reason="blocking-nonzero",
+        session_id=None,
+        task_id=None,
+        messages=None,
+        duration_ms=3,
+        state_json=None,
+        run_events=None,
+        commit_json=None,
+    )
+    rec = json.loads(_telemetry.events_path().read_text(encoding="utf-8").splitlines()[-1])
+    assert rec["skipped"] is True and rec["reason"] == "blocking-nonzero"
+    assert rec["pointer"] is None

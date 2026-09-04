@@ -175,3 +175,56 @@ def test_render_fixer_result_line_contract_unchanged():
         "summary=/b/round-1.fix.summary.md categories_scanned=<comma-sep> "
         "regressions_added=<comma-sep|-> notes=<一行说明，无则填 ->"
     )
+
+
+# ============================================================
+# 经验层注入插槽（蓝本 §3.2 / §3.5）
+# ============================================================
+
+
+_FIXER_KW = dict(
+    change_id="c",
+    round_n=1,
+    implement_commit="abc",
+    base="/b",
+    repo_root="/r",
+    blocking_findings_md="F1\n",
+    categories_seen=["validation"],
+    blocking_trend=[2],
+)
+
+_BLOCK = (
+    "## 历史经验（外部召回，非本 change 的规格）\n\n"
+    '<npc-experience uri="viking://~/memories/experiences/e1.md" score="0.90">\n'
+    "先写回归再改实现\n"
+    "</npc-experience>\n"
+)
+
+
+def test_render_implementer_empty_experience_block_is_byte_identical():
+    assert templates.render_implementer("c", "/b", "/r") == templates.render_implementer(
+        "c", "/b", "/r", experience_block=""
+    )
+
+
+def test_render_fixer_empty_experience_block_is_byte_identical():
+    assert templates.render_fixer(**_FIXER_KW) == templates.render_fixer(
+        **_FIXER_KW, experience_block=""
+    )
+
+
+def test_render_implementer_places_experience_between_inputs_and_constraints():
+    text = templates.render_implementer("c", "/b", "/r", experience_block=_BLOCK)
+    assert _BLOCK in text
+    assert text.index("## 必读输入") < text.index(_BLOCK) < text.index("## 实施约束")
+
+
+def test_render_fixer_places_experience_between_history_and_rules():
+    text = templates.render_fixer(**_FIXER_KW, experience_block=_BLOCK)
+    assert _BLOCK in text
+    assert text.index("## 修复历史") < text.index(_BLOCK) < text.index("## 修复规则")
+
+
+def test_experience_slot_does_not_swallow_surrounding_blank_lines():
+    text = templates.render_implementer("c", "/b", "/r", experience_block=_BLOCK)
+    assert f"\n\n{_BLOCK}\n\n## 实施约束" in text

@@ -8,7 +8,10 @@ from pathlib import Path
 import pytest
 
 from npc import agent as _agent
+from npc import experience as _experience
 from npc import state as _state
+from npc import telemetry as _telemetry
+from npc import templates as _templates
 
 
 # ============================================================
@@ -488,3 +491,317 @@ def test_spawn_prompt_custom_prompt_file(env_setup, make_args, capsys, tmp_path)
     )
     out = _read_emit(capsys)
     assert Path(out["prompt_file"]) == custom.resolve()
+
+
+# ============================================================
+# 经验层召回（蓝本 §3.4）
+# ============================================================
+
+
+def _enable_experience(repo: Path) -> None:
+    (repo / ".npc").mkdir(exist_ok=True)
+    (repo / ".npc" / "config.toml").write_text(
+        "[experience]\nenabled = true\n", encoding="utf-8"
+    )
+
+
+def _entry(uri: str, score: float, text: str = "先写真实回归再改实现") -> dict:
+    return {"uri": uri, "score": score, "text": text, "detail": ""}
+
+
+def _stub_recall(monkeypatch, result: _experience.RecallResult) -> dict:
+    """把 from_config / recall 替换为可观测桩；返回捕获到的调用参数。"""
+    captured: dict = {}
+    monkeypatch.setattr(_experience, "from_config", lambda *a, **k: object())
+
+    def fake_recall(client, cfg, *, phase, query, exclude_uris=()):
+        captured["phase"] = phase
+        captured["query"] = query
+        captured["exclude_uris"] = list(exclude_uris)
+        return result
+
+    monkeypatch.setattr(_experience, "recall", fake_recall)
+    return captured
+
+
+def _spy_telemetry(monkeypatch) -> list[dict]:
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        _telemetry, "emit_experience_recall", lambda **kw: calls.append(kw)
+    )
+    return calls
+
+
+def _render_implement(make_args, change_id: str = "add-foo") -> None:
+    _agent.prompt_render(
+        make_args(
+            phase="implement",
+            change_id=change_id,
+            seq=None,
+            round_n=None,
+            output=None,
+            review_json=None,
+            implement_commit=None,
+        )
+    )
+
+
+def test_experience_disabled_leaves_prompt_byte_identical(
+    env_setup, make_args, capsys
+):
+    _bootstrap(env_setup, make_args, capsys, "add-foo")
+    _render_implement(make_args)
+    out = _read_emit(capsys)
+
+    assert out["experience_injected"] == 0
+    assert "experience_error" not in out
+    base = Path(_state.read_state(env_setup.state_json)["progress"][0]["base"])
+    assert Path(out["output"]).read_text(encoding="utf-8") == _templates.render_implementer(
+        change_id="add-foo", base=str(base), repo_root=str(env_setup.repo_root)
+    )
+    assert not (base / "implement.experience.json").exists()
+
+
+def test_experience_enabled_injects_block_and_writes_record(
+    env_setup, make_args, capsys, monkeypatch
+):
+    _enable_experience(env_setup.repo_root)
+    _bootstrap(env_setup, make_args, capsys, "add-foo")
+    result = _experience.RecallResult(
+        entries=(
+            _entry("viking://~/memories/experiences/e1.md", 0.91),
+            _entry("viking://~/memories/experiences/e2.md", 0.72),
+        ),
+        tokens=40,
+        query="q",
+    )
+    _stub_recall(monkeypatch, result)
+    calls = _spy_telemetry(monkeypatch)
+
+    _render_implement(make_args)
+    out = _read_emit(capsys)
+
+    assert out["ok"] is True
+    assert out["experience_injected"] == 2
+    assert out["experience_tokens"] > 0
+    text = Path(out["output"]).read_text(encoding="utf-8")
+    assert text.count(_experience.INJECTION_TAG) == 2
+    assert _experience.BLOCK_HEADING in text
+
+    base = Path(_state.read_state(env_setup.state_json)["progress"][0]["base"])
+    record = base / "implement.experience.json"
+    assert record.is_file()
+    assert Path(out["experience_record"]) == record
+    payload = json.loads(record.read_text(encoding="utf-8"))
+    assert [u["uri"] for u in payload["uris"]] == [
+        "viking://~/memories/experiences/e1.md",
+        "viking://~/memories/experiences/e2.md",
+    ]
+    assert (base / "implement.experience.md").is_file()
+
+    assert len(calls) == 1
+    assert calls[0]["entries"] == 2
+    assert calls[0]["ok"] is True
+    assert calls[0]["phase"] == "implement"
+    assert calls[0]["policy_snapshot_id"]
+
+
+def test_experience_first_recall_pins_policy_snapshot_id(
+    env_setup, make_args, capsys, monkeypatch
+):
+    _enable_experience(env_setup.repo_root)
+    _bootstrap(env_setup, make_args, capsys, "add-foo", "add-bar")
+    _stub_recall(
+        monkeypatch,
+        _experience.RecallResult(
+            entries=(_entry("viking://~/memories/experiences/e1.md", 0.9),), query="q"
+        ),
+    )
+    _spy_telemetry(monkeypatch)
+
+    _render_implement(make_args)
+    capsys.readouterr()
+    pinned = _state.read_state(env_setup.state_json)["policy_snapshot_id"]
+    assert isinstance(pinned, str) and len(pinned) == 64
+
+    # 第二个 change 召回到不同条目也不改锚点：同一 run 内比较必须锚定同一经验库版本
+    _stub_recall(
+        monkeypatch,
+        _experience.RecallResult(
+            entries=(_entry("viking://~/memories/experiences/e9.md", 0.5),), query="q2"
+        ),
+    )
+    _render_implement(make_args, "add-bar")
+    capsys.readouterr()
+    assert _state.read_state(env_setup.state_json)["policy_snapshot_id"] == pinned
+
+
+def test_experience_recall_error_keeps_prompt_clean_and_exit_zero(
+    env_setup, make_args, capsys, monkeypatch
+):
+    _enable_experience(env_setup.repo_root)
+    _bootstrap(env_setup, make_args, capsys, "add-foo")
+    _stub_recall(monkeypatch, _experience.RecallResult(error="timeout", query="q"))
+    calls = _spy_telemetry(monkeypatch)
+
+    _render_implement(make_args)
+    out = _read_emit(capsys)
+
+    assert out["ok"] is True
+    assert out["experience_injected"] == 0
+    assert out["experience_error"] == "timeout"
+    text = Path(out["output"]).read_text(encoding="utf-8")
+    assert _experience.INJECTION_TAG not in text
+    base = Path(_state.read_state(env_setup.state_json)["progress"][0]["base"])
+    # 失败也落回执：query 与 error 是复盘召回质量的唯一证据
+    assert (base / "implement.experience.json").is_file()
+    assert calls[0]["ok"] is False and calls[0]["error"] == "timeout"
+    assert _state.read_state(env_setup.state_json)["policy_snapshot_id"] is None
+
+
+def test_experience_no_credentials_reports_error_without_recall(
+    env_setup, make_args, capsys, monkeypatch
+):
+    _enable_experience(env_setup.repo_root)
+    _bootstrap(env_setup, make_args, capsys, "add-foo")
+    monkeypatch.setattr(_experience, "from_config", lambda *a, **k: None)
+
+    _render_implement(make_args)
+    out = _read_emit(capsys)
+
+    assert out["experience_injected"] == 0
+    assert out["experience_error"] == "no-credentials"
+
+
+def test_experience_internal_exception_degrades_to_empty_block(
+    env_setup, make_args, capsys, monkeypatch
+):
+    _enable_experience(env_setup.repo_root)
+    _bootstrap(env_setup, make_args, capsys, "add-foo")
+
+    def boom(*a, **k):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(_experience, "from_config", boom)
+
+    _render_implement(make_args)
+    out = _read_emit(capsys)
+
+    assert out["ok"] is True
+    assert out["experience_injected"] == 0
+    assert out["experience_error"] == "internal"
+    base = Path(_state.read_state(env_setup.state_json)["progress"][0]["base"])
+    assert Path(out["output"]).read_text(encoding="utf-8") == _templates.render_implementer(
+        change_id="add-foo", base=str(base), repo_root=str(env_setup.repo_root)
+    )
+
+
+def test_experience_implement_query_uses_proposal_title_and_stack(
+    env_setup, make_args, capsys, monkeypatch
+):
+    _enable_experience(env_setup.repo_root)
+    _bootstrap(env_setup, make_args, capsys, "add-foo")
+    prop = env_setup.repo_root / "openspec" / "changes" / "add-foo"
+    prop.mkdir(parents=True)
+    (prop / "proposal.md").write_text(
+        "\n# 并发写入去重\n\n## Why\n...\n", encoding="utf-8"
+    )
+    (env_setup.repo_root / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+    captured = _stub_recall(monkeypatch, _experience.RecallResult(query="q"))
+    _spy_telemetry(monkeypatch)
+
+    _render_implement(make_args)
+    capsys.readouterr()
+
+    assert "add-foo" in captured["query"]
+    assert "并发写入去重" in captured["query"]
+    assert "python" in captured["query"]
+
+
+def test_experience_fix_query_uses_previous_round_blocking_findings(
+    env_setup, make_args, capsys, monkeypatch
+):
+    _enable_experience(env_setup.repo_root)
+    _bootstrap(env_setup, make_args, capsys, "add-foo")
+    base = Path(_state.read_state(env_setup.state_json)["progress"][0]["base"])
+    _write_review(
+        base,
+        0,
+        [
+            {
+                "id": "F1",
+                "severity": "high",
+                "category": "race-condition",
+                "title": "并发写入丢失",
+                "file": "src/a.py",
+                "line_range": "1-2",
+                "detail": "d",
+                "recommendation": "r",
+                "in_scope": True,
+            },
+            {
+                "id": "F2",
+                "severity": "low",
+                "category": "style",
+                "title": "空行",
+                "file": "src/b.py",
+                "line_range": "1-1",
+                "detail": "d",
+                "recommendation": "r",
+                "in_scope": True,
+            },
+        ],
+    )
+    captured = _stub_recall(
+        monkeypatch,
+        _experience.RecallResult(
+            entries=(_entry("viking://~/memories/experiences/e1.md", 0.8),), query="q"
+        ),
+    )
+    _spy_telemetry(monkeypatch)
+
+    _agent.prompt_render(
+        make_args(
+            phase="fix",
+            change_id="add-foo",
+            seq=None,
+            round_n=1,
+            output=None,
+            review_json=None,
+            implement_commit="deadbeef",
+        )
+    )
+    out = _read_emit(capsys)
+
+    assert captured["phase"] == "fix"
+    assert "race-condition: 并发写入丢失" in captured["query"]
+    assert "空行" not in captured["query"]  # advisory 不进 query
+    assert out["experience_injected"] == 1
+    assert (base / "fix-r1.experience.json").is_file()
+    text = Path(out["output"]).read_text(encoding="utf-8")
+    assert text.index("## 修复历史") < text.index(_experience.INJECTION_TAG)
+    assert text.index(_experience.INJECTION_TAG) < text.index("## 修复规则")
+
+
+def test_experience_excludes_already_injected_uris(
+    env_setup, make_args, capsys, monkeypatch
+):
+    _enable_experience(env_setup.repo_root)
+    _bootstrap(env_setup, make_args, capsys, "add-foo")
+    base = Path(_state.read_state(env_setup.state_json)["progress"][0]["base"])
+    _experience.write_injection_record(
+        base,
+        "fix",
+        9,
+        _experience.RecallResult(
+            entries=(_entry("viking://~/memories/experiences/old.md", 0.6),), query="q"
+        ),
+        "abc1234",
+    )
+    captured = _stub_recall(monkeypatch, _experience.RecallResult(query="q"))
+    _spy_telemetry(monkeypatch)
+
+    _render_implement(make_args)
+    capsys.readouterr()
+
+    assert captured["exclude_uris"] == ["viking://~/memories/experiences/old.md"]

@@ -8,6 +8,7 @@
 - 成本路由 ``mimo.env`` 是否就绪（缺失只降级 warn，不视为 missing）；
 - npc 配置是否能正常加载（失败降级 warn，不阻塞）；
 - 路由在用的 coder provider 是否就绪（env_file 可读 + runner 可执行文件）；
+- 经验层（``[experience]``）启用时 OpenViking 是否可用（未启用即 ok，不发请求）；
 - 工程级 ``docs/principles.md`` 是否在（warn 级）；
 - 安装来源（本地 checkout / 远程 VCS）：本地安装时校验源码版本与已安装版本一致、
   且源码 HEAD 已合入 main（未合入的分支构建物用于生产 → warn）。
@@ -29,7 +30,13 @@ import subprocess
 from pathlib import Path
 from urllib.parse import unquote
 
-from . import _io, config as _config, hosts as _hosts, paths as _paths
+from . import (
+    _io,
+    config as _config,
+    experience as _experience,
+    hosts as _hosts,
+    paths as _paths,
+)
 
 
 # (name, required) —— 在 PATH 中可执行文件的体检清单
@@ -273,6 +280,66 @@ def _check_principles(*, repo_root: Path | None) -> dict:
     }
 
 
+def _experience_check(status: str, detail: str) -> dict:
+    return {"name": "experience", "status": status, "detail": detail, "required": False}
+
+
+def _check_experience(*, home: Path, repo_root: Path | None) -> dict:
+    """经验层探活（v1.8，`required=False`）。
+
+    经验层是**旁路软失败增强**，地位低于 codex 一档：server 不可达只是"后续 prompt
+    少了先验"，绝不能记 missing——否则 doctor 会以 exit 4 阻塞一个本可正常跑完的
+    run。未启用（默认）时直接 ok，不发起任何网络请求。
+    """
+    try:
+        cfg = _config.load_config(
+            repo_root if repo_root is not None else Path.cwd(), home=home
+        ).experience
+    except Exception as e:
+        return _experience_check(
+            "warn", f"experience 配置不可解析（见 config 检查项）：[{type(e).__name__}] {e}"
+        )
+    if not cfg.enabled:
+        return _experience_check("ok", "experience 未启用（默认）；[experience].enabled = false")
+
+    try:
+        report = _experience.doctor_report(cfg, repo_root)
+    except Exception as e:
+        return _experience_check(
+            "warn", f"experience 探活失败：[{type(e).__name__}] {e}"
+        )
+
+    base_url = report.get("base_url") or "<unknown>"
+    health = report.get("health") or None
+    if not health or not health.get("ok"):
+        reason = (health or {}).get("error") or "无凭据或 /health 不通"
+        return _experience_check(
+            "warn", f"OpenViking 不可用（{base_url}）：{reason}；经验层降级为不注入"
+        )
+
+    problems: list[str] = []
+    if report.get("agent_evolution") is False:
+        problems.append("server 未开启 agent_evolution，commit 不会产出 experiences")
+    if health.get("auth_mode") != "api_key":
+        problems.append(
+            f"server 处于 dev 模式（auth_mode={health.get('auth_mode')!r}，无鉴权）"
+        )
+    if not _experience._is_local_url(base_url):
+        problems.append(f"base_url 非本地地址：{base_url}（数据将流出本机）")
+    if not cfg.extraction_model_declared:
+        problems.append(
+            "[experience].extraction_model_declared 未声明，抽取模型档位无法核对（不变量 4）"
+        )
+    if problems:
+        return _experience_check("warn", "；".join(problems))
+
+    return _experience_check(
+        "ok",
+        f"OpenViking 可用：{base_url}（version={health.get('version')}，"
+        f"experiences={report.get('experiences_count')}）",
+    )
+
+
 _VERSION_RE = re.compile(r"""__version__\s*=\s*["']([^"']+)["']""")
 
 
@@ -399,6 +466,7 @@ def gather_checks(
     checks.append(_check_providers(home=home, repo_root=cfg_root, which=which))
     checks.append(_check_host(home=home, repo_root=cfg_root))
     checks.append(_check_install_source(which=which, run=subprocess.run))
+    checks.append(_check_experience(home=home, repo_root=repo_root))
     checks.append(_check_principles(repo_root=repo_root))
     return checks
 

@@ -838,3 +838,272 @@ def test_run_review_round_emits_repeat_category_ratio(
     assert len(captured) == 1
     assert captured[0]["high_count"] == 2
     assert captured[0]["repeat_category_ratio"] == 0.5
+
+
+# ============================================================
+# 经验层：回抄检测 + archive 写入侧 hook（v1.8）
+# ============================================================
+
+
+def _write_injection_record(base: Path, uri: str = "viking://user/memories/experiences/x.md") -> None:
+    """造一条注入回执，使 read_injection_records 认为本 change 注入过经验。"""
+    base.mkdir(parents=True, exist_ok=True)
+    (base / "implement.experience.json").write_text(
+        json.dumps(
+            {
+                "phase": "implement",
+                "round": None,
+                "query": "add-foo",
+                "uris": [{"uri": uri, "score": 0.9}],
+                "tokens": 20,
+                "head": None,
+                "sha256": "0" * 64,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _commit_something(fake_repo: Path, name: str) -> str:
+    (fake_repo / name).write_text("x")
+    subprocess.run(["git", "add", "."], cwd=fake_repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", name], cwd=fake_repo, check=True)
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=fake_repo, capture_output=True, text=True
+    ).stdout.strip()
+
+
+def test_record_implement_marks_experience_contamination(
+    env_setup, make_args, capsys, fake_repo: Path
+):
+    _bootstrap_run(env_setup, make_args, capsys, "add-foo")
+    commit = _commit_something(fake_repo, "c1.txt")
+
+    p = env_setup
+    p_with_repo = type(p)(**{**p.__dict__, "repo_root": fake_repo})
+    base = p.run_dir / "001-add-foo"
+    _write_injection_record(base)
+    summary = base / "implement.summary.md"
+    summary.write_text(
+        '# impl\n\n<npc-experience uri="viking://u" score="0.90">\n抄回来的经验\n</npc-experience>\n',
+        encoding="utf-8",
+    )
+
+    result = _pipeline.record_implement(
+        p_with_repo, 1, f"RESULT: commit={commit} tasks=1 tests=pass summary={summary} notes=-"
+    )
+    assert result["ok"] is True
+    assert result["experience_contaminated"] is True
+
+    entry = json.loads(p.state_json.read_text())["progress"][0]
+    assert entry["experience_contaminated"] is True
+    assert entry["status"] == "reviewing"
+
+
+def test_record_implement_no_injection_records_no_flag(
+    env_setup, make_args, capsys, fake_repo: Path
+):
+    """无注入回执时不做检测：summary 里出现标签字面也不该被标污染。"""
+    _bootstrap_run(env_setup, make_args, capsys, "add-foo")
+    commit = _commit_something(fake_repo, "c2.txt")
+
+    p = env_setup
+    p_with_repo = type(p)(**{**p.__dict__, "repo_root": fake_repo})
+    base = p.run_dir / "001-add-foo"
+    base.mkdir(parents=True, exist_ok=True)
+    summary = base / "implement.summary.md"
+    summary.write_text("# impl\n<npc-experience uri=\"x\">y</npc-experience>\n", encoding="utf-8")
+
+    result = _pipeline.record_implement(
+        p_with_repo, 1, f"RESULT: commit={commit} tasks=1 tests=pass summary={summary} notes=-"
+    )
+    assert result["ok"] is True
+    assert "experience_contaminated" not in result
+    entry = json.loads(p.state_json.read_text())["progress"][0]
+    assert "experience_contaminated" not in entry
+
+
+def test_record_fix_marks_experience_contamination(
+    env_setup, make_args, capsys, fake_repo: Path
+):
+    _bootstrap_run(env_setup, make_args, capsys, "add-foo")
+    commit = _commit_something(fake_repo, "c3.txt")
+
+    p = env_setup
+    p_with_repo = type(p)(**{**p.__dict__, "repo_root": fake_repo})
+    base = p.run_dir / "001-add-foo"
+    _write_injection_record(base, uri="viking://user/memories/experiences/lock.md")
+    summary = base / "round-1.fix.summary.md"
+    summary.write_text(
+        "# fix\n参考 viking://user/memories/experiences/lock.md 的做法\n", encoding="utf-8"
+    )
+
+    result = _pipeline.record_fix(
+        p_with_repo,
+        1,
+        1,
+        f"RESULT: commit={commit} fixed=1 tests=pass summary={summary} "
+        f"categories_scanned=locking regressions_added=- notes=-",
+    )
+    assert result["ok"] is True
+    assert result["experience_contaminated"] is True
+    entry = json.loads(p.state_json.read_text())["progress"][0]
+    assert entry["experience_contaminated"] is True
+
+
+def _prepare_archive(env_setup, make_args, capsys, fake_repo: Path, monkeypatch):
+    """archive 成功路径的公共脚手架：真实 implement commit + openspec 子进程打桩。"""
+    _bootstrap_run(env_setup, make_args, capsys, "add-foo")
+    impl_commit = _commit_something(fake_repo, "impl.txt")
+
+    p = env_setup
+    p_with_repo = type(p)(**{**p.__dict__, "repo_root": fake_repo})
+
+    def mutate(s):
+        e = s["progress"][0]
+        e["implement_commit"] = impl_commit
+        e["phases"] = {
+            "implement": {
+                "status": "done",
+                "commit": impl_commit,
+                "started_ms": 0,
+                "started_at": "x",
+            }
+        }
+
+    _state.update_state(p.state_json, p.state_md, mutate)
+
+    (fake_repo / "openspec").mkdir(exist_ok=True)
+    (fake_repo / "openspec" / "x.md").write_text("dummy")
+
+    real_run = subprocess.run
+
+    def fake_run(cmd, *args, **kwargs):
+        if isinstance(cmd, list) and len(cmd) >= 2 and cmd[0].endswith("openspec"):
+            r = MagicMock()
+            r.returncode = 0
+            r.stdout = ""
+            r.stderr = ""
+            return r
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(_pipeline, "_find_openspec_bin", lambda override=None: "/fake/openspec")
+    return p_with_repo
+
+
+def _experience_cfg(enabled: bool):
+    """构造只改 [experience].enabled 的 Config，避免读到本机真实配置。"""
+    from npc.config import Config, ExperienceConfig
+
+    return Config(experience=ExperienceConfig(enabled=enabled))
+
+
+def _telemetry_lines(tel_root: Path) -> list[str]:
+    return (tel_root / "events.ndjson").read_text(encoding="utf-8").splitlines()
+
+
+def test_run_archive_commits_experience_when_enabled(
+    env_setup, make_args, capsys, fake_repo: Path, monkeypatch, isolate_telemetry: Path
+):
+    p_with_repo = _prepare_archive(env_setup, make_args, capsys, fake_repo, monkeypatch)
+    monkeypatch.setattr(_pipeline, "load_config", lambda *_a, **_kw: _experience_cfg(True))
+    monkeypatch.setattr(_pipeline._experience, "from_config", lambda *_a, **_kw: object())
+
+    calls: list[dict] = []
+
+    def fake_commit(client, cfg, *, p_like, seq, entry, dry_run=False):
+        calls.append({"seq": seq, "status": entry.get("status")})
+        return {"ok": True, "session_id": "sid", "task_id": "tid", "messages": 5}
+
+    monkeypatch.setattr(_pipeline._experience, "commit", fake_commit)
+
+    def mutate(s):
+        s["progress"][0]["blocking_trend"] = [2, 0]
+
+    _state.update_state(p_with_repo.state_json, p_with_repo.state_md, mutate)
+
+    result = _pipeline.run_archive(p_with_repo, 1)
+    assert result["ok"] is True
+    assert result["experience"] == {
+        "ok": True,
+        "session_id": "sid",
+        "task_id": "tid",
+        "messages": 5,
+    }
+    # 闸门判据取 phase exit 之后的 entry
+    assert calls == [{"seq": 1, "status": "archived"}]
+
+    rec = json.loads(_telemetry_lines(isolate_telemetry)[-1])
+    assert rec["kind"] == "experience.commit"
+    assert rec["ok"] is True and rec["task_id"] == "tid"
+
+
+def test_run_archive_experience_skipped_when_gate_blocks(
+    env_setup, make_args, capsys, fake_repo: Path, monkeypatch, isolate_telemetry: Path
+):
+    p_with_repo = _prepare_archive(env_setup, make_args, capsys, fake_repo, monkeypatch)
+    monkeypatch.setattr(_pipeline, "load_config", lambda *_a, **_kw: _experience_cfg(True))
+
+    def boom(*_a, **_kw):  # 闸门不通过时不得建 client
+        raise AssertionError("write gate 未放行却仍尝试连接 OpenViking")
+
+    monkeypatch.setattr(_pipeline._experience, "from_config", boom)
+
+    def mutate(s):
+        s["progress"][0]["blocking_trend"] = [3, 1]
+
+    _state.update_state(p_with_repo.state_json, p_with_repo.state_md, mutate)
+
+    result = _pipeline.run_archive(p_with_repo, 1)
+    assert result["ok"] is True
+    assert result["experience"] == {
+        "ok": False,
+        "skipped": True,
+        "reason": "blocking-nonzero",
+    }
+    rec = json.loads(_telemetry_lines(isolate_telemetry)[-1])
+    assert rec["kind"] == "experience.commit" and rec["skipped"] is True
+
+
+def test_run_archive_receipt_unchanged_when_experience_disabled(
+    env_setup, make_args, capsys, fake_repo: Path, monkeypatch, isolate_telemetry: Path
+):
+    p_with_repo = _prepare_archive(env_setup, make_args, capsys, fake_repo, monkeypatch)
+    monkeypatch.setattr(_pipeline, "load_config", lambda *_a, **_kw: _experience_cfg(False))
+
+    result = _pipeline.run_archive(p_with_repo, 1)
+    assert result["ok"] is True
+    assert set(result) == {
+        "ok",
+        "seq",
+        "change_id",
+        "archive_commit",
+        "total_rounds",
+        "final_status",
+    }
+    assert all(
+        json.loads(line)["kind"] != "experience.commit"
+        for line in _telemetry_lines(isolate_telemetry)
+    )
+
+
+def test_run_archive_survives_experience_hook_exception(
+    env_setup, make_args, capsys, fake_repo: Path, monkeypatch, isolate_telemetry: Path
+):
+    p_with_repo = _prepare_archive(env_setup, make_args, capsys, fake_repo, monkeypatch)
+    monkeypatch.setattr(_pipeline, "load_config", lambda *_a, **_kw: _experience_cfg(True))
+
+    def boom(*_a, **_kw):
+        raise RuntimeError("gate exploded")
+
+    monkeypatch.setattr(_pipeline._experience, "write_gate_ok", boom)
+
+    result = _pipeline.run_archive(p_with_repo, 1)
+    assert result["ok"] is True
+    assert result["experience"]["ok"] is False
+    assert result["experience"]["reason"] == "internal"
+    assert "gate exploded" in result["experience"]["detail"]
+
+    entry = json.loads(p_with_repo.state_json.read_text())["progress"][0]
+    assert entry["status"] == "archived"

@@ -24,6 +24,7 @@ from datetime import datetime
 from . import (
     _io,
     events as _events,
+    experience as _experience,
     fixer as _fixer,
     focus as _focus,
     paths as _paths,
@@ -806,6 +807,60 @@ def _git_head(repo_root: Path) -> str:
     return out.stdout.strip()
 
 
+def _experience_commit_hook(p: _paths.Paths, seq: int, entry: dict) -> dict | None:
+    """archive 成功后把本 change 轨迹提交为经验语料（旁路软失败）。
+
+    返回 None 表示"经验层未启用"，回执不带 ``experience`` 字段；其余情况返回一个
+    结果 dict。**永不抛、永不改变 archive 的 ok 与退出码**——经验层地位低于 codex
+    一档，缺失只降低后续 prompt 质量。
+    """
+    started_ms = _io.now_ms()
+    try:
+        try:
+            cfg = load_config(p.repo_root).experience
+        except (ConfigError, OSError):
+            return None
+        if not cfg.enabled:
+            return None
+
+        change_id = entry.get("change_id") or ""
+        base = Path(entry.get("base") or _paths.base_for(p, seq, change_id))
+
+        ok, reason = _experience.write_gate_ok(entry, cfg.write_gate)
+        if not ok:
+            result: dict = {"ok": False, "skipped": True, "reason": reason}
+        else:
+            client = _experience.from_config(
+                cfg, p.repo_root, timeout_ms=cfg.timeout_commit_ms
+            )
+            if client is None:
+                result = {"ok": False, "reason": "no-credentials"}
+            else:
+                result = _experience.commit(
+                    client, cfg, p_like=p, seq=seq, entry=entry
+                )
+
+        _telemetry.emit_experience_commit(
+            proj_key=p.proj_key,
+            run_ts=p.run_ts,
+            change_seq=seq,
+            change_id=change_id,
+            ok=bool(result.get("ok")),
+            skipped=bool(result.get("skipped")),
+            reason=result.get("reason"),
+            session_id=result.get("session_id"),
+            task_id=result.get("task_id"),
+            messages=result.get("messages"),
+            duration_ms=max(0, _io.now_ms() - started_ms),
+            state_json=p.state_json,
+            run_events=p.run_events,
+            commit_json=base / "experience.commit.json",
+        )
+        return result
+    except Exception as e:  # 经验层任何内部故障都不得污染 archive 判定
+        return {"ok": False, "reason": "internal", "detail": str(e)[:200]}
+
+
 def run_archive(
     p: _paths.Paths,
     seq: int,
@@ -968,7 +1023,7 @@ def run_archive(
         base=base,
     )
 
-    return {
+    result = {
         "ok": True,
         "seq": seq,
         "change_id": change_id,
@@ -976,6 +1031,16 @@ def run_archive(
         "total_rounds": total_rounds,
         "final_status": f"passed (round {total_rounds})",
     }
+
+    # 经验层写入侧：闸门判据取 phase exit 之后的 entry（status 已是 archived）
+    try:
+        entry_after_exit = _get_entry(_state.read_state(p.state_json), seq)
+    except (OSError, ValueError, json.JSONDecodeError):
+        entry_after_exit = entry
+    experience = _experience_commit_hook(p, seq, entry_after_exit)
+    if experience is not None:
+        result["experience"] = experience
+    return result
 
 
 # ============================================================
@@ -1009,6 +1074,23 @@ def _parse_result_line(text: str, keys: list[str]) -> dict | None:
         # 校验 keys
         return out
     return None
+
+
+def _detect_experience_contamination(base: Path, summary_path: str) -> bool:
+    """summary 是否把本轮注入的经验抄了回来（回抄检测，见 experience §3.6）。
+
+    命中即该 change 轨迹不再提交为经验——否则「经验 → prompt → summary → 经验」
+    自激环会在后续每个 change 里反复放大同一条内容。无注入记录时零开销；任何异常
+    一律吞掉：检测失败不得影响 record 本身。
+    """
+    try:
+        records = _experience.read_injection_records(base)
+        if not records:
+            return False
+        text = Path(summary_path).read_text(encoding="utf-8")
+        return _experience.detect_contamination(text, records)
+    except Exception:
+        return False
 
 
 def record_implement(
@@ -1079,6 +1161,8 @@ def record_implement(
             )
             return {"ok": False, "seq": seq, "error": "summary-missing", "summary": summary_path}
 
+    contaminated = _detect_experience_contamination(base, summary_path)
+
     # commit 存在性校验
     head_check = subprocess.run(
         ["git", "cat-file", "-e", commit],
@@ -1094,13 +1178,20 @@ def record_implement(
         )
         return {"ok": False, "seq": seq, "error": "commit-not-found", "commit": commit}
 
+    progress_updates: dict[str, Any] = {"status": "reviewing", "implement_commit": commit}
+    if contaminated:
+        progress_updates["experience_contaminated"] = True
+        _io.warn(
+            f"seq={seq} implement summary 命中经验回抄检测，本 change 轨迹不会提交为经验"
+        )
+
     _do_phase_exit(
         p, seq, "implement",
         status="done",
         extra={"commit": commit, "tasks": tasks, "tests": tests, "summary": summary_path},
-        progress_updates={"status": "reviewing", "implement_commit": commit},
+        progress_updates=progress_updates,
     )
-    return {
+    result = {
         "ok": True,
         "seq": seq,
         "change_id": change_id,
@@ -1109,6 +1200,9 @@ def record_implement(
         "tests": tests,
         "summary": summary_path,
     }
+    if contaminated:
+        result["experience_contaminated"] = True
+    return result
 
 
 def record_fix(
@@ -1131,6 +1225,7 @@ def record_fix(
     state = _state.read_state(p.state_json)
     entry = _get_entry(state, seq)
     change_id = entry["change_id"]
+    base = Path(entry.get("base") or _paths.base_for(p, seq, change_id))
 
     parsed = _parse_result_line(
         result_line,
@@ -1186,6 +1281,8 @@ def record_fix(
                 "summary": summary_path,
             }
 
+    contaminated = _detect_experience_contamination(base, summary_path)
+
     head_check = subprocess.run(
         ["git", "cat-file", "-e", commit],
         cwd=p.repo_root,
@@ -1200,6 +1297,13 @@ def record_fix(
         )
         return {"ok": False, "seq": seq, "round": round_n, "error": "commit-not-found"}
 
+    fix_progress_updates: dict[str, Any] = {"status": "in-fix-loop"}
+    if contaminated:
+        fix_progress_updates["experience_contaminated"] = True
+        _io.warn(
+            f"seq={seq} fix-r{round_n} summary 命中经验回抄检测，本 change 轨迹不会提交为经验"
+        )
+
     _do_phase_exit(
         p, seq, phase,
         status="done",
@@ -1211,9 +1315,9 @@ def record_fix(
             "categories_scanned": parsed.get("categories_scanned", ""),
             "regressions_added": parsed.get("regressions_added", ""),
         },
-        progress_updates={"status": "in-fix-loop"},
+        progress_updates=fix_progress_updates,
     )
-    return {
+    result = {
         "ok": True,
         "seq": seq,
         "round": round_n,
@@ -1223,6 +1327,9 @@ def record_fix(
         "tests": tests,
         "summary": summary_path,
     }
+    if contaminated:
+        result["experience_contaminated"] = True
+    return result
 
 
 # ============================================================

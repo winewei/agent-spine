@@ -22,13 +22,29 @@ from __future__ import annotations
 TEMPLATE_VERSION = "1.0.0"
 
 
+def _experience_slot(experience_block: str) -> str:
+    """把外部召回的经验块包成可插拔片段；空块返回空串。
+
+    空串时插槽必须"不留痕"——``enabled=false`` 与经验层不可用时渲染结果要与
+    未接经验层的版本逐字节一致（蓝本 §3.2 的降级验收）。
+    """
+    return f"\n{experience_block}\n" if experience_block else ""
+
+
 def render_implementer(
     change_id: str,
     base: str,
     repo_root: str,
+    experience_block: str = "",
 ) -> str:
-    """渲染 Implementer prompt（对应历史 skill 的 §A 段）。"""
+    """渲染 Implementer prompt（对应历史 skill 的 §A 段）。
+
+    ``experience_block`` 是 :func:`npc.experience.render_block` 渲染好的注入块
+    （自带标题与免责说明），插在必读输入之后、实施约束之前——先让实施者知道
+    读什么，再给先验参考，最后才是不可协商的约束。
+    """
     summary_path = f"{base}/implement.summary.md"
+    experience_slot = _experience_slot(experience_block)
     return f"""你是 OpenSpec change 实施专家。请完整实施 change `{change_id}`。
 
 ## Runtime Variables（npc 已注入；prompt 内引用变量名）
@@ -45,7 +61,7 @@ def render_implementer(
 - openspec/changes/{change_id}/design.md（如存在）
 - openspec/AGENTS.md / openspec/project.md
 - 项目根 CLAUDE.md 或 AGENTS.md（存在哪个读哪个）
-
+{experience_slot}
 ## 实施约束
 
 - spec.md 的 Requirements / Scenarios 是**唯一的实现与测试验收标准**；自行从 spec 提取细节
@@ -101,14 +117,17 @@ def render_fixer(
     blocking_findings_md: str,
     categories_seen: list[str],
     blocking_trend: list[int],
+    experience_block: str = "",
 ) -> str:
     """渲染 Fixer prompt（对应历史 skill 的 §B 段）。
 
     blocking_findings_md 由 fixer.render_findings 生成（直接嵌入正文）；
     categories_seen / blocking_trend 由主 session 通过 state 取，npc render 时
-    自动注入到"修复历史"段。
+    自动注入到"修复历史"段。``experience_block`` 紧随修复历史之后、修复规则
+    之前——它与历史同属"参考信息"，而修复规则是硬约束，不能被参考信息稀释。
     """
     summary_path = f"{base}/round-{round_n}.fix.summary.md"
+    experience_slot = _experience_slot(experience_block)
     cats = ", ".join(categories_seen) if categories_seen else "（首轮，暂无）"
     trend = " → ".join(str(x) for x in blocking_trend) if blocking_trend else "（首轮，暂无）"
 
@@ -131,7 +150,7 @@ def render_fixer(
 
 - categories_seen: {cats}
 - blocking_trend: {trend}
-
+{experience_slot}
 ## 上下文
 
 - 本次修复针对 change `{change_id}`，已实施第 {round_n} 轮 fix

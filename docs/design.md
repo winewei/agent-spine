@@ -128,7 +128,8 @@ agent-spine/
 │   ├── deliver.py / status.py / cost.py / clean.py / spec_analyze.py   # 交付与运维（§11.7，v1.3）
 │   ├── task.py / watch.py                       # 后台任务上报与观测（§11.8）
 │   ├── waves.py / notify.py                     # 波次切分与通知（§11.9，v1.4）
-│   └── change.py / integrate.py                 # 内环状态机与整合编排（§11.10，v1.5）
+│   ├── change.py / integrate.py                 # 内环状态机与整合编排（§11.10，v1.5）
+│   └── experience.py                            # OpenViking 经验层（§11.13，v1.8）
 └── tests/
     ├── conftest.py             # tmp_path fixture + fake STATE_JSON
     └── test_*.py               # 与 src/npc/ 模块一一对应（40 文件，680+ 用例）
@@ -374,3 +375,14 @@ v1.4 的账目：review-fix 循环体活在 skill 里，每 change 主 session �
 - **不变量范围进 review/fix 契约**：fixer 模板新增 A2——不变量类 finding（security / race-condition / validation / spec-compliance / locking / partial-failure / error-handling，或以"任何/所有/不得"陈述）修复前先全仓枚举落点，summary 新增 `Invariant Sweep` 段；review focus 要求 reviewer 对同一不变量**一次列全**所有违例点合并为一条 finding，round-N 核对上轮 Invariant Sweep 的完整性并以 `[carry-over]` 标注遗漏。telemetry `review.round` 新增 `high_count` / `repeat_category_ratio`，aggregate/hotspots 新增 `whack_a_mole_rounds`（blocking>0 且与上轮 category 重合 ≥ 0.5 的轮次），让 `/spine-analyze` 能直接看到该模式。交互档 `rounds_since_strict_decrease ≥ 2` 即触发 `stale` 决策点（`STALE_INTERACTIVE_THRESHOLD`），auto 档仍为 3——按不变量 3，人在回路时早问人，无人时不加硬轨。
 - **波次流水化**：`npc plan ready` 以"依赖已 integrate（非 archived）+ 与在飞或待整合 change 无文件交集"为准输出可立即实施的集合；v4 playbook Step 3 从逐波屏障改为事件驱动——每次 integrate 成功即重算 ready 填满并发槽位，内环 `change run` 后台按 SEQ 串行，implementer 返回而内环在跑时先入 PENDING 队列；`--serial-waves` 保留原流程。流水化让 main worktree 与 state.json 第一次出现多进程并发写，因此补两把 stdlib `fcntl.flock` 锁（`locks.py`）：`<state>.lock` 包住 `update_state` 的读改写（tmp 名带 pid）；`<task_log_dir>/.main.lock` 由 `integrate`（try-lock，拿不到即 `inner-loop-active` 无副作用返回）与 `change run`（全程持有，有界等待）互斥。快照式的 in-progress 检查只作诊断信息，不再承担互斥。
 - **安装源一致性**：`npc doctor` 新增 `install-source` 检查，读 dist `direct_url.json`，本地 checkout 安装时核对源码分支是否在 main 上、版本是否与已安装一致，不一致即 warn。
+
+### 11.13 OpenViking 经验层（1.8）
+
+问题：每个 change 的经验只留在 `~/task_log/` 的轨迹里，下一个 change 的 coder 从零开始，同类 finding 跨 change 反复出现（`whack_a_mole_rounds` 已能观测到该模式）。1.8 引入 `src/npc/experience.py`，把已归档 change 的高信号轨迹回流为后续 change 的 coder 先验。设计蓝本与分阶段验收见 `docs/optimization-proposals/2026-09-05-openviking-experience-layer.md`。
+
+- **形态**：旁路软失败增强，地位低于 codex 一档。默认 `[experience].enabled = false`；启用后任何 phase 都不因 server 不可达失败，只有 `npc experience doctor` 与 `--strict` 返回非 0。集成面只有 HTTP（stdlib `urllib`，禁 `import openviking`，由 `npc verify deps` 执法）。
+- **写入闸门**：`run_archive` 成功后经 `_experience_commit_hook` 提交轨迹，闸门判据取 phase exit 之后的 entry。默认 `verified` 要求 `status=archived ∧ blocking_trend[-1]==0 ∧ 非 force-archive/override ∧ 未被回抄污染`——把未通过独立验证的轨迹写进经验库，爆炸半径是此后每一个 change。提交消息首段是 CaseSpec v1 JSON 以命中服务端 fast path，跳过 LLM case 判定。
+- **读取注入**：召回块只进 implement / fix prompt，绝不进 review focus（不变量 1）；外壳由 npc 渲染（`<npc-experience uri=… score=…>` + "非验收标准、以 spec 为准"声明），因为它同时是污染检测的锚点。
+- **污染检测**：`record_implement` / `record_fix` 在 summary 校验后比对 `<base>/*.experience.json` 的 uri 与正文片段，命中即置 `experience_contaminated`，该 change 轨迹不再提交为经验——切断「经验 → prompt → summary → 经验」自激环。
+- **telemetry**：新增 kind `experience.recall` / `experience.commit`（`ok` / `skipped` / `reason` / `entries` / `tokens` / `task_id` / `duration_ms` + pointer），回答"注入了多少 token、经验库为何没长大"。`policy_snapshot_id`（经验库快照指纹，`init-run` 置 null、本 run 首次成功召回时钉住、此后不再更新）随 `experience.recall` record 落盘——它是"经验是否有用"的可测性前置：同一 run 内的复发率对比必须锚定同一经验库版本。
+- **不做**：不进 review 引擎；不上传 diff / 代码正文 / `events.jsonl` / `*.prompt.md` / `*.focus.md`；不自动回写或删除服务端经验（降权候选由人执行 `ov rm`）。
