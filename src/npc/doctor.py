@@ -8,7 +8,9 @@
 - 成本路由 ``mimo.env`` 是否就绪（缺失只降级 warn，不视为 missing）；
 - npc 配置是否能正常加载（失败降级 warn，不阻塞）；
 - 路由在用的 coder provider 是否就绪（env_file 可读 + runner 可执行文件）；
-- 工程级 ``docs/principles.md`` 是否在（warn 级）。
+- 工程级 ``docs/principles.md`` 是否在（warn 级）；
+- 安装来源（本地 checkout / 远程 VCS）：本地安装时校验源码版本与已安装版本一致、
+  且源码 HEAD 已合入 main（未合入的分支构建物用于生产 → warn）。
 
 设计成"纯函数核 + 薄 handler"：:func:`gather_checks` 不做任何 I/O 输出、可注入
 ``which`` / ``home`` / ``repo_root``，便于单测；:func:`run` 只负责探测 repo_root、
@@ -18,10 +20,14 @@
 from __future__ import annotations
 
 import argparse
+import importlib.metadata
 import json
 import os
+import re
 import shutil
+import subprocess
 from pathlib import Path
+from urllib.parse import unquote
 
 from . import _io, config as _config, hosts as _hosts, paths as _paths
 
@@ -267,6 +273,108 @@ def _check_principles(*, repo_root: Path | None) -> dict:
     }
 
 
+_VERSION_RE = re.compile(r"""__version__\s*=\s*["']([^"']+)["']""")
+
+
+def _install_check(status: str, detail: str) -> dict:
+    return {"name": "install-source", "status": status, "detail": detail, "required": False}
+
+
+def _git_out(repo: Path, *argv: str, run) -> str | None:
+    """在 repo 下跑一条 git 命令，取 stdout（失败/超时/异常一律 None）。"""
+    try:
+        proc = run(
+            ["git", *argv], cwd=str(repo), capture_output=True, text=True, timeout=5
+        )
+    except Exception:
+        return None
+    if proc.returncode != 0:
+        return None
+    return (proc.stdout or "").strip()
+
+
+def _git_ok(repo: Path, *argv: str, run) -> bool:
+    """只关心退出码的 git 命令（如 merge-base --is-ancestor）。"""
+    try:
+        proc = run(
+            ["git", *argv], cwd=str(repo), capture_output=True, text=True, timeout=5
+        )
+    except Exception:
+        return False
+    return proc.returncode == 0
+
+
+def _source_version(src: Path) -> str | None:
+    """从源码 ``src/npc/__init__.py`` 抽 ``__version__``。"""
+    try:
+        text = (src / "src" / "npc" / "__init__.py").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    m = _VERSION_RE.search(text)
+    return m.group(1) if m else None
+
+
+def _check_install_source(*, which, run=subprocess.run) -> dict:
+    """安装来源体检：本地 checkout 安装是否来自已合入 main 的源码、版本是否一致。
+
+    动机：`uv tool install --from <本地路径>` 会把未合并分支的构建物装到全局，
+    此后 doctor 报告的能力与仓库 main 不一致（"机器上能跑但仓库里没有"）。
+    """
+    try:
+        dist = importlib.metadata.distribution("npc")
+        installed_version = dist.version
+        raw = dist.read_text("direct_url.json")
+    except Exception:
+        return _install_check("warn", "无法读取安装来源（非 pip/uv 安装？）")
+    if not raw:
+        return _install_check("warn", "无法读取安装来源（非 pip/uv 安装？）")
+    try:
+        info = json.loads(raw)
+    except ValueError:
+        return _install_check("warn", "无法读取安装来源（direct_url.json 非法 JSON）")
+    url = (info.get("url") or "").strip()
+    if not url:
+        return _install_check("warn", "无法读取安装来源（direct_url.json 缺 url 字段）")
+
+    if not url.startswith("file://"):
+        vcs = info.get("vcs_info") or {}
+        commit = (vcs.get("commit_id") or "")[:7]
+        suffix = f" @ {commit}" if commit else ""
+        return _install_check("ok", f"远程安装：{url}{suffix}（已安装 {installed_version}）")
+
+    src = Path(unquote(url[len("file://"):]))
+    if not src.is_dir():
+        return _install_check("warn", f"本地安装源码目录已不存在：{src}；无法校验与 main 的一致性")
+    if which("git") is None:
+        return _install_check("warn", f"本地安装：{src}；PATH 中无 git，无法校验分支与 main 的关系")
+
+    branch = _git_out(src, "rev-parse", "--abbrev-ref", "HEAD", run=run)
+    sha = _git_out(src, "rev-parse", "--short", "HEAD", run=run)
+    if branch is None or sha is None:
+        return _install_check("warn", f"本地安装：{src}；git 信息不可读（非 git 仓库或命令失败）")
+
+    on_main = _git_ok(src, "merge-base", "--is-ancestor", "HEAD", "origin/main", run=run) or _git_ok(
+        src, "merge-base", "--is-ancestor", "HEAD", "main", run=run
+    )
+    if branch != "main" or not on_main:
+        return _install_check(
+            "warn",
+            f"已安装 {installed_version} 构建自 {src} 分支 {branch}"
+            f"（{sha}，未合入 main）——请先合并再用于生产",
+        )
+
+    src_version = _source_version(src)
+    if src_version is not None and src_version != installed_version:
+        return _install_check(
+            "warn",
+            f"版本不一致：已安装 {installed_version}，源码 {src} 为 {src_version}"
+            f"（{branch} {sha}）；运行 uv tool install --reinstall 重装",
+        )
+    return _install_check(
+        "ok", f"本地安装：{src} @ {branch} {sha}，版本一致 ({installed_version})"
+    )
+
+
 def gather_checks(
     *,
     home: Path,
@@ -290,6 +398,7 @@ def gather_checks(
     checks.append(_check_config(home=home, repo_root=cfg_root))
     checks.append(_check_providers(home=home, repo_root=cfg_root, which=which))
     checks.append(_check_host(home=home, repo_root=cfg_root))
+    checks.append(_check_install_source(which=which, run=subprocess.run))
     checks.append(_check_principles(repo_root=repo_root))
     return checks
 

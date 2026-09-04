@@ -147,3 +147,31 @@ def test_implementer_template_significantly_larger_than_spawn_prompt():
     )
     # 模板内容应该至少是引导语的 5 倍（实际是 10x+）
     assert len(impl) > 5 * len(spawn)
+
+
+def test_render_fixer_includes_invariant_sweep_rule():
+    text = templates.render_fixer(
+        "c", 1, "abc", "/b", "/r", "F1\n", ["security"], [2]
+    )
+    # A2 规则本体
+    assert "不变量类 finding 的全仓枚举" in text
+    assert "整个仓库" in text
+    assert "spec-compliance" in text
+    assert "error-handling" in text
+    assert "打地鼠" in text
+    # summary 骨架里的新段
+    assert "## Invariant Sweep" in text
+    assert "枚举方法" in text
+    assert "落点" in text
+
+
+def test_render_fixer_result_line_contract_unchanged():
+    text = templates.render_fixer("c", 1, "abc", "/b", "/r", "F1\n", [], [])
+    line = next(
+        ln for ln in text.splitlines() if ln.startswith("RESULT: commit=<hash>")
+    )
+    assert line == (
+        "RESULT: commit=<hash> fixed=<count> tests=<pass|fail> "
+        "summary=/b/round-1.fix.summary.md categories_scanned=<comma-sep> "
+        "regressions_added=<comma-sep|-> notes=<一行说明，无则填 ->"
+    )

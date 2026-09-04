@@ -9,6 +9,7 @@ CLI handlers：init_run / get / add_change / set_progress / finalize
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import re
@@ -16,7 +17,7 @@ import subprocess
 from pathlib import Path
 from typing import Any, Callable
 
-from . import _io, paths as _paths
+from . import _io, locks as _locks, paths as _paths
 
 
 SCHEMA_VERSION = 2
@@ -45,11 +46,20 @@ def read_state(state_json: Path) -> dict:
 
 
 def _atomic_write_text(path: Path, content: str) -> None:
-    """tmp 文件 + os.replace 原子替换。"""
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    with tmp.open("w", encoding="utf-8") as f:
-        f.write(content)
-    os.replace(tmp, path)
+    """tmp 文件 + os.replace 原子替换。
+
+    tmp 名带 pid：主 session 与后台 ``change run`` 可能同时写同一 state，共用一个
+    ``.tmp`` 会让一方的 os.replace 替换掉另一方尚未写完的文件。
+    """
+    tmp = path.with_suffix(f"{path.suffix}.{os.getpid()}.tmp")
+    try:
+        with tmp.open("w", encoding="utf-8") as f:
+            f.write(content)
+        os.replace(tmp, path)
+    finally:
+        with contextlib.suppress(OSError):
+            if tmp.exists():
+                tmp.unlink()
 
 
 def write_state(state_json: Path, state_md: Path, state: dict) -> None:
@@ -69,10 +79,17 @@ def update_state(
     state_md: Path,
     mutator: Callable[[dict], None],
 ) -> dict:
-    """读 → mutator 就地修改 → 写。返回修改后的 state。"""
-    state = read_state(state_json)
-    mutator(state)
-    write_state(state_json, state_md, state)
+    """读 → mutator 就地修改 → 写。返回修改后的 state。
+
+    全程持 ``<state_json>.lock``（有界等待 :data:`locks.STATE_LOCK_WAIT_SEC`），
+    多进程并发装订时读改写不再互相覆盖。
+    """
+    with _locks.held(
+        _locks.state_lock_path(state_json), owner="state.update", wait_sec=_locks.STATE_LOCK_WAIT_SEC
+    ):
+        state = read_state(state_json)
+        mutator(state)
+        write_state(state_json, state_md, state)
     return state
 
 

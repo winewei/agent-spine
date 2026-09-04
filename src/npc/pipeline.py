@@ -289,6 +289,58 @@ def _do_phase_exit(
     }
 
 
+def _count_high_findings(review_data: dict) -> int | None:
+    """本轮 in_scope 且 severity ∈ {critical, high} 的 finding 数；结构异常返回 None。"""
+    findings = (review_data or {}).get("findings")
+    if not isinstance(findings, list):
+        return None
+    return sum(
+        1
+        for f in findings
+        if isinstance(f, dict)
+        and f.get("severity") in _review.BLOCKING_SEVERITIES
+        and bool(f.get("in_scope"))
+    )
+
+
+def _blocking_categories(metrics: dict) -> list[str]:
+    """parse_review 结果中 blocking findings（in_scope 且 critical/high）的去重 category 序列。
+
+    ``metrics["categories"]`` 含 advisory / out-of-scope 的 category，不能用于打地鼠判定。
+    """
+    cats = [
+        f.get("category")
+        for f in (metrics.get("blocking_findings") or [])
+        if isinstance(f, dict) and f.get("category")
+    ]
+    return list(dict.fromkeys(cats))
+
+
+def _repeat_category_ratio(
+    base: Path, round_n: int, categories: list[str]
+) -> float | None:
+    """本轮 blocking categories 中出现在上一轮 blocking categories 里的比例（0–1）。
+
+    ``categories`` 应为 :func:`_blocking_categories` 的结果；上一轮同样只取 blocking
+    findings 的 category。上一轮 review.json 不存在 / 不可解析 / 上一轮无 blocking
+    category / 本轮无 category 时返回 None（视为无可比基线）。任何 IO 或解析失败都
+    吞掉，不影响主流程。
+    """
+    if round_n <= 0 or not categories:
+        return None
+    prev_path = base / f"round-{round_n - 1}.review.json"
+    try:
+        prev_data = json.loads(prev_path.read_text(encoding="utf-8"))
+        prev_categories = set(_blocking_categories(_review.parse_review(prev_data)))
+    except (OSError, json.JSONDecodeError, ValueError, TypeError, AttributeError):
+        return None
+    if not prev_categories:
+        return None
+    cur = list(dict.fromkeys(categories))
+    hit = sum(1 for c in cur if c in prev_categories)
+    return round(hit / len(cur), 4)
+
+
 def _do_review_phase_exit_and_trend(
     p: _paths.Paths, seq: int, phase: str, metrics: dict
 ) -> dict:
@@ -686,6 +738,8 @@ def run_review_round(
         .get(phase, {})
         .get("duration_ms")
     )
+    _high_count = _count_high_findings(review_data)
+    _repeat_ratio = _repeat_category_ratio(base, round_n, _blocking_categories(metrics))
     _telemetry.emit_review_round(
         proj_key=p.proj_key,
         run_ts=p.run_ts,
@@ -703,6 +757,8 @@ def run_review_round(
         outcome_reason=None,
         state_json=p.state_json,
         run_events=p.run_events,
+        high_count=_high_count,
+        repeat_category_ratio=_repeat_ratio,
     )
 
     # 6. fixer findings 自动渲染（下一轮 fix 用），仅在 blocking>0 时
@@ -819,13 +875,17 @@ def run_archive(
         capture_output=True,
         text=True,
     )
-    if arc.returncode != 0:
+    # openspec archive 在 delta 标题与基线 spec 冲突（如 ADDED 已存在的 Requirement）时
+    # 打印 "Aborted. No files were changed." 却仍 exit 0；以 change 目录是否仍在为准。
+    arc_aborted = (p.repo_root / "openspec" / "changes" / change_id).is_dir()
+    if arc.returncode != 0 or arc_aborted:
+        arc_out = ((arc.stdout or "") + (arc.stderr or "")).strip()
         _do_phase_exit(
             p,
             seq,
             "archive",
             status="failed",
-            extra={"reason": "openspec-archive-failed", "stderr": arc.stderr.strip()[:2000]},
+            extra={"reason": "openspec-archive-failed", "stderr": arc_out[:2000]},
             progress_updates={"status": "failed", "reason": "openspec-archive"},
         )
         return {
@@ -833,7 +893,7 @@ def run_archive(
             "seq": seq,
             "change_id": change_id,
             "error": "openspec-archive-failed",
-            "stderr_tail": arc.stderr.strip()[-1000:],
+            "stderr_tail": arc_out[-1000:],
         }
 
     # 4. git add + commit
@@ -845,21 +905,30 @@ def run_archive(
         text=True,
     )
     if commit.returncode != 0:
+        # git commit 把 "nothing to commit" 写在 stdout：只回传 stderr 会得到空诊断，
+        # 故合并两流（字段名保持 stderr / stderr_tail 以兼容既有契约）。
+        commit_out = ((commit.stdout or "") + (commit.stderr or "")).strip()
+        nothing_to_commit = "nothing to commit" in commit_out.lower()
+        extra: dict = {"reason": "git-commit-failed", "stderr": commit_out[:2000]}
+        result: dict = {
+            "ok": False,
+            "seq": seq,
+            "change_id": change_id,
+            "error": "git-commit-failed",
+            "stderr_tail": commit_out[-1000:],
+        }
+        if nothing_to_commit:
+            extra["detail"] = "nothing-to-commit"
+            result["detail"] = "nothing-to-commit"
         _do_phase_exit(
             p,
             seq,
             "archive",
             status="failed",
-            extra={"reason": "git-commit-failed", "stderr": commit.stderr.strip()[:2000]},
+            extra=extra,
             progress_updates={"status": "failed", "reason": "git-commit"},
         )
-        return {
-            "ok": False,
-            "seq": seq,
-            "change_id": change_id,
-            "error": "git-commit-failed",
-            "stderr_tail": commit.stderr.strip()[-1000:],
-        }
+        return result
     archive_commit = _git_head(p.repo_root)
 
     # 5. 计算 total_rounds = 最大 review-rN 索引

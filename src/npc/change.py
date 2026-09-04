@@ -23,7 +23,8 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from . import _io, auto_decide as _auto, coder as _coder, paths as _paths, pipeline as _pipeline, state as _state, telemetry as _telemetry
+from . import _io, auto_decide as _auto, coder as _coder, locks as _locks, paths as _paths, pipeline as _pipeline, state as _state, telemetry as _telemetry
+from .trend import STALE_INTERACTIVE_THRESHOLD
 
 DEFAULT_MAX_ROUNDS = 20
 
@@ -362,7 +363,12 @@ def run_change(
                 phase = "archive"
                 continue
             trigger: str | None = None
-            if res.get("stale"):
+            # 交互档提前一轮介入：rsd >= 2 即视作 stale 决策点（auto 档仍等 rsd >= 3）
+            if res.get("stale") or (
+                not auto
+                and int(res.get("rounds_since_strict_decrease") or 0)
+                >= STALE_INTERACTIVE_THRESHOLD
+            ):
                 trigger = "stale"
             elif round_n + 1 > max_rounds:
                 trigger = "max-rounds"
@@ -427,6 +433,39 @@ def cli_run(args: argparse.Namespace) -> None:
     except _paths.PathsError as e:
         _io.emit_error("env_missing", str(e), exit_code=3)
         return
+    # main 互斥：内环的 fix / archive commit 都落在 main 上，全程持锁；
+    # 与 npc integrate（try-lock）、另一个 change run（有界等待）互斥。
+    lock_path = _locks.main_lock_path(p.task_log_dir)
+    try:
+        lock_fh = _locks.acquire(
+            lock_path, owner=f"change run seq={args.seq}", wait_sec=_locks.MAIN_LOCK_WAIT_SEC,
+        )
+    except _locks.LockBusy as e:
+        _io.emit_error(
+            "main_busy",
+            f"main 被占用（holder={e.holder}, lock={lock_path}），"
+            f"{int(_locks.MAIN_LOCK_WAIT_SEC)}s 内未释放；等待其结束后重试，或确认无并发后删除锁文件",
+            exit_code=1,
+        )
+        return
+    try:
+        result = _run_change_cli(p, args)
+    finally:
+        _locks.release(lock_fh)
+    if result is None:
+        return
+
+    _io.emit(result)
+    status = result.get("status")
+    if status == "archived":
+        return
+    if status == "needs-decision":
+        sys.exit(5)
+    sys.exit(1)
+
+
+def _run_change_cli(p: _paths.Paths, args: argparse.Namespace) -> dict | None:
+    """cli_run 的主体；参数错误等已 emit_error 时返回 None。"""
     try:
         result = run_change(
             p,
@@ -453,12 +492,5 @@ def cli_run(args: argparse.Namespace) -> None:
         return
     except ValueError as e:
         _io.emit_error("invalid_args", str(e), exit_code=2)
-        return
-
-    _io.emit(result)
-    status = result.get("status")
-    if status == "archived":
-        return
-    if status == "needs-decision":
-        sys.exit(5)
-    sys.exit(1)
+        return None
+    return result

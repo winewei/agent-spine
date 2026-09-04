@@ -605,6 +605,8 @@ status=failed 时事件后缀改 `.failed`。
 }
 ```
 
+**双阈值（1.7.1+）**：本命令输出的 `stale` / `threshold` 恒为 `STALE_THRESHOLD = 3`，是 auto 档的判定口径（无人可问，多给一轮自愈机会）。`npc change run` 的**交互档**另用 `STALE_INTERACTIVE_THRESHOLD = 2`：`rounds_since_strict_decrease ≥ 2` 即触发 `trigger=stale` 决策点。因此交互档下本命令返回 `stale=false` 而 `change run` 已停在决策点是预期行为——判断交互档是否该介入请直接看 `rounds_since_strict_decrease` 是否 ≥ 2。
+
 ---
 
 ## 6. Focus 文本渲染
@@ -959,6 +961,8 @@ archive 一站式：precheck → openspec validate --strict → openspec archive
 
 `error` 取值：`commit-chain-broken` / `openspec-validate-failed` / `openspec-archive-failed` / `git-commit-failed`。
 
+`git-commit-failed` 的 `stderr` / `stderr_tail` 为 **stdout + stderr 合并**输出（`git commit` 的 "nothing to commit" 写在 stdout，只取 stderr 会得到空诊断）；该输出含 `nothing to commit` 时额外带 `"detail": "nothing-to-commit"`（stdout 与 phase exit extra 同时带），供主 session 分辨"归档没产生任何变更"与真实 git 故障。
+
 **exit**：`0` 成功；`1` 业务失败；`4` 依赖缺失（openspec 未安装）
 
 ---
@@ -1167,6 +1171,8 @@ RESULT: commit=<hash> fixed=<n> tests=<pass|fail> summary=<path> categories_scan
 | `tokens` | object \| null | `{prompt_bytes, output_bytes, est_input_tokens, est_output_tokens, method}`；估算法默认 `bytes_div_4` |
 | `verdict` | enum | review.round 专用：`pass` / `should-fix` / `must-fix` |
 | `blocking_count`, `blocking_categories` | review.round 专用 | |
+| `high_count` | int \| null | review.round 专用（1.7.1+）：本轮 `in_scope` 且 `severity ∈ {critical, high}` 的 finding 数；review.json 结构异常时 null |
+| `repeat_category_ratio` | number \| null | review.round 专用（1.7.1+）：本轮 blocking categories 中出现在**上一轮** `round-(N-1).review.json` categories 里的比例（0–1）。round-0、上一轮文件缺失/不可解析、两轮任一无 category 时为 null；读取失败一律吞掉不影响 review 主流程。`blocking_count > 0` 且该值 ≥ 0.5 时该轮计入 aggregate 的 `whack_a_mole_rounds` |
 | `engine` | string | review.round 专用：`codex` / `claude` |
 | `retry_count` | int | review codex 重试次数 |
 | `outcome_reason` | string \| null | failed 时的 reason |
@@ -1224,7 +1230,9 @@ npc telemetry agg [--by phase|change|week] [--since 7d|24h|30m|ISO] [--no-write]
 
 `--by` 省略时三个维度全跑；`--no-write` 只输出 stdout 不写 `aggregates/`。
 
-每个维度返回：`{count, done, failed, failure_rate, duration_ms{p50,p95,max,sum}, est_input_tokens_sum, est_output_tokens_sum, retry_count_sum, blocking_total, review_rounds, kinds, reasons, verdicts}`。
+每个维度返回：`{count, done, failed, failure_rate, duration_ms{p50,p95,max,sum}, est_input_tokens_sum, est_output_tokens_sum, retry_count_sum, blocking_total, review_rounds, whack_a_mole_rounds, kinds, reasons, verdicts}`。
+
+`whack_a_mole_rounds`（1.7.1+）：`review.round` record 中同时满足 `blocking_count > 0` 与 `repeat_category_ratio ≥ 0.5` 的轮次数——blocking 没清零、且本轮 category 半数以上重复上一轮，即 reviewer / fixer 在同一类不变量上逐轮零敲碎打的"打地鼠"特征。1.7.1 之前的老 record 没有 `repeat_category_ratio` 字段，一律不计入。
 
 #### `npc telemetry hotspots`
 
@@ -1243,10 +1251,13 @@ npc telemetry hotspots [--top N=5] [--since DUR]
   "hotspots": [
     {"phase":"fix-r0","score":33000.0,"count":2,"failure_rate":1.0,
      "p50_duration_ms":55000,"p95_duration_ms":60000,"retry_count_sum":3,
+     "whack_a_mole_rounds":1,
      "top_reasons":[["fixer",2]],"top_verdicts":[]}
   ]
 }
 ```
+
+`whack_a_mole_rounds`（1.7.1+）随每个 phase 一并给出（语义同 `telemetry agg`），不参与 score 排序，仅作为"该 phase 是否在打地鼠"的旁证读数。
 
 #### `npc telemetry estimate-tokens <file>`
 
@@ -1288,6 +1299,48 @@ v3 波次并行编排原先自带四个 skill 脚本（waves.py / detect_plan_on
 `cycle` 非空表示 DAG 有环，已强制释放所列节点破环。输出是**候选**——语义耦合仍须架构师 sub-agent 裁定。
 
 **exit**：`0` 成功；`2` 输入不合法（非 JSON / 缺 nodes / 文件不可读）。
+
+---
+
+### `npc plan ready [--input FILE]`（1.7.1+）
+
+`plan waves` 的**增量**形态：波次是一次性算出的静态计划，逐波屏障会让整波等最慢的一个 change 走完 review/fix 内环；`plan ready` 改为按当前运行时集合随时问"此刻还能再开哪些 change"，让下一波的 implement 在上一波内环期间就于 worktree 内起跑（依赖只需在 integrate 时满足）。
+
+输入在 `plan waves` 的 `{nodes, edges, files, tie_break}` 之上增加运行时集合：
+
+```json
+{
+  "nodes": ["add-a", "add-b", "add-c"],
+  "edges": [["add-a", "add-b"]],
+  "files": {"add-a": ["src/x.py"]},
+  "tie_break": {"add-a": [0, 12]},
+  "done": ["add-a"],
+  "active": ["add-c"],
+  "finished": ["add-a"],
+  "limit": 4
+}
+```
+
+| 字段 | 含义 |
+|---|---|
+| `done` | 已 `npc integrate` 进 main 的 change。**依赖以此判定，不是 archived**——下游需要的是上游代码在 main 上，而非上游走完 review/fix/archive 内环 |
+| `active` | implementer 正在 worktree 中跑的 change。只参与文件冲突排除，不满足任何依赖 |
+| `finished` | 已终态（archived/skipped/failed）且不再需要调度；**缺省等于 `done`** |
+| `limit` | 本批最多返回几个 ready（并发槽位）；非负整数，否则 exit 2 |
+
+判据：候选 = 不在 `done ∪ active ∪ finished` 的节点；其入边前驱须全部 ∈ `done`；且与任一 `active` 节点、以及与已选入本批的节点无文件交集冲突（冲突判定与 `plan waves` 同源的路径前缀重叠）。按 `tie_break` 序遍历，先到先得，受 `limit` 截断。
+
+**stdout**：
+
+```json
+{"ready": ["add-b"], "blocked": {"add-d": ["dep-pending:add-b"]}, "remaining": 2, "warnings": []}
+```
+
+- `blocked` 的原因按 `dep-pending:<cid>` → `file-conflict:<cid>` → `limit` **短路**，只报首个生效的层级（依赖未满足时不再报文件冲突——那是移动靶）。
+- `remaining` 是尚未进入终态（`done ∪ finished`）的节点数，含 `active` 与 `blocked`。
+- `done` / `active` / `finished` 中不存在于 `nodes` 的 cid 被忽略并记入 `warnings`（`unknown-done:<cid>` 等），不报错。
+
+**exit**：`0` 成功；`2` 输入不合法（非 JSON / 缺 nodes / 集合字段非列表 / `limit` 非法 / 文件不可读）。
 
 ---
 
@@ -1341,7 +1394,7 @@ best-effort webhook 推送。URL 解析顺序：`--url` > `$NPC_WEBHOOK` > `$NPC
 
 环境前置体检：git / openspec / codex / claude / jq / portable-timeout（PATH 或 `~/.local/bin` 自举）/ review schema 自举情况 / mimo.env 成本路由 / npc config 可加载性 / 路由在用 provider 就绪性（v1.6+）/ `docs/principles.md`。除 `git` 外全部是 warn 级、不阻塞。
 
-**做什么**：对 `_BIN_CHECKS`（`git` 必备，`openspec`/`codex`/`claude`/`jq` 可选）逐个查 PATH；`portable-timeout` 额外查 `~/.local/bin` 自举位置并校验可执行位；`schema` 检查 `~/task_log/.new-plan-review-schema.json` 是否存在且为合法 JSON；`mimo.env` 检查 `~/.config/npc/mimo.env` 是否存在可读；`config` 尝试 `load_config`（失败降级 warn，不阻塞）；`providers`（v1.6+）对 coder 路由实际引用的每个 provider 检查 env_file 存在可读 + runner 可执行文件可用（未被引用的定义不产生噪音，问题一律 warn 不阻塞）；`host`（v1.7+）报告解析出的宿主（名字/来源/session 识别能力，信息级恒 ok）；`principles.md` 检查 `<repo>/docs/principles.md`。
+**做什么**：对 `_BIN_CHECKS`（`git` 必备，`openspec`/`codex`/`claude`/`jq` 可选）逐个查 PATH；`portable-timeout` 额外查 `~/.local/bin` 自举位置并校验可执行位；`schema` 检查 `~/task_log/.new-plan-review-schema.json` 是否存在且为合法 JSON；`mimo.env` 检查 `~/.config/npc/mimo.env` 是否存在可读；`config` 尝试 `load_config`（失败降级 warn，不阻塞）；`providers`（v1.6+）对 coder 路由实际引用的每个 provider 检查 env_file 存在可读 + runner 可执行文件可用（未被引用的定义不产生噪音，问题一律 warn 不阻塞）；`host`（v1.7+）报告解析出的宿主（名字/来源/session 识别能力，信息级恒 ok）；`install-source` 读 npc 发行元数据的 `direct_url.json` 判定安装来源：本地 checkout（`file://`）安装时取源码 `git rev-parse --abbrev-ref/--short HEAD` 与 `merge-base --is-ancestor HEAD origin/main`，分支非 main 或 HEAD 未合入 main → warn（`已安装 <version> 构建自 <path> 分支 <branch>（<sha>，未合入 main）`，提示"机器上装的是未合并分支构建物"），已安装版本与源码 `__version__` 不一致 → warn，一致且已在 main → ok；远程 VCS 安装 → ok 并带 `vcs_info.commit_id` 前 7 位；读不到 `direct_url.json` → warn。git 调用一律 5s 超时、异常降级 warn；`principles.md` 检查 `<repo>/docs/principles.md`。
 
 **stdout（单行，`ok` 恒真实反映 required 缺失情况；required 缺失时同一行内嵌 `error`/`message`）**：
 
@@ -1562,6 +1615,8 @@ push 当前分支到远程（对外动作）。不自作主张决定要不要推
 - `--auto`（或 state.mode=auto）：决策点内部调 auto-decide，一路跑完，返回一行终态 JSON。
 - 交互档：跑到决策点（trigger ∈ stale / max-rounds / implementer-failed / fixer-failed / codex-failed / archive-failed）带 `status=needs-decision` 退出（**exit 5**），`pending_decision`（trigger/phase/round/suggested）装订进 state；主 session 问人后 `--decision <continue-retry|skip|force-archive|abort>` 消费续跑。存在未消费 pending_decision 时不带 `--decision` 重跑 → exit 2。
 
+**stale 触发阈值分档（1.7.1+）**：auto 档沿用 `STALE_THRESHOLD = 3`（即 `review run` 返回的 `stale=true`）；交互档额外在 `rounds_since_strict_decrease ≥ STALE_INTERACTIVE_THRESHOLD = 2` 时即以 `trigger=stale` 停在决策点，比 auto 档早一轮。依据：blocking 连续两轮没有严格下降，通常是 reviewer / fixer 在同一类不变量上逐轮补一处（"打地鼠"），第三轮大概率仍不收敛，早一轮把决策权交给人比多烧一轮 fix 更省。
+
 `--from {implement|review|fix|archive}` 断点重入（默认按 entry.status + blocking_trend 推导）；终态 change 重跑必须显式 `--from`。
 
 ```text
@@ -1573,11 +1628,13 @@ stdout（决策点）:
    "trigger": "...", "phase": "...", "round": <int>, "suggested": "<action>",
    "blocking_trend": [...], "categories_seen": [...], "pointer": {...}}
 
-exit: 0 archived / 1 终态失败（skipped|failed|aborted）/ 5 needs-decision /
+exit: 0 archived / 1 终态失败（skipped|failed|aborted）或 main_busy / 5 needs-decision /
       2 用法错 / 3 环境错 / 4 依赖缺失
 ```
 
-### `npc integrate --seq N --result '<RESULT行>' [--result-file PATH] [--manifest PATH] [--no-verify-tests]`
+**main 互斥**（1.7.1+）：全程持有 `<task_log_dir>/.main.lock`，与 `npc integrate` 及另一个 `change run` 互斥（内环的 fix / archive commit 都落在 main 上）。锁被占用时有界等待 120s，超时输出 `{"ok": false, "error": "main_busy", "message": "...holder=..."}` exit 1，不做任何改动。
+
+### `npc integrate --seq N --result '<RESULT行>' [--result-file PATH] [--manifest PATH] [--no-verify-tests] [--force]`
 
 worktree 产物整合进 main 的多步编排（替代 v3 skill Step 9 伪 bash 段），任一步失败自动收拾现场、main 保持绿：
 
@@ -1587,15 +1644,29 @@ worktree 产物整合进 main 的多步编排（替代 v3 skill Step 9 伪 bash 
 4. `implement record` 装订，失败 → `git revert` 摘除；
 5. verify tests 真实复跑（探测不到测试命令 → skipped 警告），失败 → revert + progress 回退 `failed/verify-tests-failed`。
 
-冲突与 revert 均落 telemetry `deviation` record 与 run.events（`integrate.conflict` / `integrate.verify_tests_failed`）。
+**main 互斥**（1.7.1+）：整合全程持有 `<task_log_dir>/.main.lock`（`fcntl.flock`，非阻塞抢锁，进程退出自动释放）。`npc change run` 在其整个生命周期持同一把锁（有界等待 120s，超时 `error=main_busy` exit 1）。原因：整合在 main 上 cherry-pick、跑测试并读改写 state.json，与内环的 fix / archive commit 并发会产生 git 锁冲突、测错 HEAD、state 覆盖写；两个 integrate 并发同理。抢不到锁时**未做任何改动**即返回 `step=inner-loop-active, reason=main-busy`，附 `holder={pid, owner, ts}`（锁文件里的持有者）与 `active=[{seq, change_id, phase}]`（state 中处于 in-progress 的内环 phase 快照，仅诊断用）。调用方（v4 playbook 3c）应把该 RESULT 排队，等当前内环结束再重试；implementer 在 worktree 内继续跑不受影响。人工确认无并发后可 `--force` 跳过锁。
+
+state.json 的所有读改写（`update_state`）另持 `<state>.lock`，tmp 文件名带 pid——主 session 的 `state add-change` / `phase rotate` 与后台内环装订并发时不再互相覆盖。
+
+strict 模式（未取基线）在 cherry-pick **之后**重新探测测试命令：change 可能首次引入 `pyproject.toml` / `tests/` / Makefile test target，整合前探测不到不代表无测试。diff 模式保留整合前的命令以保证与基线可比。
+
+go 输出的失败 id 记为 `<package>::TestName`（按 `--- FAIL:` 之后的 `FAIL <pkg>` 汇总行归属；用例名只在包内唯一，裸名会让不同包的同名失败互相抵消）。
+
+**基线 diff 模式**（1.7.1+，`[verify].test_baseline = "diff"`）：存在既有污染失败、以"零新增失败"判零回归的仓库使用。整合前先在当前 HEAD 跑一遍测试记录基线失败集合（run.events `integrate.baseline`），整合后要求失败集合 ⊆ 基线；exit 0 直接通过；输出抽不出失败 id（非 pytest `FAILED path::name` / go `--- FAIL: Name` 格式，或崩在收集阶段）按失败处理。代价是每次整合跑两遍测试。默认 `"strict"`（exit 0 才通过）。
+
+冲突与 revert 均落 telemetry `deviation` record 与 run.events（`integrate.conflict` / `integrate.verify_tests_failed`）。`integrate.verify_tests_failed` 事件除 `reverted` 外带诊断三件套：`cmd`（实际执行的测试命令）、`tests`（`mode` / `failed` / `new_failures` / `reason`）、`tail`（测试输出末尾 40 行且不超过 4000 字符）；同一份 `tests` 明细也写入 `progress[seq-1].verify_tests_detail`，供 `npc status` 事后反查。
 
 ```text
 stdout（成功）:
   {"ok": true, "seq": N, "change_id": "...", "worktree_commit": "...",
-   "integrated_commit": "...", "verify_tests": "pass|skipped", "files": {"present","total"}}
+   "integrated_commit": "...", "verify_tests": "pass|pass-baseline-diff|skipped",
+   "tests": {"mode": "strict|diff", "failed": <int|null>, "new_failures": [...]} | null,
+   "files": {"present","total"}}
 stdout（失败）:
-  {"ok": false, "seq": N, "step": "verify-manifest|cherry-pick|record|verify-tests",
+  {"ok": false, "seq": N,
+   "step": "inner-loop-active|verify-manifest|cherry-pick|record|verify-tests",
    "reason": "...", "reverted": "<hash>|null", ...}
+  step=inner-loop-active 时附 holder={pid, owner, ts} 与 active=[{seq, change_id, phase}]，无副作用
 
 exit: 0 成功 / 1 任一步失败 / 2 用法错 / 3 环境错
 ```
@@ -2044,6 +2115,7 @@ npc index append
 
 | 版本 | 关键变化 |
 |---|---|
+| **1.7.1** | `archive run`：`openspec archive` 因 delta 标题与基线 Requirement 冲突静默中止（打印 Aborted 但 exit 0）时，以 change 目录仍存在判 `openspec-archive-failed` 并回传 openspec 输出，不再误报 `git-commit-failed`；`[verify].test_baseline = "strict|diff"`：`npc integrate` 的 verify tests 支持基线 diff（整合前记录 HEAD 失败集合，整合后失败集合 ⊆ 基线即通过），适配存在既有污染失败的仓库；成功输出新增 `tests` 字段与 `pass-baseline-diff` 状态 |
 | **1.7** | 宿主中立化 + 去 plugin 发布：宿主支持列表明确为 Claude Code / Kimi CLI / Qwen Code / Codex / OpenCode（README / INSTALL / usage / playbook 宿主适配表口径统一）；新增 `hosts.py` 宿主抽象与 `[host]` 配置（name/session_dir；探测顺序 config > CLAUDECODE env > generic），init payload 增 `host` 字段、generic 宿主跳过 auto 授权、session 识别按宿主分流（generic 只走 by-cwd hook）；focus/templates 项目上下文 `CLAUDE.md`→`AGENTS.md` fallback、prompt 措辞去工具专名；新增 `playbook list/show/install`（§9d），原 plugin 内容收编进包资源，删除 marketplace/plugin manifest；`doctor` 新增 `host` 检查 |
 | **1.6** | Provider 注册表：config 新增 `[providers.*]`（runner/env_file/model/bin，内置 claude/mimo/codex），coder 可路由到任意 Anthropic 兼容端点（kimi/qwen/deepseek/...）与 `codex exec`（coder 的 codex-cli 路径补齐）；配置查找链改为分层深合并（全局定义 provider、项目只写路由）；`--backend` 接受 provider 名；`verify routing` 规则 3 更名 `cheap_exec_only` 并泛化到全部带 env_file 的 provider；`doctor` 新增 `providers` 检查 |
 | **1.5** | 内环与整合下沉（§8f）：新增 `change run`（单 change 内环编排）与 `integrate`（worktree 产物整合进 main），上下文预算重构 |

@@ -332,3 +332,130 @@ def test_review_engine_failure_interactive(env_setup, make_args, capsys, monkeyp
     out = _change.run_change(p, 1)
     assert out["status"] == "needs-decision"
     assert out["trigger"] == "codex-failed"
+
+
+# ============================================================
+# 交互档提前介入：rounds_since_strict_decrease >= 2
+# ============================================================
+
+
+def _review_rsd(blocking: int, rsd: int) -> dict:
+    """stale=False（未到 auto 档阈值 3）但 rsd 已达交互档阈值的 review 返回值。"""
+    return {
+        "ok": True,
+        "blocking": blocking,
+        "stale": False,
+        "verdict": "changes-requested",
+        "rounds_since_strict_decrease": rsd,
+    }
+
+
+def test_interactive_rsd_2_triggers_needs_decision(env_setup, make_args, capsys, monkeypatch):
+    p = env_setup
+    _bootstrap_run(make_args, capsys, "add-foo")
+    _patch(
+        monkeypatch,
+        implement=Script([OK_IMPL]),
+        review=Script([_review_rsd(2, 2)]),
+        fix=Script([]),
+        archive=Script([]),
+    )
+
+    out = _change.run_change(p, 1)
+    assert out["ok"] is False
+    assert out["status"] == "needs-decision"
+    assert out["trigger"] == "stale"
+    entry = _read_entry(p, 1)
+    assert entry["pending_decision"]["trigger"] == "stale"
+    assert entry["status"] == "needs-user-decision"
+
+
+def test_auto_rsd_2_continues_fix_loop(env_setup, make_args, capsys, monkeypatch):
+    """auto 档仍以 STALE_THRESHOLD=3 判定，rsd=2 不打断 fix 循环。"""
+    p = env_setup
+    _bootstrap_run(make_args, capsys, "add-foo")
+    fix = Script([{"ok": True}])
+    _patch(
+        monkeypatch,
+        implement=Script([OK_IMPL]),
+        review=Script([_review_rsd(2, 2), review_result(0)]),
+        fix=fix,
+        archive=Script([dict(OK_ARCHIVE)]),
+    )
+
+    out = _change.run_change(p, 1, auto=True)
+    assert out["status"] == "archived"
+    assert len(fix.calls) == 1
+    assert fix.calls[0][0][3] == 1
+
+
+def test_interactive_rsd_1_does_not_trigger(env_setup, make_args, capsys, monkeypatch):
+    """rsd=1 未达交互档阈值，交互档照常进入下一轮 fix。"""
+    p = env_setup
+    _bootstrap_run(make_args, capsys, "add-foo")
+    fix = Script([{"ok": True}])
+    _patch(
+        monkeypatch,
+        implement=Script([OK_IMPL]),
+        review=Script([_review_rsd(2, 1), review_result(0)]),
+        fix=fix,
+        archive=Script([dict(OK_ARCHIVE)]),
+    )
+
+    out = _change.run_change(p, 1)
+    assert out["status"] == "archived"
+    assert len(fix.calls) == 1
+
+
+# ============================================================
+# main 互斥：cli_run 全程持 .main.lock
+# ============================================================
+
+
+def test_cli_run_holds_main_lock_and_releases(env_setup, make_args, capsys, monkeypatch):
+    from npc import locks as _locks
+
+    p = env_setup
+    _bootstrap_run(make_args, capsys, "add-foo")
+    lock_path = _locks.main_lock_path(p.task_log_dir)
+    observed: dict = {}
+
+    def fake_run_change(pp, seq, **kw):
+        # 内环执行期间锁应被本进程持有：外部 try_acquire 必失败
+        observed["busy_during"] = _locks.try_acquire(lock_path, owner="probe") is None
+        observed["holder"] = _locks.read_holder(lock_path)
+        return {"ok": True, "status": "archived", "archive_commit": "x"}
+
+    monkeypatch.setattr(_change, "run_change", fake_run_change)
+    monkeypatch.setattr(_change._paths, "load_paths", lambda args: p)
+    _change.cli_run(make_args(seq=1))
+    out = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert out["status"] == "archived"
+    assert observed["busy_during"] is True
+    assert observed["holder"]["owner"] == "change run seq=1"
+    fh = _locks.try_acquire(lock_path, owner="probe")
+    assert fh is not None, "cli_run 结束后必须释放 main 锁"
+    _locks.release(fh)
+
+
+def test_cli_run_main_busy_exits_1_without_running(env_setup, make_args, capsys, monkeypatch):
+    from npc import locks as _locks
+
+    p = env_setup
+    _bootstrap_run(make_args, capsys, "add-foo")
+    monkeypatch.setattr(_locks, "MAIN_LOCK_WAIT_SEC", 0.05)
+    monkeypatch.setattr(_locks, "_POLL_SEC", 0.01)
+    called = []
+    monkeypatch.setattr(_change, "run_change", lambda *a, **k: called.append(1))
+    monkeypatch.setattr(_change._paths, "load_paths", lambda args: p)
+    holder = _locks.try_acquire(_locks.main_lock_path(p.task_log_dir), owner="integrate seq=2")
+    try:
+        with pytest.raises(SystemExit) as ei:
+            _change.cli_run(make_args(seq=1))
+    finally:
+        _locks.release(holder)
+    assert ei.value.code == 1
+    out = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert out["error"] == "main_busy"
+    assert "integrate seq=2" in out["message"]
+    assert called == []

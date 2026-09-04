@@ -48,6 +48,9 @@ AGG_DIRNAME = "aggregates"
 # 故意不引 tiktoken，避免冷启动开销 + 第三方依赖污染。
 TOKEN_BYTES_PER = 4
 
+# review.round 判定为"打地鼠轮次"的 repeat_category_ratio 下界（且 blocking_count > 0）。
+WHACK_A_MOLE_RATIO = 0.5
+
 
 # ============================================================
 # 路径与文件
@@ -285,6 +288,7 @@ def aggregate(
         "retry_count": 0,
         "blocking_total": 0,
         "review_rounds": 0,
+        "whack_a_mole_rounds": 0,
         "kinds": defaultdict(int),
         "reasons": defaultdict(int),
         "verdicts": defaultdict(int),
@@ -327,6 +331,17 @@ def aggregate(
             b["blocking_total"] += bc
         if ev.get("kind") == "review.round":
             b["review_rounds"] += 1
+            # 打地鼠轮次：blocking 未清零，且本轮 categories 有半数以上重复上一轮。
+            # 老记录没有 repeat_category_ratio 字段，一律不计。
+            ratio = ev.get("repeat_category_ratio")
+            if (
+                isinstance(bc, int)
+                and bc > 0
+                and isinstance(ratio, (int, float))
+                and not isinstance(ratio, bool)
+                and ratio >= WHACK_A_MOLE_RATIO
+            ):
+                b["whack_a_mole_rounds"] += 1
         reason = ev.get("outcome_reason")
         if reason:
             b["reasons"][reason] += 1
@@ -353,6 +368,7 @@ def aggregate(
             "retry_count_sum": b["retry_count"],
             "blocking_total": b["blocking_total"],
             "review_rounds": b["review_rounds"],
+            "whack_a_mole_rounds": b["whack_a_mole_rounds"],
             "kinds": dict(b["kinds"]),
             "reasons": dict(b["reasons"]),
             "verdicts": dict(b["verdicts"]),
@@ -383,6 +399,7 @@ def hotspots(events: Iterable[dict], top: int = 5) -> list[dict]:
                 "p50_duration_ms": p50,
                 "p95_duration_ms": stats["duration_ms"]["p95"],
                 "retry_count_sum": retries,
+                "whack_a_mole_rounds": stats["whack_a_mole_rounds"],
                 "top_reasons": _top_n_dict(stats["reasons"], 3),
                 "top_verdicts": _top_n_dict(stats["verdicts"], 3),
             }
@@ -627,8 +644,19 @@ def emit_review_round(
     outcome_reason: str | None,
     state_json: Path | str | None,
     run_events: Path | str | None,
+    high_count: int | None = None,
+    repeat_category_ratio: float | None = None,
 ) -> None:
-    """review-rN 一轮结束（成功 / 失败都调用一次）。"""
+    """review-rN 一轮结束（成功 / 失败都调用一次）。
+
+    ``high_count`` / ``repeat_category_ratio`` 是"打地鼠"模式的观测量：
+
+    - high_count：本轮 in_scope 且 severity ∈ {critical, high} 的 finding 数
+    - repeat_category_ratio：本轮 blocking categories 中出现在**上一轮**
+      blocking categories 里的比例（0–1）；上一轮不存在或不可解析时为 None。
+      blocking 未清零而该比例居高，说明同一类不变量被逐轮零敲碎打（见
+      :func:`aggregate` 的 ``whack_a_mole_rounds``）。
+    """
     base_p = Path(base)
     focus_md = base_p / f"round-{round_n}.focus.md"
     review_json = base_p / f"round-{round_n}.review.json"
@@ -645,6 +673,8 @@ def emit_review_round(
         "verdict": verdict,
         "blocking_count": blocking_count,
         "blocking_categories": blocking_categories,
+        "high_count": high_count,
+        "repeat_category_ratio": repeat_category_ratio,
         "engine": engine,
         "retry_count": retry_count,
         "outcome_reason": outcome_reason,

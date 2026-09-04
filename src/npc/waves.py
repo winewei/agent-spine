@@ -12,6 +12,11 @@
 
 本命令输出的是**候选**划分——语义层耦合（共享状态/时序/不变量）机械层看不到，
 最终波次必须经架构师 sub-agent 裁定（见 /new-plan-changes-v3 §4.9）。
+
+``npc plan ready`` 是同一套判据的**增量**形态：波次是一次性算出的静态计划，
+逐波屏障会让整波等最慢的一个 change 走完 review/fix 内环。ready 改为按当前
+DONE/ACTIVE 集合随时问"现在还能再开哪些"，使下一波的 implement 能在上一波
+内环期间提前于 worktree 内起跑（依赖只需在 integrate 时满足）。
 """
 
 from __future__ import annotations
@@ -142,11 +147,10 @@ def split_by_files(
     return colors, uniq_conflicts
 
 
-def compute(data: dict) -> dict:
-    """纯函数：{nodes, edges?, files?, tie_break?} → {waves, layers, split_reasons, cycle}。
-
-    输入不合法抛 ValueError。
-    """
+def _validate_nodes(data: dict) -> list[str]:
+    """校验并返回 ``nodes``；非法（含顶层不是 JSON 对象）抛 ValueError。"""
+    if not isinstance(data, dict):
+        raise ValueError("input must be a JSON object")
     nodes = data.get("nodes")
     if not isinstance(nodes, list) or not nodes:
         raise ValueError("missing or empty 'nodes'")
@@ -155,6 +159,15 @@ def compute(data: dict) -> dict:
     dupes = sorted({n for n in nodes if nodes.count(n) > 1})
     if dupes:
         raise ValueError(f"duplicate nodes: {dupes}")
+    return nodes
+
+
+def compute(data: dict) -> dict:
+    """纯函数：{nodes, edges?, files?, tie_break?} → {waves, layers, split_reasons, cycle}。
+
+    输入不合法抛 ValueError。
+    """
+    nodes = _validate_nodes(data)
     edges = data.get("edges") or []
     files = data.get("files") or {}
     tie_break = data.get("tie_break") or {}
@@ -195,11 +208,122 @@ def compute(data: dict) -> dict:
     }
 
 
-def run(args: argparse.Namespace) -> None:
-    """``npc plan waves [--input FILE]``（默认读 stdin）。
+def _fileset(node: str, files: dict) -> set:
+    """节点的归一化路径集；``files`` 缺项或非列表视为空集（不冲突）。"""
+    raw = files.get(node)
+    if not isinstance(raw, list):
+        return set()
+    return {p for p in (_parts(f) for f in raw) if p}
 
-    退出码：0 成功；2 输入不合法（缺 nodes / 非 JSON / 文件不可读）。
+
+def _predecessors(nodes: list[str], edges: list) -> dict:
+    """入边前驱表；与 ``topological_layers`` 同样忽略畸形边/幽灵节点/自环。"""
+    nodeset = set(nodes)
+    preds: dict = {n: set() for n in nodes}
+    for e in edges:
+        if not isinstance(e, (list, tuple)) or len(e) != 2:
+            continue
+        u, v = e[0], e[1]
+        if u not in nodeset or v not in nodeset or u == v:
+            continue
+        preds[v].add(u)
+    return preds
+
+
+def _cid_set(data: dict, key: str, nodeset: set, warnings: list) -> set | None:
+    """读取一个 change-id 列表字段；不在 nodes 里的 cid 忽略但记入 warnings。
+
+    字段缺省返回 None（与"显式空列表"区分，供 finished 回退到 done）。
     """
+    raw = data.get(key)
+    if raw is None:
+        return None
+    if not isinstance(raw, list):
+        raise ValueError(f"'{key}' must be a list of change ids")
+    out: set = set()
+    for cid in raw:
+        if not isinstance(cid, str) or not cid:
+            raise ValueError(f"'{key}' entries must be non-empty strings")
+        if cid in nodeset:
+            out.add(cid)
+        else:
+            warnings.append(f"unknown-{key}:{cid}")
+    return out
+
+
+def ready(data: dict) -> dict:
+    """纯函数：在 compute 的输入上叠加运行时集合，算"此刻可以起跑的 change"。
+
+    输入 ``{nodes, edges?, files?, tie_break?, done?, active?, finished?, limit?}``：
+
+    - ``done``——已 integrate 进 main 的 change。依赖以此判定（**不是** archived）：
+      下游需要的是上游的代码在 main 上，而非上游走完 review/fix/archive 内环。
+    - ``active``——implementer 正在 worktree 中跑的 change。只用于文件冲突排除，
+      不满足任何依赖。
+    - ``finished``——已终态（archived/skipped/failed）且不再需要调度；缺省等于 done。
+    - ``limit``——本批最多返回多少个 ready（并发槽位）。
+
+    返回 ``{ready, blocked, remaining, warnings}``。阻塞原因按
+    ``dep-pending → file-conflict → limit`` 短路，只报首个生效的层级。
+    """
+    nodes = _validate_nodes(data)
+    nodeset = set(nodes)
+    edges = data.get("edges") or []
+    files = data.get("files") or {}
+    tie_break = data.get("tie_break") or {}
+
+    warnings: list[str] = []
+    done = _cid_set(data, "done", nodeset, warnings) or set()
+    active = _cid_set(data, "active", nodeset, warnings) or set()
+    finished = _cid_set(data, "finished", nodeset, warnings)
+    if finished is None:
+        finished = set(done)
+
+    limit = data.get("limit")
+    if limit is not None:
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 0:
+            raise ValueError("'limit' must be a non-negative integer")
+
+    preds = _predecessors(nodes, edges)
+    terminal = done | finished
+    excluded = terminal | active
+
+    active_files = {n: _fileset(n, files) for n in active}
+    selected: list[str] = []
+    selected_files: dict = {}
+    blocked: dict = {}
+
+    for n in sorted([n for n in nodes if n not in excluded], key=lambda x: _key(x, tie_break)):
+        pending = sorted(p for p in preds[n] if p not in done)
+        if pending:
+            blocked[n] = [f"dep-pending:{p}" for p in pending]
+            continue
+
+        fn = _fileset(n, files)
+        holders = sorted(active, key=lambda x: _key(x, tie_break))
+        conflicts = [h for h in holders if _conflict(fn, active_files[h])]
+        conflicts += [s for s in selected if _conflict(fn, selected_files[s])]
+        if conflicts:
+            blocked[n] = [f"file-conflict:{c}" for c in conflicts]
+            continue
+
+        if limit is not None and len(selected) >= limit:
+            blocked[n] = ["limit"]
+            continue
+
+        selected.append(n)
+        selected_files[n] = fn
+
+    return {
+        "ready": selected,
+        "blocked": blocked,
+        "remaining": len([n for n in nodes if n not in terminal]),
+        "warnings": sorted(warnings),
+    }
+
+
+def _read_input(args: argparse.Namespace) -> dict:
+    """读 ``--input`` 或 stdin 的 JSON 对象；不可读/非 JSON 时 exit 2。"""
     try:
         if args.input:
             with open(args.input, "r", encoding="utf-8") as fh:
@@ -208,14 +332,42 @@ def run(args: argparse.Namespace) -> None:
             raw = sys.stdin.read()
     except OSError as e:
         _io.emit_error("input_unreadable", f"无法读取输入：{e}", exit_code=2)
-        return
+        raise AssertionError("unreachable")  # pragma: no cover
 
     try:
-        data = json.loads(raw)
+        return json.loads(raw)
     except json.JSONDecodeError as e:
         _io.emit_error("invalid_json", f"输入不是合法 JSON：{e}", exit_code=2)
+        raise AssertionError("unreachable")  # pragma: no cover
+
+
+def run_ready(args: argparse.Namespace) -> None:
+    """``npc plan ready [--input FILE]``（默认读 stdin）。
+
+    退出码：0 成功；2 输入不合法。
+    """
+    data = _read_input(args)
+    try:
+        out = ready(data)
+    except ValueError as e:
+        _io.emit_error("invalid_input", str(e), exit_code=2)
         return
 
+    _io.emit(out)
+    _io.info(
+        f"ready: {len(out['ready'])} ready, {len(out['blocked'])} blocked, "
+        f"{out['remaining']} remaining -> {out['ready']}"
+    )
+    for w in out["warnings"]:
+        _io.warn(f"ready: {w}")
+
+
+def run(args: argparse.Namespace) -> None:
+    """``npc plan waves [--input FILE]``（默认读 stdin）。
+
+    退出码：0 成功；2 输入不合法（缺 nodes / 非 JSON / 文件不可读）。
+    """
+    data = _read_input(args)
     try:
         out = compute(data)
     except ValueError as e:

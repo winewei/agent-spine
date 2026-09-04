@@ -15,6 +15,14 @@ from . import _io, paths as _paths, state as _state
 
 STALE_THRESHOLD = 3
 
+# 交互档（非 auto）的提前介入阈值。
+#
+# auto 档仍以 STALE_THRESHOLD=3 判 stale（无人可问，多给一轮自愈机会）；
+# 交互档在 rounds_since_strict_decrease >= 2 时即触发 `stale` 决策点让人介入——
+# blocking 连续两轮没有严格下降通常意味着 reviewer / fixer 在同一类不变量上
+# 逐轮零敲碎打（"打地鼠"），第三轮大概率仍不收敛，早一轮把决策权交给人。
+STALE_INTERACTIVE_THRESHOLD = 2
+
 
 def _next_rounds_since_decrease(trend: list[int], new_value: int) -> int:
     """根据新值更新 rounds_since_strict_decrease 计数。

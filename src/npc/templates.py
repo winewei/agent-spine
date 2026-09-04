@@ -12,7 +12,7 @@ v1.0.0 把模板下沉到 CLI 包资源：
   （"请用 Read 读取 X 并执行"），主 session 仅承担 ~150 tokens
 
 模板字段为运行时变量（CHANGE_ID / IMPLEMENT_COMMIT / FIX_ROUND 等）所替换，
-其余结构性内容（双产物契约、RESULT schema、修复规则 A-D）属于"项目级硬契约"，
+其余结构性内容（双产物契约、RESULT schema、修复规则 A / A2 / B-D）属于"项目级硬契约"，
 不暴露为可配置项；如需替换契约，应升 npc 版本而非热改 prompt。
 """
 
@@ -145,6 +145,13 @@ def render_fixer(
 - 范围 = 本次 change diff 涉及的所有文件 + 调用同一 helper / 同一 API contract / 同一不变量的所有上下游。
 - RESULT 行 `categories_scanned=<list>` 列出本轮枚举扫过的 category；fix.summary.md "Locations Scanned" 段列出所有已检查位置（文件:行号），即使没改也要列。
 
+**A2. 不变量类 finding 的全仓枚举**
+
+- 触发条件（满足任一）：finding 的 `category` ∈ {{security, race-condition, validation, spec-compliance, locking, partial-failure, error-handling}}；或 title / detail 用"任何 / 所有 / 不得 / 一律 / never / any / all"陈述了一条跨文件不变量。
+- 修复前**先枚举**该不变量在**整个仓库**的全部落点（范围不限于本 change diff）：先给出枚举方法（如 `rg` 命令：所有日志 sink、所有异常 handler、同一流程的所有入口与路径分支），再列出完整落点清单，然后逐个落点判定"修 / 已正确 / 不适用"。
+- 禁止只修 finding 点名的那一处：reviewer 每轮只报一处不代表只有一处，逐轮补一处即"打地鼠"，视为失败。
+- fix.summary.md 必须写 "Invariant Sweep" 段（格式见下方骨架）；非不变量类 finding 该段写 "None"。
+
 **B. 并发 / 事务 / 锁 / 重试 / 竞态 / 部分失败 类 finding 的真实回归**
 
 - category ∈ {{concurrency, transaction, locking, retry, race-condition, partial-failure}}：mock-only 不够，必须写真实回归测试触发实际代码路径。
@@ -181,6 +188,12 @@ Files Modified: <bulleted list>
   - path/a.py:42 (修)
   - path/b.go:81 (已正确，未改)
 - category=concurrency: ...
+
+## Invariant Sweep
+- 不变量: <一句话，如"所有写入路径在持久化前必须经过同一校验入口">
+  - 枚举方法: <命令或策略，如 rg -n "<入口函数名>" src/ 列出全部调用点>
+  - 落点: path/a.py:31 (修) path/b.py:88 (修) path/c.py:12 (已正确) tests/x.py:5 (不适用)
+<非不变量类 finding 写 "None">
 
 ## Real Regressions（仅并发 / 事务 / 锁 / 重试 / 竞态 / 部分失败 类）
 - tests/test_x.py::test_real_concurrent_write → 启动 8 个真实 goroutine 并发写，断言无丢失

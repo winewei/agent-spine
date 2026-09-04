@@ -386,3 +386,93 @@ def test_events_phase_rotate_emits_telemetry(env_setup, capsys, make_args, isola
     assert len(records) == 1
     assert records[0]["phase"] == "implement"
     assert records[0]["status"] == "done"
+
+
+# ============================================================
+# 打地鼠派生指标（v1.7.1）
+# ============================================================
+
+
+def test_emit_review_round_persists_whack_a_mole_fields(isolate_telemetry: Path, tmp_path: Path):
+    _telemetry.emit_review_round(
+        proj_key="p",
+        run_ts="20260904-101010",
+        change_seq=1,
+        change_id="add-foo",
+        round_n=2,
+        base=tmp_path,
+        ok=True,
+        engine="codex",
+        verdict="changes-requested",
+        blocking_count=2,
+        blocking_categories=["security", "validation"],
+        duration_ms=1234,
+        retry_count=0,
+        outcome_reason=None,
+        state_json=None,
+        run_events=None,
+        high_count=2,
+        repeat_category_ratio=0.5,
+    )
+    rec = list(_telemetry.iter_events())[-1]
+    assert rec["kind"] == "review.round"
+    assert rec["high_count"] == 2
+    assert rec["repeat_category_ratio"] == 0.5
+
+
+def test_emit_review_round_new_fields_default_none(isolate_telemetry: Path, tmp_path: Path):
+    _telemetry.emit_review_round(
+        proj_key="p",
+        run_ts=None,
+        change_seq=1,
+        change_id="add-foo",
+        round_n=0,
+        base=tmp_path,
+        ok=True,
+        engine="codex",
+        verdict="approve",
+        blocking_count=0,
+        blocking_categories=[],
+        duration_ms=1,
+        retry_count=0,
+        outcome_reason=None,
+        state_json=None,
+        run_events=None,
+    )
+    rec = list(_telemetry.iter_events())[-1]
+    assert rec["high_count"] is None
+    assert rec["repeat_category_ratio"] is None
+
+
+def test_aggregate_counts_whack_a_mole_rounds(isolate_telemetry: Path):
+    _seed_events([
+        # 计入：blocking>0 且 ratio >= 0.5
+        {"kind": "review.round", "proj_key": "p", "phase": "review-r1", "round": 1,
+         "status": "done", "duration_ms": 100, "blocking_count": 1,
+         "repeat_category_ratio": 0.5},
+        # 不计入：ratio 0
+        {"kind": "review.round", "proj_key": "p", "phase": "review-r1", "round": 1,
+         "status": "done", "duration_ms": 100, "blocking_count": 1,
+         "repeat_category_ratio": 0.0},
+        # 不计入：blocking 已清零
+        {"kind": "review.round", "proj_key": "p", "phase": "review-r1", "round": 1,
+         "status": "done", "duration_ms": 100, "blocking_count": 0,
+         "repeat_category_ratio": 1.0},
+        # 不计入：老记录缺字段
+        {"kind": "review.round", "proj_key": "p", "phase": "review-r1", "round": 1,
+         "status": "done", "duration_ms": 100, "blocking_count": 3},
+    ])
+    out = _telemetry.aggregate(_telemetry.iter_events(), by="phase")
+    assert out["review-r1"]["review_rounds"] == 4
+    assert out["review-r1"]["whack_a_mole_rounds"] == 1
+
+
+def test_hotspots_exposes_whack_a_mole_rounds(isolate_telemetry: Path):
+    _seed_events([
+        {"kind": "review.round", "proj_key": "p", "phase": "review-r2", "round": 2,
+         "status": "done", "duration_ms": 5000, "blocking_count": 2,
+         "repeat_category_ratio": 1.0},
+    ])
+    hs = _telemetry.hotspots(_telemetry.iter_events(), top=5)
+    row = next(h for h in hs if h["phase"] == "review-r2")
+    assert row["whack_a_mole_rounds"] == 1

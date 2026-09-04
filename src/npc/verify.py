@@ -131,6 +131,71 @@ def _tail(stdout: str, stderr: str, lines: int = TAIL_LINES) -> str:
     return "\n".join(rows[-lines:])
 
 
+# pytest short summary（-q 默认 -rfE）/ go test 的失败行；行首匹配，避免误吞日志正文。
+_PYTEST_FAILED_RE = re.compile(r"^(?:FAILED|ERROR)\s+(\S+)")
+_GO_TEST_FAIL_RE = re.compile(r"^\s*---\s+FAIL:\s+(\S+)")
+# go test 的包级汇总行：`FAIL\t<pkg>\t0.12s` / `FAIL\t<pkg> [build failed]`
+_GO_PKG_FAIL_RE = re.compile(r"^FAIL\s+(\S+)")
+
+
+def parse_failed_ids(stdout: str, stderr: str = "") -> set[str]:
+    """从测试输出抽取失败用例 id 集合（pytest ``FAILED path::name`` / go ``--- FAIL: Name``）。
+
+    参数化 id 的 ``[...]`` 保留，保证同一用例不同参数分别计数。
+    go 的用例名只在包内唯一，``--- FAIL: TestX`` 之后紧跟的 ``FAIL <pkg>`` 汇总行
+    给出所属包，id 记为 ``<pkg>::TestX``；找不到汇总行的孤儿名保持裸名。
+    抽不出任何 id 返回空集——调用方须结合 exit code 判定，不可把空集当"全绿"。
+    """
+    combined = (stdout or "") + "\n" + (stderr or "")
+    ids: set[str] = set()
+    pending_go: list[str] = []
+    for line in combined.splitlines():
+        m = _PYTEST_FAILED_RE.match(line)
+        if m:
+            ids.add(m.group(1))
+            continue
+        m = _GO_TEST_FAIL_RE.match(line)
+        if m:
+            pending_go.append(m.group(1))
+            continue
+        m = _GO_PKG_FAIL_RE.match(line)
+        if m and pending_go:
+            pkg = m.group(1)
+            ids.update(f"{pkg}::{name}" for name in pending_go)
+            pending_go = []
+    ids.update(pending_go)
+    return ids
+
+
+def run_test_cmd(repo_root: Path, cmd: str, runner=subprocess.run) -> subprocess.CompletedProcess:
+    """以 shlex.split + shell=False 在 repo_root 执行测试命令（杜绝注入）。"""
+    return runner(
+        shlex.split(cmd), shell=False, cwd=str(repo_root), capture_output=True, text=True,
+    )
+
+
+def judge_against_baseline(
+    proc: subprocess.CompletedProcess, baseline_failed: set[str] | None,
+) -> dict:
+    """diff 模式判定。
+
+    返回 ``{"passed": bool, "mode": "strict|diff", "failed": int, "new_failures": [...]}``。
+    ``baseline_failed`` 为 None 即 strict（exit 0 才通过）。diff 模式下：exit 0 直接通过；
+    否则抽取失败集合，抽不出 id（非 pytest/go 输出、或崩溃在收集阶段）视为失败，
+    抽得出则要求 ``failed ⊆ baseline``。
+    """
+    if baseline_failed is None:
+        return {"passed": proc.returncode == 0, "mode": "strict", "failed": None, "new_failures": []}
+    if proc.returncode == 0:
+        return {"passed": True, "mode": "diff", "failed": 0, "new_failures": []}
+    failed = parse_failed_ids(proc.stdout or "", proc.stderr or "")
+    if not failed:
+        return {"passed": False, "mode": "diff", "failed": None, "new_failures": [],
+                "reason": "unparseable-failures"}
+    new = sorted(failed - baseline_failed)
+    return {"passed": not new, "mode": "diff", "failed": len(failed), "new_failures": new}
+
+
 def run_tests(args: argparse.Namespace, runner=subprocess.run) -> None:
     """``npc verify tests``：在 repo_root 真实复跑测试命令。
 

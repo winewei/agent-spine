@@ -78,6 +78,17 @@
       "type": ["array", "null"],
       "items": {"type": "string"}
     },
+    "high_count": {
+      "type": ["integer", "null"],
+      "minimum": 0,
+      "description": "review.round：本轮 in_scope 且 severity ∈ {critical, high} 的 finding 数"
+    },
+    "repeat_category_ratio": {
+      "type": ["number", "null"],
+      "minimum": 0,
+      "maximum": 1,
+      "description": "review.round：本轮 blocking categories 中出现在上一轮 blocking categories 里的比例；上一轮不存在或不可解析时为 null。blocking_count > 0 且该值 >= 0.5 计入 aggregate 的 whack_a_mole_rounds"
+    },
     "round": {
       "type": ["integer", "null"],
       "minimum": 0
