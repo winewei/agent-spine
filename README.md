@@ -48,7 +48,7 @@ npc playbook install --host codex     # Codex CLI: ~/.codex/prompts/
 npc playbook install --dest <DIR>     # any other host: flat files, mount yourself
 ```
 
-To upgrade, rerun the same two commands. For local development, install from a checkout instead: `uv tool install --force --from . npc` at the repo root.
+To upgrade, rerun the same two commands, pinning a release tag: `uv tool install --reinstall --from git+https://github.com/winewei/agent-spine@v<version> npc`. Do **not** install the global `npc` from a local checkout (`--from .`): work-in-progress code would leak into the CLI you rely on day to day. For development, run the checkout in place with `uv run npc ...`; `npc doctor` flags a local-directory install as `install-source: warn`.
 
 Then, inside a git project that has an `openspec/` directory:
 

@@ -48,7 +48,7 @@ npc playbook install --host codex     # Codex CLI：~/.codex/prompts/
 npc playbook install --dest <DIR>     # 其它宿主：平铺到任意目录，自行挂载
 ```
 
-升级即重跑同样两条命令。本地开发时改为在仓库根从 checkout 安装：`uv tool install --force --from . npc`。
+升级即重跑同样两条命令，并钉到发布 tag：`uv tool install --reinstall --from git+https://github.com/winewei/agent-spine@v<版本> npc`。**不要**用本地 checkout 安装全局 `npc`（`--from .`）——开发中的代码会影响本机日常在用的 CLI。开发期验证在仓库内用 `uv run npc ...`；`npc doctor` 会把本地目录安装标为 `install-source: warn`。
 
 然后在一个带 `openspec/` 目录的 git 工程内：
 

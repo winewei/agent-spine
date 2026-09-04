@@ -52,7 +52,7 @@ coder 后端由 npc 按配置决定（`npc implement/fix run` 内部 resolve）�
 ## Step 0 — 前置检查（缺依赖立即停）
 
 ```bash
-npc --version                              # 缺 → 提示 `uv tool install --force --from . npc`（在 agent-spine 仓库根，npc 内置 src/npc）并停止
+npc --version                              # 缺 → 提示 `uv tool install --reinstall --from git+https://github.com/winewei/agent-spine@v<版本> npc` 并停止
 git rev-parse --show-toplevel >/dev/null   # 非 git 仓库 → 停止
 command -v openspec >/dev/null              # 缺 → 提示装 openspec CLI 并停止
 command -v codex >/dev/null || echo "[warn] 缺 codex；若 .npc/config.toml 未切 claude 引擎，review 会失败"

@@ -172,5 +172,5 @@ npc cost --since "$RUN_T0"
 - 不为了填满槽位而 spawn `npc plan ready` 判为 `blocked` 的 change——尤其带 `dep-pending` 的：其 worktree 基线不含依赖代码，implement 必然写在错误前提上。槽位空着是正确状态，`limit` 与 `file-conflict` 同理。
 - 调度集合只信 `npc plan ready` 的返回，不凭 `v4-waves.json` 的波号自行判断"这波该开了"。
 - 后台 `change run` 在跑时不调 `npc integrate`（RESULT 入 `PENDING` 等内环结束）；收到 `step=inner-loop-active` 只入队，不 `--force`。
-- skill 行为与 npc 不符 → 修 npc（`src/npc`）并 `uv tool install --force --from . npc` 重装，不在 skill 内补脚本。
+- skill 行为与 npc 不符 → 修 npc（`src/npc`）、发布后从 tag 重装（`uv tool install --reinstall --from git+https://github.com/winewei/agent-spine@v<版本> npc`），不在 skill 内补脚本；不要用 `--from .` 本地目录安装。
 - commit 禁 AI 署名 trailer；禁 `--no-verify`。

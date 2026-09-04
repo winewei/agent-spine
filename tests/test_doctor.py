@@ -714,7 +714,8 @@ def _git_runner(*, branch: str, sha: str = "abc1234", ancestor: bool):
     return _run
 
 
-def test_install_source_local_main_consistent_ok(tmp_path: Path, monkeypatch):
+def test_install_source_local_even_on_main_warns(tmp_path: Path, monkeypatch):
+    """本地目录安装即便在 main 且版本一致也必须 warn——开发中的代码不得影响本机 CLI。"""
     src = _local_src(tmp_path, "1.7.1")
     _fake_dist(monkeypatch, "1.7.1", json.dumps({"url": f"file://{src}"}))
 
@@ -722,9 +723,13 @@ def test_install_source_local_main_consistent_ok(tmp_path: Path, monkeypatch):
         which=_which_factory({"git"}), run=_git_runner(branch="main", ancestor=True)
     )
     assert c["name"] == "install-source"
-    assert c["status"] == "ok"
+    assert c["status"] == "warn"
     assert c["required"] is False
-    assert str(src) in c["detail"] and "1.7.1" in c["detail"]
+    assert "本地目录安装" in c["detail"]
+    assert str(src) in c["detail"] and "main abc1234" in c["detail"]
+    assert "未合入 main" not in c["detail"]
+    assert "git+https://github.com/winewei/agent-spine@v<版本>" in c["detail"]
+    assert "uv run npc" in c["detail"]
 
 
 def test_install_source_local_unmerged_branch_warn(tmp_path: Path, monkeypatch):
@@ -736,7 +741,7 @@ def test_install_source_local_unmerged_branch_warn(tmp_path: Path, monkeypatch):
         run=_git_runner(branch="release/v1.7.1", sha="3ba17c6", ancestor=False),
     )
     assert c["status"] == "warn"
-    assert "release/v1.7.1" in c["detail"]
+    assert "release/v1.7.1 3ba17c6" in c["detail"]
     assert "未合入 main" in c["detail"]
 
 
@@ -748,7 +753,7 @@ def test_install_source_version_mismatch_warn(tmp_path: Path, monkeypatch):
         which=_which_factory({"git"}), run=_git_runner(branch="main", ancestor=True)
     )
     assert c["status"] == "warn"
-    assert "1.7.1" in c["detail"] and "1.8.0" in c["detail"]
+    assert "已安装 1.7.1" in c["detail"] and "源码版本 1.8.0 与已安装不一致" in c["detail"]
 
 
 def test_install_source_no_direct_url_warn(monkeypatch):
@@ -768,8 +773,8 @@ def test_install_source_remote_vcs_ok(monkeypatch):
         "1.7.1",
         json.dumps(
             {
-                "url": "git+https://github.com/winewei/claude_tools",
-                "vcs_info": {"vcs": "git", "commit_id": "0123456789abcdef"},
+                "url": "https://github.com/winewei/agent-spine",
+                "vcs_info": {"vcs": "git", "commit_id": "0123456789abcdef", "requested_revision": "v1.7.1"},
             }
         ),
     )
@@ -801,4 +806,5 @@ def test_install_source_registered_in_gather_checks(tmp_path: Path, monkeypatch)
         home=_make_home(tmp_path), repo_root=_make_repo(tmp_path), which=_which_factory(ALL_BINS)
     )
     c = next(c for c in checks if c["name"] == "install-source")
-    assert c["status"] == "ok"
+    assert c["status"] == "warn"
+    assert c["required"] is False

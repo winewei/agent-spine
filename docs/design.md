@@ -167,13 +167,14 @@ cd agent-spine
 uv sync
 uv run npc --help
 
-# 全局安装（CLI 入口 npc 进 PATH；包名 npc，从本地 clone 安装）
-uv tool install --force --from . npc
+# 全局安装（CLI 入口 npc 进 PATH；只从 GitHub 发布 tag 安装）
+uv tool install --reinstall --from git+https://github.com/winewei/agent-spine@v<版本> npc
 npc --help
 
-# 升级（重跑同一条安装命令即可）
-uv tool install --force --from . npc
+# 升级：换 tag 重跑同一条命令
 ```
+
+**不要**用 `uv tool install --from .` 从本地 checkout 安装全局 `npc`：开发中的代码会影响本机日常在用的 CLI（`npc doctor` 的 `install-source` 项会对本地目录安装报 warn）。开发期验证一律 `uv run npc ...`。发布流程：PR 合入 main → tag 打在合并提交上 → GitHub release → 从 tag 重装。
 
 skill.md v2 在顶部用 `npc --version` 检查版本兼容性。
 
