@@ -314,11 +314,19 @@ def _source_version(src: Path) -> str | None:
     return m.group(1) if m else None
 
 
-def _check_install_source(*, which, run=subprocess.run) -> dict:
-    """安装来源体检：本地 checkout 安装是否来自已合入 main 的源码、版本是否一致。
+RELEASE_INSTALL_HINT = (
+    "请改用发布 tag 安装：uv tool install --reinstall "
+    "--from git+https://github.com/winewei/agent-spine@v<版本> npc；开发期验证用仓库内 uv run npc"
+)
 
-    动机：`uv tool install --from <本地路径>` 会把未合并分支的构建物装到全局，
-    此后 doctor 报告的能力与仓库 main 不一致（"机器上能跑但仓库里没有"）。
+
+def _check_install_source(*, which, run=subprocess.run) -> dict:
+    """安装来源体检：本机在用的 npc 必须来自 GitHub 发布 tag，不得装自本地 checkout。
+
+    动机：`uv tool install --from <本地路径>` 把开发目录的构建物装到全局——开发中的改动
+    （含未合并分支）直接影响本机日常在用的 CLI，且 doctor 报告的能力与仓库 main 可能不一致。
+    因此 ``file://`` 来源一律 ``warn``，detail 附源码分支 / sha / 版本对照供诊断；
+    远程 VCS 安装为 ``ok``。
     """
     try:
         dist = importlib.metadata.distribution("npc")
@@ -339,39 +347,35 @@ def _check_install_source(*, which, run=subprocess.run) -> dict:
     if not url.startswith("file://"):
         vcs = info.get("vcs_info") or {}
         commit = (vcs.get("commit_id") or "")[:7]
+        rev = vcs.get("requested_revision")
         suffix = f" @ {commit}" if commit else ""
-        return _install_check("ok", f"远程安装：{url}{suffix}（已安装 {installed_version}）")
+        if rev:
+            suffix += f"（{rev}）"
+        return _install_check("ok", f"远程安装：{url}{suffix}，已安装 {installed_version}")
 
     src = Path(unquote(url[len("file://"):]))
+    facts: list[str] = [f"已安装 {installed_version}"]
     if not src.is_dir():
-        return _install_check("warn", f"本地安装源码目录已不存在：{src}；无法校验与 main 的一致性")
-    if which("git") is None:
-        return _install_check("warn", f"本地安装：{src}；PATH 中无 git，无法校验分支与 main 的关系")
-
-    branch = _git_out(src, "rev-parse", "--abbrev-ref", "HEAD", run=run)
-    sha = _git_out(src, "rev-parse", "--short", "HEAD", run=run)
-    if branch is None or sha is None:
-        return _install_check("warn", f"本地安装：{src}；git 信息不可读（非 git 仓库或命令失败）")
-
-    on_main = _git_ok(src, "merge-base", "--is-ancestor", "HEAD", "origin/main", run=run) or _git_ok(
-        src, "merge-base", "--is-ancestor", "HEAD", "main", run=run
-    )
-    if branch != "main" or not on_main:
-        return _install_check(
-            "warn",
-            f"已安装 {installed_version} 构建自 {src} 分支 {branch}"
-            f"（{sha}，未合入 main）——请先合并再用于生产",
-        )
-
-    src_version = _source_version(src)
-    if src_version is not None and src_version != installed_version:
-        return _install_check(
-            "warn",
-            f"版本不一致：已安装 {installed_version}，源码 {src} 为 {src_version}"
-            f"（{branch} {sha}）；运行 uv tool install --reinstall 重装",
-        )
+        facts.append(f"源码目录已不存在：{src}")
+    elif which("git") is None:
+        facts.append(f"源码 {src}（PATH 中无 git，无法读分支）")
+    else:
+        branch = _git_out(src, "rev-parse", "--abbrev-ref", "HEAD", run=run)
+        sha = _git_out(src, "rev-parse", "--short", "HEAD", run=run)
+        if branch is None or sha is None:
+            facts.append(f"源码 {src}（git 信息不可读）")
+        else:
+            on_main = _git_ok(
+                src, "merge-base", "--is-ancestor", "HEAD", "origin/main", run=run
+            ) or _git_ok(src, "merge-base", "--is-ancestor", "HEAD", "main", run=run)
+            facts.append(
+                f"源码 {src} @ {branch} {sha}" + ("" if on_main else "，未合入 main")
+            )
+        src_version = _source_version(src)
+        if src_version is not None and src_version != installed_version:
+            facts.append(f"源码版本 {src_version} 与已安装不一致")
     return _install_check(
-        "ok", f"本地安装：{src} @ {branch} {sha}，版本一致 ({installed_version})"
+        "warn", "本地目录安装（开发中的代码会影响本机 CLI）：" + "；".join(facts) + "。" + RELEASE_INSTALL_HINT
     )
 
 

@@ -34,7 +34,7 @@ tags: [openspec, plan, implement, v2]
 主 session 单次 sub-agent 调用注意力开销：~150 tokens（spawn-prompt 引导语）+ ~250 tokens（render / record / timeout-budget JSON）≈ **400 tokens**。
 
 **前置条件**
-- 已安装 `npc` CLI：在 agent-spine 仓库根执行 `uv tool install --force --from . npc`，`npc --version` 输出 **1.4.0+**
+- 已安装 `npc` CLI：`uv tool install --reinstall --from git+https://github.com/winewei/agent-spine@v<版本> npc`（不要用本地 checkout `--from .` 安装），`npc --version` 输出 **1.4.0+**
 - SessionStart hook 已装；未装时 npc 退化为 mtime 启发，不阻塞
 - 在 git 仓库内运行；`openspec` 工具可用
 
