@@ -108,6 +108,22 @@ npc verify routing
 
 review 恒走 premium 引擎（codex / claude），不受此配置影响——廉价层只许执行，`npc verify routing` 强制。
 
+## 让 harness 记住教训：经验层（v1.8，可选）
+
+批次里每个 change 的 coder 都是全新起点，反复重新发现同一环境事实、反复吃同一类 review finding。经验层把已归档且 review 通过的 change 轨迹提交到本机 OpenViking 抽取为规则，下一个 change 的 coder prompt 自动带上最相关的 2–3 条。默认关闭，不碰 review 闸门，server 不在时无操作。
+
+```bash
+# 机器级一次：安装并运行 OpenViking（步骤见 docs/experience.md）
+# 项目级：<repo>/.npc/config.toml
+#   [experience]
+#   enabled = true
+#   extraction_model_declared = "gpt-5.4"
+npc experience doctor        # 连通性 / agent_evolution / 经验计数
+npc experience status        # 之后每个 change 归档自动提交、下个 change 自动注入，这里看结果
+```
+
+它解决什么、带来什么、成本边界、如何 A/B 衡量，见 [experience.md](experience.md)。
+
 ## Meta-loop 定时化（v1.5，P8）
 
 design.md §11.6 第二阶段的落地方式：**定时自动跑 `/spine-analyze`，人闸不动（只产提案、不改代码）**。它把"人记得去跑分析"这个易失步骤自动化——telemetry 指标一直在积累，但没人看等于没有。

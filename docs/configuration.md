@@ -130,6 +130,38 @@ session_dir = ".kimi/sessions/{proj_key}"  # 可选：相对 home 的 session �
 
 ---
 
+## 经验层配置（`[experience]`，v1.8，可选）
+
+把已归档且 review 通过的 change 轨迹提交到本机 OpenViking 抽取为可复用规则，并在下一个 change 的 implement / fix prompt 注入最相关的几条。**默认关闭**；启用前先按 [experience.md](experience.md) 安装并运行 OpenViking。这是旁路增强：server 不可用只会让 prompt 少一段，任何 phase 都不会因它失败。
+
+```toml
+[experience]
+enabled = true
+extraction_model_declared = "gpt-5.4"   # 与 OpenViking ov.conf 的 vlm.model 一致，doctor 用于比对
+# 以下均有默认值，通常不需要写
+# env_file = "~/.openviking/npc-client.env"   # 用户 key 所在 env 文件（OPENVIKING_BASE_URL / OPENVIKING_API_KEY ...）
+# root_env_file = "~/.openviking/root.env"    # root key（仅 doctor 查 agent_evolution 开关）
+# timeout_recall_ms = 3000                    # 召回超时；超时即无注入
+# timeout_commit_ms = 5000                    # 提交超时
+# inject_max_tokens_implement = 800           # implement prompt 注入预算
+# inject_max_tokens_fix = 600                 # fix prompt 注入预算
+# score_threshold = 0.35                      # 召回相关度阈值
+# quota_experiences = 3                       # 最多召回条数
+# write_gate = "verified"                     # verified：archived ∧ review blocking==0 ∧ 非 force-archive ∧ 未污染；any：仅 archived
+```
+
+| 字段 | 说明 |
+|---|---|
+| `enabled` | 总开关。关闭时 prompt 与 1.7 逐字节一致，不发任何网络请求 |
+| `env_file` / `root_env_file` | `KEY=VALUE` 行的凭据文件，`chmod 600`，不入 git。用户 key 走数据 API；root key 只能访问管理面 |
+| `write_gate` | 哪些 change 的轨迹有资格成为经验。`verified` 是不变量 1 的要求：只回收独立 review 通过的轨迹 |
+| `inject_max_tokens_*` | 注入预算。服务端按预算分档，npc 对非全文档按 uri 读全文后本地按相关度整条裁剪；800 约容纳 2 条完整规则 |
+| `extraction_model_declared` | 人工声明抽取模型档位（抽取属"分析"，不应低于 coder），`npc experience doctor` 缺失即 warn |
+
+验证与观测：`npc experience doctor`（连通性 / agent_evolution / 经验计数）、`npc experience status`（各 change 的提交与注入情况）、`npc experience recall --phase implement --seq N`（预览某 change 会注入什么）。
+
+---
+
 ## 常见报错对照
 
 | 现象 | 原因 | 处理 |
