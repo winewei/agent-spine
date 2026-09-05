@@ -916,3 +916,43 @@ def test_recall_upgrades_non_full_tier_via_content_read(monkeypatch):
     assert by_uri[EXP_URI2]["text"] == "摘要乙" and by_uri[EXP_URI2]["detail"] == "overview"
     # full 档不再额外请求
     assert sum(1 for u in seen if "/content/read" in u) == 2
+
+
+# ============================================================
+# 出网前脱敏
+# ============================================================
+
+
+def test_redact_secrets_common_shapes():
+    text = (
+        "配置 api_key = sk-abcdefghijklmnopqrstuvwxyz1234 后重试；"
+        "GitHub token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ab；"
+        "AWS AKIAABCDEFGHIJKLMNOP；"
+        "jwt eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c；"
+        "Authorization: Bearer abcdefgh12345678；password=Sup3rSecret!x；"
+        "-----BEGIN PRIVATE KEY-----\nMIIE\n-----END PRIVATE KEY-----\n"
+        "正常句子：timeout=30 的默认值保留。"
+    )
+    out = _exp.redact_secrets(text)
+    for leaked in ("sk-abcdefghij", "ghp_ABCDEFGH", "AKIAABCDEFGHIJKLMNOP", "eyJhbGciOi", "Sup3rSecret", "MIIE", "abcdefgh12345678"):
+        assert leaked not in out, leaked
+    assert "<redacted>" in out
+    assert "timeout=30" in out and "正常句子" in out
+    assert _exp.redact_secrets(out) == out  # 幂等
+    assert _exp.redact_secrets("") == ""
+
+
+def test_build_messages_redacts_every_segment(tmp_path: Path):
+    base = tmp_path / "base"; base.mkdir()
+    (base / "implement.summary.md").write_text(
+        "# S\n\n## Key Decisions\n- 用 api_key=sk-zzzzzzzzzzzzzzzzzzzzzzzz 调上游\n\n## Issues Encountered\n- 无\n",
+        encoding="utf-8",
+    )
+    (base / "round-0.review.json").write_text(json.dumps({"verdict": "changes-requested", "findings": [
+        {"id": "F1", "severity": "high", "category": "security", "title": "日志打出了 token=ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ab", "file": "a.py", "line_range": "1", "detail": "d", "recommendation": "r", "in_scope": True}
+    ]}), encoding="utf-8")
+    entry = {"status": "archived", "blocking_trend": [1, 0], "total_rounds": 1}
+    msgs = _exp.build_messages("chg", "proj", base, entry)
+    joined = "\n".join(m["content"] for m in msgs)
+    assert "sk-zzzz" not in joined and "ghp_ABCDEFGH" not in joined
+    assert "<redacted>" in joined

@@ -6,8 +6,8 @@
 
 harness 跑一个多 change 的批次时，每个 change 由一个全新的 coder sub-agent 实施——它对前面的 change 一无所知。于是同一个仓库里反复出现同一类事：
 
-- **重复摸索环境事实**：第 3、5、6 个 change 各自重新发现"全量测试有既有失败，要用改动前后失败集合 diff 判零回归"；各自重新踩同一个驱动 / 框架的类型陷阱。每次 5–10 分钟，随 change 数 × 陷阱数增长。
-- **重复吃同一类 review finding**：某类不变量（"所有包装异常必须保留原始异常链"、"所有配置入口必须过同一校验"）在第 1 个 change 被 review 抓出并修好，第 4 个 change 的 coder 照样再犯一次，再修一轮。实测批次里 review round-0 的 findings 有六成集中在少数几个复发类别；fix + review 约占 agent 时间四成。
+- **重复摸索环境事实**：同一批次里多个 change 的 coder 各自重新发现同一件事——例如"全量测试本来就有既有失败，得用改动前后失败集合的差集判零回归"，或者同一个驱动 / 框架的类型陷阱。每个 change 为此多花几分钟到十几分钟，总量随 change 数 × 陷阱数增长。
+- **重复吃同一类 review finding**：某条跨文件不变量（"所有包装异常必须保留原始异常链"、"所有配置入口必须过同一校验"）在前一个 change 被 review 抓出并修好，后一个 change 的 coder 照样再犯，再多修一轮。批次里 review 首轮 findings 往往集中在少数几个复发类别；fix + review 通常是批次中第二大的时间消耗（第一大是实施本身，而那部分压不掉）。
 
 npc 每个 change 其实都把这些教训写在了 `~/task_log/…/implement.summary.md`（Key Decisions / Issues Encountered）和 `round-N.review.json`（独立 reviewer 的 findings）里——**只是从来没有人读它**。经验层做的事就一句话：**把已归档 change 的轨迹蒸馏成可复用规则，在下一个 change 的 coder prompt 里带上。**
 
@@ -18,7 +18,7 @@ npc 每个 change 其实都把这些教训写在了 `~/task_log/…/implement.su
 | change 归档且 review 通过后，其轨迹自动提交到 OpenViking 抽取为 experiences（Situation / Approach / Reflect 三段规则） | **不影响任何闸门**：archive 仍只认 review `blocking == 0`；OpenViking 挂了、慢了、没配，流程照跑，只是 prompt 里少一段 |
 | 下一个 change 的 implement / fix prompt 里多一段「历史经验（外部召回，非本 change 的规格）」，≤ 800 tokens，2–3 条与本任务最相关的规则 | **不进 review**：reviewer 永远看不到经验。经验只帮 coder 少犯错，验证仍然独立（否则 blocking 下降就成了测量假象） |
 | 每条注入都落盘（`<base>/implement.experience.json` / `.md`），可回放、可审计；coder 若把经验原文抄进 summary，该 change 的轨迹不会被回收为经验（切断自激环） | **不自动改任何东西**：经验的增删由人审（`npc experience status`、`ov ls` / `ov rm`）；npc 不回写、不删除 |
-| `npc experience doctor` / `status` 让你不学 OpenViking 也能看到经验层在做什么 | **不上传代码**：只提交 summary 的三个段、findings 的 title / category / severity / file、fix summary 的三个段；不提交 diff、代码正文、事件流、prompt 原文 |
+| `npc experience doctor` / `status` 让你不学 OpenViking 也能看到经验层在做什么 | **不上传代码，且出网前脱敏**：只提交 summary 的三个段、findings 的 title / category / severity / file、fix summary 的三个段；不提交 diff、代码正文、事件流、prompt 原文。每段出网前再过一遍凭据模式脱敏（厂商 token 前缀、云 access key、JWT、PEM 私钥、Bearer、`api_key= / token= / password=` 赋值），替换为 `<redacted>`——coder 把密钥抄进 summary 也不会被提交 |
 
 预期收益的诚实说法：它压缩的是"重复踩坑"和"同类 finding 复发"这两块，工程语境下无法给出干净的百分比——唯一可信的度量是**某类 finding 在对应经验写入后的复发率是否下降**，以及 `total_rounds` 分布是否左移。建议按 §5 做 A/B 再决定是否长期开启。
 

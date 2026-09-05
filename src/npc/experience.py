@@ -517,7 +517,48 @@ def build_messages(
             ),
         }
     )
+    # 白名单只限定"提交哪些段"，挡不住 coder 把 token / 私钥抄进 summary 正文；
+    # 出网前对每段做一次模式脱敏（含 CaseSpec 里的 proposal 摘要与 findings 标题）。
+    for m in messages:
+        m["content"] = redact_secrets(m["content"])
     return messages
+
+
+# 常见凭据形态：厂商前缀 token、云 access key、JWT、PEM 私钥、以及 `key=value` 形式的
+# 通用赋值（api_key / token / secret / password 后跟 ≥ 8 位非空白）。宁可多打码，
+# 经验抽取只需要"发生了什么、怎么处理"，不需要具体值。
+_SECRET_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("pem", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.DOTALL)),
+    ("jwt", re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b")),
+    ("aws", re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")),
+    ("vendor", re.compile(
+        r"\b(?:sk-(?:ant-|proj-|live-|test-)?[A-Za-z0-9_-]{16,}"
+        r"|ghp_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}"
+        r"|gh[ousr]_[A-Za-z0-9]{30,}"
+        r"|xox[abprs]-[A-Za-z0-9-]{10,}"
+        r"|AIza[0-9A-Za-z_-]{30,}"
+        r"|ovk_[A-Za-z0-9_-]{16,})"
+    )),
+    ("bearer", re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}")),
+    ("assignment", re.compile(
+        r"(?i)\b((?:api[_-]?key|access[_-]?key|secret(?:[_-]?key)?|token|passw(?:or)?d|authorization|bearer)"
+        r"\s*[:=]\s*[\"']?)([^\s\"'`,;]{8,})"
+    )),
+)
+REDACTED = "<redacted>"
+
+
+def redact_secrets(text: str) -> str:
+    """把常见凭据形态替换为 ``<redacted>``；不改动其它内容。幂等。"""
+    if not text:
+        return text
+    out = text
+    for name, pat in _SECRET_PATTERNS:
+        if name == "assignment":
+            out = pat.sub(lambda m: m.group(1) + REDACTED, out)
+        else:
+            out = pat.sub(REDACTED, out)
+    return out
 
 
 def write_gate_ok(entry: dict, mode: str) -> tuple[bool, str]:
