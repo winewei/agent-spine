@@ -65,8 +65,8 @@ tags: [harness, autonomous, orchestration, openspec, parallel, worktree, review-
 
 ## Step 0 — 前置检查（缺依赖立即停）
 
-- `npc --version` ≥ 1.5.0；缺 → 提示从发布 tag 安装（`uv tool install --reinstall --from git+https://github.com/winewei/agent-spine@v<版本> npc`）并停止；开发期验证用仓库内 `uv run npc`，不要用 `--from .` 本地目录安装
-- `npc doctor` 通过；缺 codex → 跳 review，记降级项、不阻塞
+- `npc --version` ≥ 1.8.0；缺或版本过低 → 提示从发布 tag 安装（`uv tool install --reinstall --from git+https://github.com/winewei/agent-spine@v<版本> npc`）并停止；开发期验证用仓库内 `uv run npc`，不要用 `--from .` 本地目录安装
+- `npc doctor` 通过；配置的 review engine 及其可执行程序/凭据必须可用（默认 codex）。缺失时在初始化前停止并提示安装或配置可用的 reviewer；不能声明“跳 review”后仍调用 `change run --from review`，也不能静默免审归档。
 - 经验层（可选，1.8）：`npc doctor` 的 `experience` 项为 warn 时只记一行降级、不阻塞——它是旁路增强。项目 `[experience].enabled=true` 时 `npc agent prompt render` 自动召回注入、`npc archive run` 自动提交轨迹，本 playbook 不需要额外步骤；主 session 只看回执里的 `experience_injected` / `experience.ok` 标量，不读经验正文，也绝不把经验给 review
 - `openspec` 可用（`openspec list --json` 是计划入口）
 - git 仓库且工作树 clean
