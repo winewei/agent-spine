@@ -81,11 +81,31 @@ tags: [harness, autonomous, orchestration, openspec, parallel, worktree, review-
 ## Step 1 — 初始化 / 重定向
 
 ```bash
-INIT=$(npc init ${AUTO:+--auto} ${FRESH:+--fresh})   # run_ts / needs_resume / state_drift 看这里
+INIT=$(npc init ${AUTO:+--auto} ${FRESH:+--fresh}) || exit $?
+RUN_DIR=$(printf '%s\n' "$INIT" | jq -er '.run_dir') || exit 1
+RUN_TS=$(printf '%s\n' "$INIT" | jq -er '.run_ts') || exit 1
+STATE_JSON=$(printf '%s\n' "$INIT" | jq -er '.state_json') || exit 1
+RUN_T0=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+if [ -f "$STATE_JSON" ]; then
+  RUN_T0=$(jq -er '.started_at' "$STATE_JSON") || exit 1
+fi
+export RUN_DIR RUN_TS STATE_JSON RUN_T0
 ```
 
 - `state_drift.total_drifted > 0` → `npc state repair --auto`。
-- `needs_resume=true`、经历过 context compaction、或接手他人 session → 先跑 `npc status --brief`，以其 `pending_decisions / notes / next_action` 重建盘面，不信任记忆里的进度；再 `npc resume detect` 取 `next_seq / next_phase / next_change_id / current_round`，跳过 Step 2 直接从断点进 Step 3（交互档先把断点摘要给用户确认再续）。
+- `needs_resume=true`、经历过 context compaction、或接手他人 session → 先执行下方“恢复闸门”，完成后才可跳过 Step 2 进入 Step 3；`npc resume detect` 的单个 `next_phase` 不能代表并行盘面。
+- 上述变量必须保留给后续 shell 调用；宿主每次调用使用独立 shell 时，从已保存的 `$RUN_DIR/run.json` 重新读取路径变量并 export，不能假定前一调用的 shell 变量仍存在。恢复时禁止使用 `--fresh`。
+
+### 恢复闸门（禁止先清空集合）
+
+先暂停所有新派发和 main 写入，读取 `npc status --brief`、完整 `$STATE_JSON`、`$RUN_DIR/scheduler.json`（若存在）和 run.events.jsonl，并重新加载原 DAG 与 v4-waves.json。`npc resume detect` 只供每个 change 的 phase 定位参考，不能据此直接跳进空盘面。
+
+1. 按 state 的 `plan_order` 恢复全部 NODES 和稳定的 SEQ；逐项核对 progress、事件与宿主任务清单。checkpoint 只是提示，可能比最后一次副作用旧，不能直接信任。
+2. archived/skipped/failed 进入 FINISHED。DONE 只收录有成功 `integrate.done` 事件且对应代码仍在当前主分支上的 change（或串行 headless 路径已验证的 implement 成功）；后续 revert/失败撤销该证据。**单独的 `implement.status=done` 不足以证明 integrate 成功**，因为测试失败前就可能写过它。
+3. 通过保存的任务句柄核对 implementer：仍活着 → ACTIVE；已返回且 RESULT/manifest/worktree commit 可核验 → PENDING，并保存完整收据。未知状态仍占 ACTIVE 排除位，先重新连接或明确终止原任务并确认退出，检查工作区和产物后才可决定重试；绝不把“失去连接”当成“未启动”。没有 checkpoint 的旧 run 也必须逐一检查已有 progress、worktree、manifest 和宿主任务，不能默认 ACTIVE/PENDING 为空。
+4. DONE 中尚未终态的 change 进入 INNER；核对已有 `change run` 的任务句柄、输出文件与 `.main.lock`。仍在运行则重新接管并等待，不另起内环；已退出则读取 JSON 回执并以 state 更新终态/待决策项。锁持有者未退出前不得整合或启动第二个内环，不能用 `--force` 绕过。
+5. 已开始但无法证明整合成功的 change 必须先核对 commit、测试结果和失败/revert 事件，必要时回滚或完成验证；在此之前保留在 ACTIVE/PENDING 排除集中。缺失/损坏 DAG 时先按原 NODES 重建并审核依赖；任何任务归属或代码状态无法核实就停在恢复闸门说明阻塞，auto 档也不能猜测重派。
+6. 核对五个集合覆盖所有已开始的 change，恢复 RESULT/manifest 路径及宿主任务句柄后，按下方检查点代码落盘，计算 `SLOTS = MAX_PARALLEL - |ACTIVE|`，先处理已有内环/待整合队列，再问闸 3a。交互档在继续前展示恢复摘要。
 - `init --auto` 弄脏 `.claude/settings.json` 时（仅 claude 宿主会写；其它宿主 init 自动跳过）：tracked → `npc git commit --message "chore: npc auto-auth settings"`；untracked → 写入 `.git/info/exclude`。
 
 ---
@@ -142,7 +162,7 @@ echo "$FINAL_WAVES" > "$RUN_DIR/v4-waves.json"
 
 `v4-waves.json` 保留为**初始计划与人审展示物**，波号只用于 telemetry 与汇报；实际调度由 `npc plan ready` 按运行时集合逐次判定，不再有屏障。
 
-维护五个集合（主 session 内存，每次变更记 run.events.jsonl）：
+维护五个集合（每次变更持久化检查点并记 run.events.jsonl）：
 
 | 集合 | 含义 | 何时变 |
 |---|---|---|
@@ -153,6 +173,16 @@ echo "$FINAL_WAVES" > "$RUN_DIR/v4-waves.json"
 | PENDING | implementer 已返回、等待整合（内环占用 main 期间） | implementer 返回时 `+= CID`（同时 `ACTIVE -= CID`）；integrate 成功或终态失败时 `-= CID` |
 
 `MAX_PARALLEL` 默认 4（`--max-parallel N` 覆盖）。
+
+**持久检查点**：主 session 是唯一写入者。全新 run 的 JOBS 为 `{}`；按 CID 保存 SEQ、worktree 路径、任务句柄、RESULT 文件、manifest 和内环句柄。在 spawn 前先把 CID 加入 ACTIVE 并写入 `launching` 记录；spawn 后立即更新真实句柄。收单先保存完整 RESULT/manifest，再更新集合；整合和内环结果处理后也写检查点。这样即便在副作用与记录之间崩溃，恢复闸门仍会核对不确定项。以下代码每次转换后执行（JOBS 为 JSON 对象）：
+
+```bash
+jq -n --arg run_ts "$RUN_TS" --argjson done "$DONE" --argjson finished "$FINISHED" \
+  --argjson active "$ACTIVE" --argjson pending "$PENDING" --argjson inner "$INNER" --argjson jobs "$JOBS" \
+  '{run_ts:$run_ts,done:$done,finished:$finished,active:$active,pending:$pending,inner:$inner,jobs:$jobs}' \
+  > "$RUN_DIR/scheduler.json.tmp" && mv "$RUN_DIR/scheduler.json.tmp" "$RUN_DIR/scheduler.json"
+```
+
 
 **3a. 问闸**——任何时候要决定"现在还能开哪些"，都是这一条（DONE/ACTIVE 为 JSON 数组字符串，`SLOTS = MAX_PARALLEL - |ACTIVE|`，`SLOTS<=0` 时不必调用）：
 
@@ -165,7 +195,7 @@ READY=$(jq -c --argjson done "$DONE" --argjson active "$ACTIVE" --argjson pendin
 
 `active` 参数传 **ACTIVE ∪ PENDING**：待整合的 change 虽不占 implementer 槽位，但必须留在排除集里——否则下一次问闸会把它再判为 ready、重复 spawn，产生两份互相竞争的 commit 与 manifest；其文件即将落到 main，与它有文件交集的 change 也应等它整合完再开。`SLOTS` 只按 `|ACTIVE|` 算，PENDING 不消耗槽位。
 
-初始开闸即 `DONE=[]`、`ACTIVE=[]`、`PENDING=[]`、`INNER=[]`、`FINISHED=[]`、`SLOTS=MAX_PARALLEL`，把返回的 ready 在**同一消息里**并发 spawn（3b）。
+**仅全新 run** 初始开闸即 `DONE=[]`、`ACTIVE=[]`、`PENDING=[]`、`INNER=[]`、`FINISHED=[]`、`SLOTS=MAX_PARALLEL`，把返回的 ready 在**同一消息里**并发 spawn（3b）。
 
 **3b. spawn 一个 implementer（worktree 隔离）**——每开一个 change 都走这三行，然后 `ACTIVE += CID`：
 
