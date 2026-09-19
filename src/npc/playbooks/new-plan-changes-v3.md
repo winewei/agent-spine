@@ -29,7 +29,7 @@ tags: [openspec, plan, implement, parallel, worktree, v3]
 - `architect-swarm`：并行 worktree 但无 commit/review/archive/持久日志。v3 借用其 worktree 隔离 + manifest + plan-only 重试机制（1.4 起由 `npc verify manifest` 承担，兼容其 legacy JSON RESULT 格式）。
 
 **前置条件**
-- `npc --version` ≥ 1.4.0（在 agent-spine 仓库根执行 `uv tool install --force --from . npc`）。1.4 起 v3 **零自带脚本**：原 waves.py / detect_plan_only.py / verify_manifest.py / notify.py 已下沉为 `npc plan waves` / `npc verify manifest` / `npc notify`（契约见 docs/cli.md §8c）
+- `npc --version` ≥ 1.4.0（`uv tool install --reinstall --from git+https://github.com/winewei/agent-spine@v<版本> npc`，不要用本地 checkout 安装）。1.4 起 v3 **零自带脚本**：原 waves.py / detect_plan_only.py / verify_manifest.py / notify.py 已下沉为 `npc plan waves` / `npc verify manifest` / `npc notify`（契约见 docs/cli.md §8c）
 - `npc doctor` 通过（git 为必需项；codex/openspec 缺失不阻塞、记降级项，见 §0.2）
 - 在 git 仓库内；SessionStart hook 已装（未装则 npc 退化 mtime 启发，不阻塞）
 - **`worktree.baseRef=head`**（关键，见 §0.3）
@@ -537,7 +537,7 @@ Token 成本(npc cost): <按后端一行摘要，来自 $COST>
 
 ## 依赖的 npc 子命令（v3 专属，1.4+）
 
-v3 原自带的四个 helper 脚本已全部下沉为 npc 子命令（契约见 `docs/cli.md` §8c），本 skill **零自带脚本**；行为不符时在 agent-spine 仓库（`src/npc`）修 npc 并在仓库根 `uv tool install --force --from . npc` 重装，不要回退到 skill 内写脚本。
+v3 原自带的四个 helper 脚本已全部下沉为 npc 子命令（契约见 `docs/cli.md` §8c），本 skill **零自带脚本**；行为不符时在 agent-spine 仓库（`src/npc`）修 npc、发布后从 tag 重装（`uv tool install --reinstall --from git+https://github.com/winewei/agent-spine@v<版本> npc`），不要回退到 skill 内写脚本。
 
 - `npc plan waves [--input FILE]`（stdin JSON）— DAG 分层 + 文件交集拆子波次，出**候选**波次（单行 JSON；exit 2=输入不合法）。**由 §4.0 sub-agent 在 sub-agent 上下文里跑**，主 session 不再直接调用（降级路径除外）。
 - `npc verify manifest --result '<RESULT行>' --manifest PATH` — plan-only 判定（npc key=value / legacy JSON 双格式）+ manifest 文件存在性与 sha256 核对，一条命令（exit 0=有真实产出且核对通过）。
