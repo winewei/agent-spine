@@ -166,7 +166,7 @@ def test_spine_ready_excludes_failed_terminal_changes(tmp_path):
     text = playbook.read_text(playbook.get("spine-run"))
     block = next(b for b in re.findall(r"```bash\n(.*?)```", text, re.S) if 'READY=$(jq' in b)
     # Execute the exact documented jq input builder, then use the production scheduler.
-    builder = block.split('READY=$(', 1)[1].split('| npc plan ready', 1)[0].strip()
+    builder = block.split('READY=$(', 1)[1].split('| npc plan ready', 1)[0].lstrip()
     path = tmp_path / "v3-dag-extract.json"
     path.write_text(json.dumps({"nodes": ["a", "b"], "edges": [], "files": {}}))
     result = subprocess.run(["bash", "-c", builder], check=True, capture_output=True, text=True,
