@@ -807,7 +807,9 @@ def _git_head(repo_root: Path) -> str:
     return out.stdout.strip()
 
 
-def _experience_commit_hook(p: _paths.Paths, seq: int, entry: dict) -> dict | None:
+def _experience_commit_hook(
+    p: _paths.Paths, seq: int, entry: dict, *, config_path: Path | None = None
+) -> dict | None:
     """archive 成功后把本 change 轨迹提交为经验语料（旁路软失败）。
 
     返回 None 表示"经验层未启用"，回执不带 ``experience`` 字段；其余情况返回一个
@@ -817,7 +819,7 @@ def _experience_commit_hook(p: _paths.Paths, seq: int, entry: dict) -> dict | No
     started_ms = _io.now_ms()
     try:
         try:
-            cfg = load_config(p.repo_root).experience
+            cfg = load_config(p.repo_root, override_path=config_path).experience
         except (ConfigError, OSError):
             return None
         if not cfg.enabled:
@@ -865,6 +867,7 @@ def run_archive(
     seq: int,
     *,
     openspec_bin: str | None = None,
+    config_path: Path | None = None,
 ) -> dict:
     """archive 一站式：precheck → openspec validate --strict → openspec archive --yes → git commit → 状态装订。"""
     from . import git_chain as _git_chain
@@ -924,7 +927,7 @@ def run_archive(
 
     # Preserve this exact proposal before openspec moves it out of the active tree.
     try:
-        if load_config(p.repo_root).experience.enabled:
+        if load_config(p.repo_root, override_path=config_path).experience.enabled:
             summary = _experience.proposal_summary(p.repo_root, change_id)
             if summary:
                 (base / "experience.proposal.md").write_text(_experience.redact_secrets(summary), encoding="utf-8")
@@ -1045,7 +1048,7 @@ def run_archive(
         entry_after_exit = _get_entry(_state.read_state(p.state_json), seq)
     except (OSError, ValueError, json.JSONDecodeError):
         entry_after_exit = entry
-    experience = _experience_commit_hook(p, seq, entry_after_exit)
+    experience = _experience_commit_hook(p, seq, entry_after_exit, config_path=config_path)
     if experience is not None:
         result["experience"] = experience
     return result

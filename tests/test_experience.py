@@ -1049,3 +1049,16 @@ def test_manual_recall_reports_only_budgeted_entries(env_setup, make_args, capsy
     assert out["entries"] == 0 and out["uris"] == []
     assert Path(out["path"]).read_text() == ""
     assert json.loads(Path(out["record"]).read_text())["uris"] == []
+
+
+def test_case_redacts_quoted_secrets_before_json_escape(tmp_path, monkeypatch):
+    monkeypatch.setattr(_exp, "build_case", lambda *a, **k: {
+        "proposal": 'Configure api_key="abcdefghijk"',
+        "findings": [{"title": "password='secretvalue123'"}],
+    })
+    messages = _exp.build_messages("c", "p", tmp_path, {})
+    serialized = json.dumps(messages)
+    assert "abcdefghijk" not in serialized
+    assert "secretvalue123" not in serialized
+    case = json.loads(messages[0]["content"].split("```json\n")[1].split("\n```")[0])
+    assert "<redacted>" in case["proposal"]

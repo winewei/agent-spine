@@ -228,6 +228,7 @@ def _recall_experience(
     round_n: int | None,
     change_id: str,
     blocking_findings=(),
+    config: _config.Config | None = None,
 ) -> tuple[str, dict]:
     """召回历史经验并渲染注入块。返回 ``(block, meta)``，meta 并入 stdout 回执。
 
@@ -238,7 +239,7 @@ def _recall_experience(
     同名 ``.experience.json`` 注入回执，使 prompt 可完整重放并支持回抄检测。
     """
     try:
-        cfg = _config.load_config(p.repo_root).experience
+        cfg = (config if config is not None else _config.load_config(p.repo_root)).experience
     except _config.ConfigError:
         return "", {"experience_injected": 0}
     if not cfg.enabled:

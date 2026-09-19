@@ -387,7 +387,7 @@ def run_change(
             continue
 
         # phase == "archive"
-        res = _pipeline.run_archive(p, seq)
+        res = _pipeline.run_archive(p, seq, **({"config_path": config_path} if config_path is not None else {}))
         if not res.get("ok"):
             # archive 失败多为硬性问题（chain broken / validate），auto-decide 无对应
             # trigger；auto 档直接终态 failed（run_archive 已装订 status/reason），

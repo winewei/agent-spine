@@ -743,3 +743,20 @@ def test_headless_prompt_injects_experience(env_setup, make_args, capsys, monkey
     assert "Validate before writing" in path.read_text()
     assert (base / f"{experience.injection_record_stem(phase, round_n)}.experience.json").exists()
     assert events[0]["phase"] == phase
+
+
+@pytest.mark.parametrize("phase,round_n", [("implement", None), ("fix", 1)])
+@pytest.mark.parametrize("enabled", [False, True])
+def test_headless_experience_uses_selected_config(env_setup, make_args, capsys, monkeypatch, phase, round_n, enabled):
+    from npc import config, experience
+    _bootstrap_run(make_args, capsys, "add-foo")
+    (env_setup.repo_root / ".npc").mkdir(exist_ok=True)
+    (env_setup.repo_root / ".npc/config.toml").write_text(f"[experience]\nenabled = {str(not enabled).lower()}\n")
+    override = env_setup.repo_root / "override.toml"
+    override.write_text(f"[experience]\nenabled = {str(enabled).lower()}\n")
+    selected = config.load_config(env_setup.repo_root, override_path=override)
+    calls = []
+    monkeypatch.setattr(experience, "from_config", lambda *a, **k: calls.append(True))
+    base = env_setup.run_dir / "001-add-foo"
+    _coder._render_prompt_file(env_setup, 1, "add-foo", base, phase, round_n, "head", config=selected)
+    assert bool(calls) == enabled
