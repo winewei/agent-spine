@@ -29,13 +29,14 @@ import argparse
 import hashlib
 import json
 import re
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import _io, config as _config, focus as _focus, paths as _paths
+from . import _io, config as _config, focus as _focus, locks as _locks, paths as _paths
 
 
 DEFAULT_BASE_URL = "http://127.0.0.1:1933"
@@ -342,6 +343,17 @@ def proposal_summary(repo_root: Path | None, change_id: str) -> str:
     path = repo_root / "openspec" / "changes" / change_id / "proposal.md"
     text = _read_text(path)
     if not text:
+        archive = repo_root / "openspec" / "changes" / "archive"
+        candidates = sorted(
+            (d for d in archive.iterdir()
+             if re.fullmatch(r"\d{4}-\d{2}-\d{2}-" + re.escape(change_id), d.name)),
+            reverse=True,
+        ) if archive.is_dir() else []
+        for directory in candidates:
+            text = _read_text(directory / "proposal.md")
+            if text:
+                break
+    if not text:
         return ""
     section = _focus._extract_section(text, ("Why", "What Changes"))
     if not section:
@@ -396,7 +408,7 @@ def build_case(
             "name": change_id,
             "task_signature": f"{proj_key}:{change_id}",
             "input": {
-                "proposal_summary": proposal_summary(repo_root, change_id),
+                "proposal_summary": _read_text(base / "experience.proposal.md") or proposal_summary(repo_root, change_id),
                 "total_rounds": total_rounds_of(entry, base),
                 "tests": tests_of(entry),
             },
@@ -605,7 +617,27 @@ def _write_json(path: Path, payload: dict) -> Path:
     return path
 
 
-def commit(
+def commit(client, cfg, *, p_like, seq, entry, dry_run=False) -> dict:
+    """Serialize submissions; never replay a partial or uncertain remote session."""
+    base = Path(entry.get("base") or _paths.base_for(p_like, seq, entry.get("change_id") or ""))
+    lock = _locks.try_acquire(base / ".experience-commit.lock", owner="experience commit")
+    if lock is None:
+        return {"ok": False, "reason": "submission-busy"}
+    try:
+        receipt = base / "experience.commit.json"
+        if not dry_run:
+            try:
+                saved = json.loads(receipt.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                saved = {}
+            if isinstance(saved, dict) and saved.get("ok") and saved.get("session_id") == session_id_for(cfg, p_like, seq, entry.get("change_id") or ""):
+                return {k: v for k, v in saved.items() if k != "ts"}
+        return _commit_locked(client, cfg, p_like=p_like, seq=seq, entry=entry, dry_run=dry_run)
+    finally:
+        _locks.release(lock)
+
+
+def _commit_locked(
     client: Client | None,
     cfg: _config.ExperienceConfig,
     *,
@@ -617,7 +649,7 @@ def commit(
     """提交一个 change 的轨迹（fire-and-forget，不等 Phase 2 异步抽取）。
 
     三步：``POST /sessions`` → 逐条 ``POST /sessions/{id}/messages`` →
-    ``POST /sessions/{id}/commit``。session 已存在（409）视为幂等继续。
+    ``POST /sessions/{id}/commit``。session 已存在（409）停止提交，避免重放部分成功或结果未知的请求。
 
     返回 dict、**永不抛**——写入侧失败不得影响 archive 判定。成功与失败都落盘
     ``<base>/experience.commit.json``，让补偿提交与事后审计有据可查。
@@ -647,7 +679,7 @@ def commit(
         }
 
     if client is None:
-        result = {"ok": False, "reason": "no_client", "detail": "缺少 OpenViking 凭据"}
+        result = {"ok": False, "reason": "no-credentials", "detail": "缺少 OpenViking 凭据"}
         _write_json(base / "experience.commit.json", {**result, "ts": _io.now_iso()})
         return result
 
@@ -674,7 +706,7 @@ def commit(
 
 
 def _ensure_session(client: Client, session_id: str) -> None:
-    """建 session；已存在（409）幂等继续。
+    """建 session；已存在（409）停止，禁止重复写入轨迹。
 
     ``memory_policy`` 只允许 experiences——服务端会自动扩展为 cases +
     trajectories + experiences，不写 profile / preferences / entities。
@@ -688,8 +720,12 @@ def _ensure_session(client: Client, session_id: str) -> None:
             },
         )
     except ExperienceError as e:
-        if e.code != "http_409":
-            raise
+        if e.code == "http_409":
+            raise ExperienceError(
+                "session-exists",
+                "远端 session 已存在；不重放消息或再次 commit。请检查该 session 与异步 task 的状态后处理。",
+            ) from e
+        raise
 
 
 def fetch_task(client: Client, task_id: str) -> dict:
@@ -833,21 +869,26 @@ def render_block(result: RecallResult, max_tokens: int | None = None) -> str:
     外壳由 npc 控制而非用服务端 ``rendered``：它同时是回抄检测的锚点。
     超预算时按 score 从低到高丢弃条目——低分条目的边际价值最低。
     """
-    entries = list(result.entries)
-    if max_tokens is not None:
-        while entries and sum(estimate_tokens(e["text"]) for e in entries) > max_tokens:
-            entries.pop()  # entries 已按 score 降序，末位即最低分
-    if not entries:
-        return ""
+    entries = sorted(result.entries, key=lambda e: e["score"], reverse=True)
+    while entries:
+        parts = [BLOCK_HEADING, ""]
+        for e in entries:
+            parts.extend([
+                f'<npc-experience uri="{e["uri"]}" score="{e["score"]:.2f}">',
+                e["text"], "</npc-experience>", "",
+            ])
+        parts.append(BLOCK_FOOTER)
+        block = "\n".join(parts) + "\n"
+        if max_tokens is None or estimate_tokens(block) <= max_tokens:
+            return block
+        entries.pop()
+    return ""
 
-    parts = [BLOCK_HEADING, ""]
-    for e in entries:
-        parts.append(f'<npc-experience uri="{e["uri"]}" score="{e["score"]:.2f}">')
-        parts.append(e["text"])
-        parts.append("</npc-experience>")
-        parts.append("")
-    parts.append(BLOCK_FOOTER)
-    return "\n".join(parts) + "\n"
+
+def injected_entries(result: RecallResult, block: str) -> tuple[dict, ...]:
+    """Match only entries retained in the rendered block."""
+    uris = set(re.findall(r'^<npc-experience uri="([^"\n]+)" score="[^"\n]+">$', block, re.M))
+    return tuple(e for e in result.entries if e["uri"] in uris)
 
 
 def injection_record_stem(phase: str, round_n: int | None) -> str:
@@ -875,7 +916,7 @@ def write_injection_record(
         "phase": phase,
         "round": round_n,
         "query": result.query,
-        "uris": [{"uri": e["uri"], "score": e["score"]} for e in result.entries],
+        "uris": [{"uri": e["uri"], "score": e["score"]} for e in injected_entries(result, text)],
         "tokens": estimate_tokens(text),
         "head": head,
         "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
@@ -944,6 +985,48 @@ def _has_common_span(haystack: str, needle: str, span: int) -> bool:
 # ============================================================
 # (e) 状态 / 探活
 # ============================================================
+
+
+def library_fingerprint(client: Client) -> str | None:
+    """Hash a complete content inventory; unavailable listings yield no claimed snapshot."""
+    pending = ["viking://~/memories/experiences"]
+    deadline = time.monotonic() + getattr(client, "timeout_ms", 3000) / 1000
+    visited: set[str] = set()
+    contents: dict[str, str] = {}
+    try:
+        while pending:
+            uri = pending.pop()
+            if uri in visited or len(visited) >= 1000 or time.monotonic() >= deadline:
+                return None
+            visited.add(uri)
+            payload = client.get("/api/v1/fs/ls", {"uri": uri})
+            listing = payload.get("result")
+            if not isinstance(listing, list) or payload.get("has_more") or payload.get("next_cursor"):
+                return None
+            for item in listing:
+                if len(contents) >= 1000 or time.monotonic() >= deadline:
+                    return None
+                if not isinstance(item, dict):
+                    return None
+                child = item.get("uri")
+                if not child:
+                    name = item.get("name")
+                    if not isinstance(name, str) or not name or "/" in name or name in (".", ".."):
+                        return None
+                    child = uri.rstrip("/") + "/" + name
+                if not isinstance(child, str) or EXPERIENCE_URI_MARKER not in child:
+                    return None
+                if item.get("isDir"):
+                    pending.append(child)
+                else:
+                    text = _read_full(client, child)
+                    if not text:
+                        return None
+                    contents[child] = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    except (ExperienceError, OSError, ValueError):
+        return None
+    payload = json.dumps(contents, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def list_experiences(client: Client) -> int | None:
@@ -1020,6 +1103,11 @@ def doctor_report(cfg: _config.ExperienceConfig, repo_root: Path | None = None) 
         warnings.append(
             "[experience].extraction_model_declared 未声明；"
             "抽取属「分析」，模型档位不得低于 coder（不变量 4），无声明即不可核对"
+        )
+    else:
+        warnings.append(
+            f"抽取模型声明 {cfg.extraction_model_declared!r} 仅为人工声明；"
+            "未验证服务端实际模型及其与 coder 的档位关系（不变量 4）"
         )
     return report
 

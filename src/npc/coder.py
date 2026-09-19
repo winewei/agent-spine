@@ -210,10 +210,14 @@ def _render_prompt_file(
     与 ``agent.prompt_render`` 走同一套 templates；implement 走
     ``render_implementer``，fix 走 ``render_fixer``（含 blocking findings）。
     """
+    from .agent import _recall_experience
+
+    base.mkdir(parents=True, exist_ok=True)
     if phase == "implement":
+        exp_block, _ = _recall_experience(p, base, seq, phase=phase, round_n=None, change_id=change_id)
         prompt_file = base / "implement.prompt.md"
         text = templates.render_implementer(
-            change_id=change_id, base=str(base), repo_root=str(p.repo_root)
+            change_id=change_id, base=str(base), repo_root=str(p.repo_root), experience_block=exp_block
         )
     else:  # fix
         if round_n is None:
@@ -221,6 +225,7 @@ def _render_prompt_file(
         prompt_file = base / f"round-{round_n}.fix.prompt.md"
         review_path = base / f"round-{round_n - 1}.review.json"
         findings_md = ""
+        blocking_findings = []
         categories_seen: list[str] = []
         blocking_trend: list[int] = []
         state = read_state(p.state_json)
@@ -235,7 +240,12 @@ def _render_prompt_file(
 
             review_data = json.loads(review_path.read_text(encoding="utf-8"))
             parsed = parse_review(review_data)
-            findings_md = render_findings(parsed["blocking_findings"])
+            blocking_findings = parsed["blocking_findings"]
+            findings_md = render_findings(blocking_findings)
+        exp_block, _ = _recall_experience(
+            p, base, seq, phase=phase, round_n=round_n, change_id=change_id,
+            blocking_findings=blocking_findings,
+        )
         text = templates.render_fixer(
             change_id=change_id,
             round_n=round_n,
@@ -245,6 +255,7 @@ def _render_prompt_file(
             blocking_findings_md=findings_md,
             categories_seen=categories_seen,
             blocking_trend=blocking_trend,
+            experience_block=exp_block,
         )
     prompt_file.parent.mkdir(parents=True, exist_ok=True)
     prompt_file.write_text(text, encoding="utf-8")

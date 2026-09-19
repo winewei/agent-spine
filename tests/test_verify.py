@@ -666,10 +666,10 @@ def test_deps_rejects_malformed_pyproject(tmp_path: Path):
     ],
 )
 def test_deps_detects_forbidden_imports(tmp_path: Path, line: str):
-    repo = _fake_pkg(tmp_path, sources={"bad.py": f"import json\n{line}\n"})
+    repo = _fake_pkg(tmp_path, sources={"bad.py": f"import json\n" + ("if True:\n" if line.startswith(" ") else "") + f"{line}\n"})
     violations = _verify.check_deps(repo)
     assert [v["rule"] for v in violations] == ["forbidden_import"]
-    assert "src/npc/bad.py:2" in violations[0]["detail"]
+    assert f"src/npc/bad.py:{3 if line.startswith(chr(32)) else 2}" in violations[0]["detail"]
 
 
 @pytest.mark.parametrize(
@@ -697,3 +697,18 @@ def test_deps_self_check_on_real_repo():
     """本仓库自身必须通过——经验层只经 HTTP，不得引入任何运行时依赖。"""
     repo_root = Path(__file__).resolve().parents[1]
     assert _verify.check_deps(repo_root) == []
+
+
+def test_deps_checks_all_import_aliases_and_ignores_strings(tmp_path):
+    from npc.verify import check_deps
+    (tmp_path / "pyproject.toml").write_text("[project]\ndependencies = []\n")
+    src = tmp_path / "src" / "npc"
+    src.mkdir(parents=True)
+    (src / "example.py").write_text(
+        '"""import requests"""\nimport json, requests\n'
+        'if True: import os, httpx as client\nfrom openviking.client import Client\n'
+    )
+    violations = check_deps(tmp_path)
+    assert len(violations) == 3
+    assert all(v["rule"] == "forbidden_import" for v in violations)
+    assert any("example.py:3" in v["detail"] for v in violations)

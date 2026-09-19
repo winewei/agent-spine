@@ -902,12 +902,12 @@ def test_experience_remote_base_url_warn(tmp_path: Path, monkeypatch):
     assert "非本地地址" in c["detail"]
 
 
-def test_experience_all_green_ok(tmp_path: Path, monkeypatch):
+def test_experience_declared_model_remains_unverified(tmp_path: Path, monkeypatch):
     _stub_experience_cfg(monkeypatch, enabled=True, extraction_model_declared="opus")
     _stub_experience_report(monkeypatch, _healthy_report())
     c = doctor._check_experience(home=tmp_path, repo_root=tmp_path)
-    assert c["status"] == "ok"
-    assert "0.9.1" in c["detail"] and "7" in c["detail"]
+    assert c["status"] == "warn"
+    assert "尚未验证" in c["detail"]
 
 
 def test_experience_config_unreadable_warn(tmp_path: Path, monkeypatch):

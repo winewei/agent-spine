@@ -833,13 +833,12 @@ def _experience_commit_hook(p: _paths.Paths, seq: int, entry: dict) -> dict | No
             client = _experience.from_config(
                 cfg, p.repo_root, timeout_ms=cfg.timeout_commit_ms
             )
-            if client is None:
-                result = {"ok": False, "reason": "no-credentials"}
-            else:
-                result = _experience.commit(
-                    client, cfg, p_like=p, seq=seq, entry=entry
-                )
+            result = _experience.commit(
+                client, cfg, p_like=p, seq=seq, entry=entry
+            )
 
+        if not ok and not (base / "experience.commit.json").exists():
+            _experience._write_json(base / "experience.commit.json", {**result, "ts": _io.now_iso()})
         _telemetry.emit_experience_commit(
             proj_key=p.proj_key,
             run_ts=p.run_ts,
@@ -922,6 +921,15 @@ def run_archive(
             "error": "openspec-validate-failed",
             "stderr_tail": val.stderr.strip()[-1000:],
         }
+
+    # Preserve this exact proposal before openspec moves it out of the active tree.
+    try:
+        if load_config(p.repo_root).experience.enabled:
+            summary = _experience.proposal_summary(p.repo_root, change_id)
+            if summary:
+                (base / "experience.proposal.md").write_text(_experience.redact_secrets(summary), encoding="utf-8")
+    except Exception:
+        pass  # Optional experience capture must not block archive.
 
     # 3. openspec archive --yes
     arc = subprocess.run(

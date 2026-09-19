@@ -1107,3 +1107,15 @@ def test_run_archive_survives_experience_hook_exception(
 
     entry = json.loads(p_with_repo.state_json.read_text())["progress"][0]
     assert entry["status"] == "archived"
+
+
+def test_experience_missing_credentials_writes_receipt(env_setup, make_args, capsys, monkeypatch):
+    _bootstrap_run(env_setup, make_args, capsys, "add-foo")
+    monkeypatch.setattr(_pipeline, "load_config", lambda *a, **k: _experience_cfg(True))
+    monkeypatch.setattr(_pipeline._experience, "from_config", lambda *a, **k: None)
+    entry = _state.read_state(env_setup.state_json)["progress"][0]
+    entry.update(status="archived", blocking_trend=[0])
+    out = _pipeline._experience_commit_hook(env_setup, 1, entry)
+    receipt = Path(entry["base"]) / "experience.commit.json"
+    assert out["reason"] == "no-credentials"
+    assert json.loads(receipt.read_text())["reason"] == "no-credentials"

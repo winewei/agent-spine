@@ -156,7 +156,7 @@ extraction_model_declared = "gpt-5.4"   # 与 OpenViking ov.conf 的 vlm.model �
 | `env_file` / `root_env_file` | `KEY=VALUE` 行的凭据文件，`chmod 600`，不入 git。用户 key 走数据 API；root key 只能访问管理面 |
 | `write_gate` | 哪些 change 的轨迹有资格成为经验。`verified` 是不变量 1 的要求：只回收独立 review 通过的轨迹 |
 | `inject_max_tokens_*` | 注入预算。服务端按预算分档，npc 对非全文档按 uri 读全文后本地按相关度整条裁剪；800 约容纳 2 条完整规则 |
-| `extraction_model_declared` | 人工声明抽取模型档位（抽取属"分析"，不应低于 coder），`npc experience doctor` 缺失即 warn |
+| `extraction_model_declared` | 人工声明抽取模型档位（抽取属"分析"，不应低于 coder），声明缺失或尚未验证服务端实际模型和 coder 档位关系时，`npc experience doctor` 继续 warn |
 
 验证与观测：`npc experience doctor`（连通性 / agent_evolution / 经验计数）、`npc experience status`（各 change 的提交与注入情况）、`npc experience recall --phase implement --seq N`（预览某 change 会注入什么）。
 

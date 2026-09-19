@@ -691,7 +691,7 @@ Recommendation: 添加 len(username) > 256 的判定...
 - `exclude_uris` = 本 change `$BASE` 下已有注入回执的全部 uri（同一 change 不重复注入同一条）
 - 注入条数受 `[experience].inject_max_tokens_implement|_fix` 预算裁剪，超预算按 score 从低到高丢弃
 - **纯增强、软失败**：未启用 / 无凭据 / 网络失败 / 内部异常一律退化为空注入块，prompt 照常渲染、**退出码不变**；`enabled = false` 时渲染结果与未接经验层的版本逐字节一致
-- 本 run 首次成功召回时把经验库快照指纹（召回条目 `uri:score` 的 sha256）写入 `STATE_JSON.policy_snapshot_id`，此后不再更新——review 复发率必须锚定同一经验库版本才可比
+- 本 run 首次成功召回时把经验库快照指纹（完整目录中 URI 与正文哈希的 sha256；无法完整读取时不填写）写入 `STATE_JSON.policy_snapshot_id`，此后不再更新——review 复发率必须锚定同一经验库版本才可比
 - 每次召回落一条 telemetry `kind=experience.recall`（entries / injected_tokens / uris / error / duration_ms / policy_snapshot_id + `pointer.experience_json`）
 
 **stdout（implement）**：
@@ -1424,7 +1424,7 @@ best-effort webhook 推送。URL 解析顺序：`--url` > `$NPC_WEBHOOK` > `$NPC
 
 环境前置体检：git / openspec / codex / claude / jq / portable-timeout（PATH 或 `~/.local/bin` 自举）/ review schema 自举情况 / mimo.env 成本路由 / npc config 可加载性 / 路由在用 provider 就绪性（v1.6+）/ 宿主解析（v1.7+）/ 安装来源（v1.7.1+）/ 经验层探活（v1.8+）/ `docs/principles.md`。除 `git` 外全部是 warn 级、不阻塞。
 
-**做什么**：对 `_BIN_CHECKS`（`git` 必备，`openspec`/`codex`/`claude`/`jq` 可选）逐个查 PATH；`portable-timeout` 额外查 `~/.local/bin` 自举位置并校验可执行位；`schema` 检查 `~/task_log/.new-plan-review-schema.json` 是否存在且为合法 JSON；`mimo.env` 检查 `~/.config/npc/mimo.env` 是否存在可读；`config` 尝试 `load_config`（失败降级 warn，不阻塞）；`providers`（v1.6+）对 coder 路由实际引用的每个 provider 检查 env_file 存在可读 + runner 可执行文件可用（未被引用的定义不产生噪音，问题一律 warn 不阻塞）；`host`（v1.7+）报告解析出的宿主（名字/来源/session 识别能力，信息级恒 ok）；`install-source` 读 npc 发行元数据的 `direct_url.json` 判定安装来源：**本地 checkout（`file://`）安装一律 warn**——开发中的代码会影响本机在用的 CLI，detail 附诊断事实（源码路径 @ 分支 sha、是否未合入 origin/main、源码 `__version__` 与已安装是否一致）与整改提示（`uv tool install --reinstall --from git+https://github.com/winewei/agent-spine@v<版本> npc`，开发期用 `uv run npc`）；远程 VCS 安装 → ok 并带 `vcs_info.commit_id` 前 7 位与 `requested_revision`；读不到 `direct_url.json` → warn。git 调用一律 5s 超时、异常降级 warn；`experience`（v1.8+）在 `[experience].enabled = false`（默认）时直接 ok 且不发任何网络请求，启用时调 `experience.doctor_report`：`/health` 不通或缺凭据 → warn（**永不 missing**，经验层是旁路增强，不得让 doctor exit 4 阻塞一个本可跑完的 run），server 未开 `agent_evolution` / `auth_mode != "api_key"`（dev 模式）/ `base_url` 非本地 / `extraction_model_declared` 未声明 → warn，全部正常 → ok 并带 version 与 experiences 计数；`principles.md` 检查 `<repo>/docs/principles.md`。
+**做什么**：对 `_BIN_CHECKS`（`git` 必备，`openspec`/`codex`/`claude`/`jq` 可选）逐个查 PATH；`portable-timeout` 额外查 `~/.local/bin` 自举位置并校验可执行位；`schema` 检查 `~/task_log/.new-plan-review-schema.json` 是否存在且为合法 JSON；`mimo.env` 检查 `~/.config/npc/mimo.env` 是否存在可读；`config` 尝试 `load_config`（失败降级 warn，不阻塞）；`providers`（v1.6+）对 coder 路由实际引用的每个 provider 检查 env_file 存在可读 + runner 可执行文件可用（未被引用的定义不产生噪音，问题一律 warn 不阻塞）；`host`（v1.7+）报告解析出的宿主（名字/来源/session 识别能力，信息级恒 ok）；`install-source` 读 npc 发行元数据的 `direct_url.json` 判定安装来源：**本地 checkout（`file://`）安装一律 warn**——开发中的代码会影响本机在用的 CLI，detail 附诊断事实（源码路径 @ 分支 sha、是否未合入 origin/main、源码 `__version__` 与已安装是否一致）与整改提示（`uv tool install --reinstall --from git+https://github.com/winewei/agent-spine@v<版本> npc`，开发期用 `uv run npc`）；远程 VCS 安装 → ok 并带 `vcs_info.commit_id` 前 7 位与 `requested_revision`；读不到 `direct_url.json` → warn。git 调用一律 5s 超时、异常降级 warn；`experience`（v1.8+）在 `[experience].enabled = false`（默认）时直接 ok 且不发任何网络请求，启用时调 `experience.doctor_report`：`/health` 不通或缺凭据 → warn（**永不 missing**，经验层是旁路增强，不得让 doctor exit 4 阻塞一个本可跑完的 run），server 未开 `agent_evolution` / `auth_mode != "api_key"`（dev 模式）/ `base_url` 非本地 / `extraction_model_declared` 未声明或服务端实际模型与 coder 档位关系未经验证 → warn；`principles.md` 检查 `<repo>/docs/principles.md`。
 
 **stdout（单行，`ok` 恒真实反映 required 缺失情况；required 缺失时同一行内嵌 `error`/`message`）**：
 
@@ -1719,7 +1719,7 @@ exit: 0 成功 / 1 任一步失败 / 2 用法错 / 3 环境错
 
 把一个 archived change 的轨迹提交为经验语料（fire-and-forget，不等服务端异步抽取完成）。
 
-组装五段 messages（CaseSpec header / implement summary / review findings / fix summary / outcome），首消息以 `# OpenViking Batch Training CaseSpec v1` + ```json 围栏 Case 开头以命中 fast path，跳过服务端 LLM case 判定。三步提交：`POST /api/v1/sessions`（`memory_policy={"memory_types":["experiences"]}`）→ 逐条 `POST /sessions/{id}/messages` → `POST /sessions/{id}/commit`。session 已存在（409）视为幂等继续。
+组装五段 messages（CaseSpec header / implement summary / review findings / fix summary / outcome），首消息以 `# OpenViking Batch Training CaseSpec v1` + ```json 围栏 Case 开头以命中 fast path，跳过服务端 LLM case 判定。三步提交：`POST /api/v1/sessions`（`memory_policy={"memory_types":["experiences"]}`）→ 逐条 `POST /sessions/{id}/messages` → `POST /sessions/{id}/commit`。成功回执可直接复用；session 已存在（409）返回 `session-exists`，不重放消息。部分提交失败或 commit 响应丢失时，先检查远端 session/task；禁止盲目重试追加。
 
 **写入闸门**（`--gate`，默认取 `[experience].write_gate`）：
 
@@ -1799,7 +1799,7 @@ exit: 0 正常 / 3 未定位 run 或 state 读取失败
 
 经验层探活（不需要 active run，只需 git 仓库）。依次检查：env 文件可读且含 api key → `GET /health`（免鉴权，取 version / auth_mode）→ `GET /api/v1/fs/ls?uri=viking://~/memories/experiences` 计数 → `GET /api/v1/admin/agent-evolution`（用 `root_env_file` 的 root key；无则跳过并记 note）。
 
-warnings 触发条件：`auth_mode != "api_key"`（dev 模式，本机任意进程具 ROOT 权限）；`base_url` 非 `127.0.0.1` / `localhost`（数据流出本机）；`agent_evolution.enabled == false`（commit 不会产出 experiences）；`[experience].extraction_model_declared` 未声明（不变量 4 的模型档位无法核对）。
+warnings 触发条件：`auth_mode != "api_key"`（dev 模式，本机任意进程具 ROOT 权限）；`base_url` 非 `127.0.0.1` / `localhost`（数据流出本机）；`agent_evolution.enabled == false`（commit 不会产出 experiences）；`[experience].extraction_model_declared` 未声明，或已声明但服务端实际模型及 coder 档位关系尚未验证（不变量 4）。
 
 ```text
 stdout:
