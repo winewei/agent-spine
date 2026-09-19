@@ -90,9 +90,11 @@ extraction_model_declared = "gpt-5.4"   # 与 ov.conf 的 vlm.model 一致，供
 ```
 
 ```bash
-npc experience doctor      # health / agent_evolution / experiences_count 全绿即可
+npc experience doctor      # 检查 health / agent_evolution / experiences_count；抽取模型档位仍需人工核对
 npc doctor                 # 总体检里多一项 experience（required=false，永不阻塞）
 ```
+
+提交重试会复用已成功的本地回执；遇到 `session-exists` 则停止写入，需检查远端 session/task，避免部分成功或响应丢失后重复训练。
 
 之后**无需任何额外操作**：`npc archive run` 成功且 review 通过时自动提交轨迹；`npc agent prompt render` 自动召回注入。观察：
 
@@ -106,7 +108,7 @@ ov ls viking://user/npc/memories/experiences/        # 经验库全貌（纯 mar
 
 - **每次提交**约 10–15k tokens 的抽取模型调用、约 1 分钟异步完成；召回本身不调用 LLM（`rewrite` / `query_expansion` 已关）。用 Codex OAuth 时与 review 共用同一账号额度。
 - **主 session 零增量**：注入发生在磁盘上的 prompt 文件里，主 session 只看到 `experience_injected` 一个整数。
-- **可复现**：每次注入的 uri / score / 当时 HEAD / 内容 sha 都在 `<base>/*.experience.json`；`policy_snapshot_id` 记录本 run 首次召回时的经验库指纹。
+- **可复现**：每次注入的 uri / score / 当时 HEAD / 内容 sha 都在 `<base>/*.experience.json`；`policy_snapshot_id` 记录本 run 首次召回时完整经验库 URI/正文内容的指纹；目录或正文无法完整读取时保留为空。
 - **退出成本低**：experiences 是 `~/.openviking/data/.../memories/experiences/*.md` 纯文本；关闭 `enabled` 即回到 1.7 行为。
 
 ## 怎么衡量它有没有用（建议的试点）

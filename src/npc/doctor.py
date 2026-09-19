@@ -317,7 +317,9 @@ def _check_experience(*, home: Path, repo_root: Path | None) -> dict:
             "warn", f"OpenViking 不可用（{base_url}）：{reason}；经验层降级为不注入"
         )
 
-    problems: list[str] = []
+    problems: list[str] = list(report.get("warnings") or [])
+    if cfg.extraction_model_declared:
+        problems.append("抽取模型声明尚未验证服务端实际模型及其与 coder 的档位关系（不变量 4）")
     if report.get("agent_evolution") is False:
         problems.append("server 未开启 agent_evolution，commit 不会产出 experiences")
     if health.get("auth_mode") != "api_key":

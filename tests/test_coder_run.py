@@ -724,3 +724,22 @@ def test_cli_implement_run_mimo_permission_error_exit_3(
     out = json.loads(capsys.readouterr().out)
     assert out["ok"] is False
     assert out["error"] == "env_error"
+
+
+@pytest.mark.parametrize("phase,round_n", [("implement", None), ("fix", 1)])
+def test_headless_prompt_injects_experience(env_setup, make_args, capsys, monkeypatch, phase, round_n):
+    from npc import experience, telemetry
+    _bootstrap_run(make_args, capsys, "add-foo")
+    (env_setup.repo_root / ".npc").mkdir(exist_ok=True)
+    (env_setup.repo_root / ".npc/config.toml").write_text("[experience]\nenabled = true\n")
+    monkeypatch.setattr(experience, "from_config", lambda *a, **k: object())
+    monkeypatch.setattr(experience, "library_fingerprint", lambda c: "f" * 64)
+    monkeypatch.setattr(experience, "recall", lambda *a, **k: experience.RecallResult(entries=(
+        {"uri": "viking://~/memories/experiences/test.md", "score": .9, "text": "Validate before writing"},)))
+    events = []
+    monkeypatch.setattr(telemetry, "emit_experience_recall", lambda **kw: events.append(kw))
+    base = env_setup.run_dir / "001-add-foo"
+    path, _ = _coder._render_prompt_file(env_setup, 1, "add-foo", base, phase, round_n, "head")
+    assert "Validate before writing" in path.read_text()
+    assert (base / f"{experience.injection_record_stem(phase, round_n)}.experience.json").exists()
+    assert events[0]["phase"] == phase

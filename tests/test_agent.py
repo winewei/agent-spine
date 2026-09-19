@@ -513,6 +513,7 @@ def _stub_recall(monkeypatch, result: _experience.RecallResult) -> dict:
     """把 from_config / recall 替换为可观测桩；返回捕获到的调用参数。"""
     captured: dict = {}
     monkeypatch.setattr(_experience, "from_config", lambda *a, **k: object())
+    monkeypatch.setattr(_experience, "library_fingerprint", lambda client: "f" * 64)
 
     def fake_recall(client, cfg, *, phase, query, exclude_uris=()):
         captured["phase"] = phase
@@ -805,3 +806,16 @@ def test_experience_excludes_already_injected_uris(
     capsys.readouterr()
 
     assert captured["exclude_uris"] == ["viking://~/memories/experiences/old.md"]
+
+
+def test_automatic_recall_excludes_previous_changes(env_setup, make_args, capsys, monkeypatch):
+    _enable_experience(env_setup.repo_root)
+    _bootstrap(env_setup, make_args, capsys, "add-foo", "add-bar")
+    captured = _stub_recall(monkeypatch, _experience.RecallResult(
+        entries=(_entry("viking://~/memories/experiences/e1.md", .9),), query="q"))
+    _spy_telemetry(monkeypatch)
+    _render_implement(make_args, "add-foo")
+    capsys.readouterr()
+    _render_implement(make_args, "add-bar")
+    capsys.readouterr()
+    assert captured["exclude_uris"] == ["viking://~/memories/experiences/e1.md"]

@@ -441,27 +441,14 @@ def test_commit_three_step_order(monkeypatch, base_dir: Path, tmp_path: Path):
     assert saved["task_id"] == "t-1"
 
 
-def test_commit_session_conflict_is_idempotent(monkeypatch, base_dir: Path, tmp_path: Path):
-    def handler(req, body):
-        if req.full_url.endswith("/api/v1/sessions"):
-            return urllib.error.HTTPError(req.full_url, 409, "exists", {}, None)
-        return envelope({"task_id": "t-2"})
-
-    fake_urlopen(monkeypatch, handler)
-    out = _exp.commit(
-        make_client(),
-        _config.ExperienceConfig(),
-        p_like=FakePaths(tmp_path, tmp_path),
-        seq=1,
-        entry={**ARCHIVED_ENTRY, "base": str(base_dir)},
-    )
-    assert out == {
-        "ok": True,
-        "session_id": out["session_id"],
-        "task_id": "t-2",
-        "archive_uri": None,
-        "messages": 5,
-    }
+def test_commit_session_conflict_does_not_replay(monkeypatch, base_dir: Path, tmp_path: Path):
+    calls = fake_urlopen(monkeypatch, lambda req, body: urllib.error.HTTPError(req.full_url, 409, "exists", {}, None))
+    out = _exp.commit(make_client(), _config.ExperienceConfig(),
+                      p_like=FakePaths(tmp_path, tmp_path), seq=1,
+                      entry={**ARCHIVED_ENTRY, "base": str(base_dir)})
+    assert out["ok"] is False and out["reason"] == "session-exists"
+    assert len(calls) == 1
+    assert calls[0][1].endswith("/api/v1/sessions")
 
 
 def test_commit_failure_records_reason_and_does_not_raise(
@@ -595,7 +582,9 @@ def test_render_block_drops_lowest_score_over_budget():
             {"uri": EXP_URI2, "score": 0.4, "text": "B" * 400},
         )
     )
-    block = _exp.render_block(res, max_tokens=120)
+    budget = _exp.estimate_tokens(_exp.render_block(_exp.RecallResult(entries=res.entries[:1])))
+    block = _exp.render_block(res, max_tokens=budget)
+    assert _exp.estimate_tokens(block) <= budget
     assert EXP_URI in block and EXP_URI2 not in block
     assert _exp.render_block(res, max_tokens=1) == ""
 
@@ -956,3 +945,84 @@ def test_build_messages_redacts_every_segment(tmp_path: Path):
     joined = "\n".join(m["content"] for m in msgs)
     assert "sk-zzzz" not in joined and "ghp_ABCDEFGH" not in joined
     assert "<redacted>" in joined
+
+
+def test_commit_success_is_reused_without_network(monkeypatch, base_dir, tmp_path):
+    calls = fake_urlopen(monkeypatch, lambda req, body: envelope({"task_id": "task-1"}))
+    kwargs = dict(p_like=FakePaths(tmp_path, tmp_path), seq=1, entry={**ARCHIVED_ENTRY, "base": str(base_dir)})
+    first = _exp.commit(make_client(), _config.ExperienceConfig(), **kwargs)
+    n = len(calls)
+    assert _exp.commit(make_client(), _config.ExperienceConfig(), **kwargs) == first
+    assert len(calls) == n
+
+
+@pytest.mark.parametrize("failure_at", [3, 7])
+def test_commit_retry_after_uncertain_write_never_appends(monkeypatch, base_dir, tmp_path, failure_at):
+    sent = []
+    exists = False
+    def handler(req, body):
+        nonlocal exists
+        sent.append(req.full_url)
+        if req.full_url.endswith("/sessions"):
+            if exists:
+                return urllib.error.HTTPError(req.full_url, 409, "exists", {}, None)
+            exists = True
+        if len(sent) == failure_at:
+            return TimeoutError("response lost")
+        return envelope({"task_id": "task-1"})
+    fake_urlopen(monkeypatch, handler)
+    kwargs = dict(p_like=FakePaths(tmp_path, tmp_path), seq=1, entry={**ARCHIVED_ENTRY, "base": str(base_dir)})
+    assert not _exp.commit(make_client(), _config.ExperienceConfig(), **kwargs)["ok"]
+    n = len(sent)
+    retry = _exp.commit(make_client(), _config.ExperienceConfig(), **kwargs)
+    assert retry["reason"] == "session-exists"
+    assert len(sent) == n + 1
+
+
+def test_archived_proposal_is_used_for_experience(base_dir, tmp_path):
+    archive = tmp_path / "openspec/changes/archive/2026-09-19-add-thing"
+    archive.mkdir(parents=True)
+    (archive / "proposal.md").write_text("## Why\nPreserve intent after archive.\n")
+    other = archive.parent / "2026-09-20-other-add-thing"
+    other.mkdir()
+    (other / "proposal.md").write_text("## Why\nWrong change\n")
+    case = _exp.build_case("add-thing", "p", base_dir, ARCHIVED_ENTRY, repo_root=tmp_path)
+    assert "Preserve intent" in case["case"]["input"]["proposal_summary"]
+    (base_dir / "experience.proposal.md").write_text("Exact proposal saved before archive")
+    case = _exp.build_case("add-thing", "p", base_dir, ARCHIVED_ENTRY, repo_root=tmp_path)
+    assert case["case"]["input"]["proposal_summary"] == "Exact proposal saved before archive"
+
+
+def test_budgeted_receipt_excludes_unseen_entries(tmp_path):
+    res = _exp.RecallResult(entries=(
+        {"uri": EXP_URI, "score": .9, "text": "A" * 400},
+        {"uri": EXP_URI2, "score": .4, "text": "B" * 400},
+    ))
+    budget = _exp.estimate_tokens(_exp.render_block(_exp.RecallResult(entries=res.entries[:1])))
+    block = _exp.render_block(res, max_tokens=budget)
+    record = _exp.write_injection_record(tmp_path, "implement", None, res, "head", block=block)
+    assert json.loads(record.read_text())["uris"] == [{"uri": EXP_URI, "score": .9}]
+    empty = _exp.render_block(res, max_tokens=1)
+    record = _exp.write_injection_record(tmp_path, "fix", 1, res, "head", block=empty)
+    assert json.loads(record.read_text())["uris"] == []
+
+
+def test_library_fingerprint_tracks_all_contents_not_query_scores():
+    class Store:
+        contents = {EXP_URI: "first", EXP_URI2: "second"}
+        def get(self, path, params):
+            if path == "/api/v1/fs/ls":
+                return {"result": [{"uri": u, "isDir": False} for u in reversed(self.contents)]}
+            return {"result": {"content": self.contents[params["uri"]]}}
+    store = Store()
+    first = _exp.library_fingerprint(store)
+    assert first and first == _exp.library_fingerprint(store)
+    store.contents[EXP_URI2] = "changed outside top search result"
+    assert _exp.library_fingerprint(store) != first
+
+
+def test_library_fingerprint_unavailable_is_not_an_empty_snapshot():
+    class Store:
+        def get(self, *a, **k):
+            return {"result": {"entries": []}}
+    assert _exp.library_fingerprint(Store()) is None

@@ -13,7 +13,6 @@ categories_seen / blocking_trend，调用方仅需传 ``--phase`` 与 ``--change
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import subprocess
 import time
@@ -159,12 +158,7 @@ def _short_head(repo_root: Path) -> str:
     return out.stdout.strip() or "-"
 
 
-def _snapshot_fingerprint(result) -> str:
-    payload = "\n".join(sorted(f"{e['uri']}:{e['score']:.4f}" for e in result.entries))
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
-
-
-def _sync_policy_snapshot(p, result) -> str | None:
+def _sync_policy_snapshot(p, result, client) -> str | None:
     """本 run 首次成功召回时把经验库快照指纹钉进 state；返回生效的指纹。
 
     钉住之后不再更新：同一 run 内比较 review 复发率必须锚定同一个经验库版本，
@@ -180,17 +174,19 @@ def _sync_policy_snapshot(p, result) -> str | None:
     if not result.entries:
         return None
 
-    snapshot = _snapshot_fingerprint(result)
+    snapshot = _experience.library_fingerprint(client)
+    if snapshot is None:
+        return None
 
     def mutate(s: dict) -> None:
         if not s.get("policy_snapshot_id"):
             s["policy_snapshot_id"] = snapshot
 
     try:
-        update_state(p.state_json, p.state_md, mutate)
+        state = update_state(p.state_json, p.state_md, mutate)
+        return state.get("policy_snapshot_id")
     except (FileNotFoundError, OSError, ValueError):
-        pass
-    return snapshot
+        return None
 
 
 def _injected_uris(base: Path) -> list[str]:
@@ -257,7 +253,7 @@ def _recall_experience(
 
         started = time.monotonic()
         result = _experience.recall(
-            client, cfg, phase=phase, query=query, exclude_uris=_injected_uris(base)
+            client, cfg, phase=phase, query=query, exclude_uris=_experience._already_injected_uris(p, seq)
         )
         duration_ms = int((time.monotonic() - started) * 1000)
 
@@ -272,7 +268,7 @@ def _recall_experience(
 
         injected = block.count(_experience.INJECTION_TAG)
         tokens = _experience.estimate_tokens(block)
-        snapshot = _sync_policy_snapshot(p, result)
+        snapshot = _sync_policy_snapshot(p, result, client)
 
         _telemetry.emit_experience_recall(
             proj_key=p.proj_key,
@@ -284,7 +280,7 @@ def _recall_experience(
             ok=result.error is None,
             entries=injected,
             injected_tokens=tokens,
-            uris=result.uris,
+            uris=[e["uri"] for e in _experience.injected_entries(result, block)],
             error=result.error,
             duration_ms=duration_ms,
             state_json=p.state_json,
