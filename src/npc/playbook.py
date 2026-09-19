@@ -49,7 +49,7 @@ PLAYBOOKS: tuple[Playbook, ...] = (
         name="spine-run",
         kind="command",
         file="spine-run.md",
-        summary="长时自主 harness：目标/changes → implement→review→fix→archive 全循环",
+        summary="自主 harness：目标/changes → DAG 波次 + worktree 并行 implement → integrate → review→fix→archive 流水线",
     ),
     Playbook(
         name="spine-analyze",
@@ -73,7 +73,7 @@ PLAYBOOKS: tuple[Playbook, ...] = (
         name="new-plan-changes-v4",
         kind="skill",
         file="new-plan-changes-v4.md",
-        summary="v3 的上下文预算版：每 change 三条 npc 命令，主 session 只出现在决策分叉点",
+        summary="已并入 spine-run（兼容别名，内容为转向说明）",
     ),
     Playbook(
         name="spine-coder",

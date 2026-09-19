@@ -9,7 +9,7 @@ agent-spine 把一次自主编码 run 拆成两层，层间以严格契约通信
 ## 核心能力
 
 - **spec 到交付的自主闭环** — 给 harness 一批 OpenSpec change 或一句话目标，它自动完成 plan → implement → review → fix → archive。交互档在决策分叉点停下问人；`--auto` 档全程无人值守，例行决策下沉给 `npc auto-decide`。
-- **波次并行批量执行** — `new-plan-changes-v4` 按依赖关系把 active changes 切成 DAG 波次，每个 change 在独立 git worktree 内并行实施，再串行整合（`npc integrate` / `npc change run`）。
+- **波次并行执行** — `spine-run` 按依赖关系把 changes 切成 DAG 波次，每个 change 在独立 git worktree 内并行实施，再串行整合（`npc integrate` / `npc change run`）。输入可以是一句话目标（先拆解成 changes）、指定 change 名，或留空（= 全部 active changes）。
 - **独立 review 闸门** — 每个 change 经过 premium 引擎（`codex exec` 或 `claude -p`，可插拔）驱动的 review→fix 循环，带 blocking 趋势追踪与 stale 检测。廉价执行后端在结构上被禁止给自己的产出盖章（`npc verify routing` 强制拦截）。
 - **coder 多模型路由** — provider 注册表把 implement / fix 路由到任意 Anthropic 兼容端点（Kimi / Qwen / DeepSeek / …）或 `codex exec`。凭据与模型全局定义一次，每个工程只声明用哪个，可按阶段细分。
 - **确定性执行层** — 状态、事件、prompt 模板、review 解析、archive、git 机械动作各是一条 `npc` 子命令：stdout 一行 JSON + 文档化 exit code 契约（`0` 成功 / `1` 业务失败 / `2` 用法错 / `3` 环境错 / `4` 依赖缺失）。
@@ -22,8 +22,8 @@ agent-spine 把一次自主编码 run 拆成两层，层间以严格契约通信
 
 ```
 ┌─ 智能层（playbook，在你的 agent CLI 内执行）───────────────────────┐
-│  spine-run            单目标 / 单 change 完整闭环                  │
-│  new-plan-changes-v4  批量：DAG 波次 + worktree 并行   ← 推荐入口  │
+│  spine-run            目标 / changes → DAG 波次 + worktree 并行 ← 唯一入口 │
+│  new-plan-changes-v4  已并入 spine-run（保留别名兼容旧调用）          │
 │  spine-analyze        跨 run 指标复盘，harness 自迭代              │
 │  spine-coder          coder sub-agent 定义 / persona               │
 └──────────────────────────────┬─────────────────────────────────────┘
@@ -34,7 +34,7 @@ agent-spine 把一次自主编码 run 拆成两层，层间以严格契约通信
 └────────────────────────────────────────────────────────────────────┘
 ```
 
-`npc` 可以单独使用（CI 或普通终端手工调试），但推荐形态是 playbook + npc 配合：批量推进走 `new-plan-changes-v4`，单目标自主闭环走 `spine-run`（`new-plan-changes-v2`/`v3` 为历史演进版本，保留备查）。
+`npc` 可以单独使用（CI 或普通终端手工调试），但推荐形态是 playbook + npc 配合：一律走 `spine-run`（`new-plan-changes-v2`/`v3`/`v4` 为历史演进版本，`v4` 现为转向 `spine-run` 的别名）。
 
 ## 快速开始
 
@@ -54,8 +54,8 @@ npc playbook install --dest <DIR>     # 其它宿主：平铺到任意目录，�
 然后在一个带 `openspec/` 目录的 git 工程内：
 
 ```text
-/new-plan-changes-v4                    # 批量：波次并行推进全部 active changes
-/spine-run 给认证模块加请求限流 --auto    # 单目标，fire-and-forget
+/spine-run --auto --max-parallel 4       # 全部 active changes，波次并行，fire-and-forget
+/spine-run 给认证模块加请求限流 --auto    # 单目标：先拆解成 changes，再走同一流水线
 ```
 
 完整三层配置（CLI + playbooks + 项目上下文片段）见 [docs/usage.md](docs/usage.md)。

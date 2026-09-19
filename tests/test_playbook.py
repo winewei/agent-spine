@@ -117,3 +117,119 @@ def test_cli_show_unknown_exits_2(capsys):
     with pytest.raises(SystemExit) as ei:
         playbook.cli_show(argparse.Namespace(name="nope"))
     assert ei.value.code == 2
+
+
+def test_spine_single_node_creates_runtime_dag(tmp_path):
+    import os
+    import re
+    import subprocess
+    import shutil
+    if not shutil.which("jq"):
+        pytest.skip("jq is required by the playbook")
+    text = playbook.read_text(playbook.get("spine-run"))
+    blocks = re.findall(r"```bash\n(.*?)```", text, re.S)
+    block = next(b for b in blocks if b.startswith('jq -n --arg cid'))
+    subprocess.run(["bash", "-c", block], check=True,
+                   env={**os.environ, "CID": "single", "RUN_DIR": str(tmp_path)})
+    from npc.waves import ready
+    dag = json.loads((tmp_path / "v3-dag-extract.json").read_text())
+    assert ready(dag)["ready"] == ["single"]
+
+
+def test_spine_final_waves_enforce_runtime_dependencies(tmp_path):
+    import os
+    import re
+    import shutil
+    import subprocess
+    if not shutil.which("jq"):
+        pytest.skip("jq is required by the playbook")
+    text = playbook.read_text(playbook.get("spine-run"))
+    block = next(b for b in re.findall(r"```bash\n(.*?)```", text, re.S)
+                 if b.startswith('DAG=') and '--argjson w' in b)
+    path = tmp_path / "v3-dag-extract.json"
+    path.write_text(json.dumps({"nodes": ["a", "b", "c"], "edges": [["a", "c"]], "files": {}}))
+    subprocess.run(["bash", "-c", block], check=True, env={**os.environ,
+                   "RUN_DIR": str(tmp_path), "FINAL_WAVES": '[["a"],["b","c"]]'})
+    from npc.waves import ready
+    dag = json.loads(path.read_text())
+    assert ready(dag)["ready"] == ["a"]
+    assert ready({**dag, "done": ["a"]})["ready"] == ["b", "c"]
+
+
+def test_spine_ready_excludes_failed_terminal_changes(tmp_path):
+    import os
+    import re
+    import shutil
+    import subprocess
+    if not shutil.which("jq"):
+        pytest.skip("jq is required by the playbook")
+    text = playbook.read_text(playbook.get("spine-run"))
+    block = next(b for b in re.findall(r"```bash\n(.*?)```", text, re.S) if 'READY=$(jq' in b)
+    # Execute the exact documented jq input builder, then use the production scheduler.
+    builder = block.split('READY=$(', 1)[1].split('| npc plan ready', 1)[0].lstrip()
+    path = tmp_path / "v3-dag-extract.json"
+    path.write_text(json.dumps({"nodes": ["a", "b"], "edges": [], "files": {}}))
+    result = subprocess.run(["bash", "-c", builder], check=True, capture_output=True, text=True,
+                            env={**os.environ, "DAG": str(path), "DONE": "[]", "ACTIVE": "[]",
+                                 "PENDING": "[]", "FINISHED": '["a"]', "SLOTS": "2"})
+    from npc.waves import ready
+    assert ready(json.loads(result.stdout))["ready"] == ["b"]
+
+
+def test_spine_inner_loop_keeps_warning_out_of_json(tmp_path):
+    import os
+    import re
+    import subprocess
+    text = playbook.read_text(playbook.get("spine-run"))
+    block = next(b for b in re.findall(r"```bash\n(.*?)```", text, re.S)
+                 if b.startswith('npc change run --seq'))
+    fake_npc = "npc() { echo warning >&2; echo '{\"ok\":true}'; }\n"
+    subprocess.run(["bash", "-c", fake_npc + block], check=True,
+                   env={**os.environ, "RUN_DIR": str(tmp_path), "SEQ": "1", "AUTO": ""})
+    assert json.loads((tmp_path / "change-run-1.json").read_text()) == {"ok": True}
+    assert (tmp_path / "change-run-1.stderr.log").read_text().strip() == "warning"
+
+
+@pytest.mark.parametrize("resuming", [False, True])
+def test_spine_init_binds_paths_and_original_start(tmp_path, resuming):
+    import os
+    import re
+    import shutil
+    import subprocess
+    if not shutil.which("jq"):
+        pytest.skip("jq is required by the playbook")
+    run_dir = tmp_path / "run with spaces"
+    run_dir.mkdir()
+    state = tmp_path / "state.json"
+    if resuming:
+        state.write_text(json.dumps({"started_at": "2026-01-02T03:04:05Z"}))
+    payload = {"run_dir": str(run_dir), "run_ts": "run-one", "state_json": str(state)}
+    text = playbook.read_text(playbook.get("spine-run"))
+    blocks = re.findall(r"```bash\n(.*?)```", text, re.S)
+    init = next(b for b in blocks if b.startswith("INIT="))
+    dag = next(b for b in blocks if b.startswith("jq -n --arg cid"))
+    script = 'npc() { printf "%s\\n" "$INIT_PAYLOAD"; }\n' + init + dag + '\nprintf "%s" "$RUN_T0"'
+    result = subprocess.run(["bash", "-c", script], check=True, capture_output=True, text=True,
+                            env={**os.environ, "INIT_PAYLOAD": json.dumps(payload), "CID": "one"})
+    assert json.loads((run_dir / "v3-dag-extract.json").read_text())["nodes"] == ["one"]
+    assert result.stdout == "2026-01-02T03:04:05Z" if resuming else result.stdout.endswith("Z")
+
+
+def test_spine_checkpoint_retains_concurrent_jobs(tmp_path):
+    import os
+    import re
+    import shutil
+    import subprocess
+    if not shutil.which("jq"):
+        pytest.skip("jq is required by the playbook")
+    text = playbook.read_text(playbook.get("spine-run"))
+    block = next(b for b in re.findall(r"```bash\n(.*?)```", text, re.S)
+                 if b.startswith('jq -n --arg run_ts'))
+    jobs = {"b": {"handle": "agent-42"}, "c": {"result": "result with spaces.txt"}}
+    subprocess.run(["bash", "-c", block], check=True, env={**os.environ,
+                   "RUN_DIR": str(tmp_path), "RUN_TS": "original", "DONE": '["a"]',
+                   "FINISHED": '["d"]', "ACTIVE": '["b"]', "PENDING": '["c"]',
+                   "INNER": '["a"]', "JOBS": json.dumps(jobs)})
+    saved = json.loads((tmp_path / "scheduler.json").read_text())
+    assert saved == {"run_ts": "original", "done": ["a"], "finished": ["d"],
+                     "active": ["b"], "pending": ["c"], "inner": ["a"], "jobs": jobs}

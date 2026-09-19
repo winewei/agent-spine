@@ -2,7 +2,7 @@
 
 本指南给 **执行安装的 agent**（任意 agent CLI 宿主：Claude Code / Kimi CLI / Qwen Code / Codex / OpenCode / …）用。下面是一句话安装 + 每步验证 + 失败处置，便于 agent 自检与排错。
 
-> spine agent = 安装后的 `npc` 命令（确定性执行层，代码在 `src/npc`；**唯一分发物**）+ 随包发行的宿主中立 playbooks（`spine-run` / `spine-analyze` / `spine-coder` / `new-plan-changes-v2/v3/v4`），经 `npc playbook install` 物化到宿主。v1.7 起不再有 Claude Code plugin。
+> spine agent = 安装后的 `npc` 命令（确定性执行层，代码在 `src/npc`；**唯一分发物**）+ 随包发行的宿主中立 playbooks（`spine-run` / `spine-analyze` / `spine-coder`；`new-plan-changes-v2/v3` 为历史版本，`v4` 已并入 `spine-run` 仅留别名），经 `npc playbook install` 物化到宿主。v1.7 起不再有 Claude Code plugin。
 
 ## 一句话安装
 
