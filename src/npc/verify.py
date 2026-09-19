@@ -25,6 +25,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import json
 import re
@@ -656,11 +657,7 @@ def run_tasks_check(args: argparse.Namespace) -> None:
 # 经验层只经 HTTP 调 OpenViking：其主仓与 Python SDK 为 AGPLv3，而 npc 是 MIT；
 # 同时 dependencies = [] 是发布契约（宿主中立、零安装摩擦）。两条一起把
 # "import 任何第三方 HTTP / OpenViking 包" 变成硬违规，由本子命令执法。
-FORBIDDEN_IMPORT_RES: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("openviking", re.compile(r"^\s*(?:from|import)\s+openviking\b")),
-    ("httpx", re.compile(r"^\s*(?:from|import)\s+httpx\b")),
-    ("requests", re.compile(r"^\s*(?:from|import)\s+requests\b")),
-)
+FORBIDDEN_IMPORTS = frozenset({"openviking", "httpx", "requests"})
 
 
 def check_deps(repo_root: Path) -> list[dict]:
@@ -709,15 +706,24 @@ def check_deps(repo_root: Path) -> list[dict]:
             )
             continue
         rel = path.relative_to(repo_root)
-        for lineno, line in enumerate(lines, start=1):
-            for name, pattern in FORBIDDEN_IMPORT_RES:
-                if pattern.match(line):
-                    violations.append(
-                        {
-                            "rule": "forbidden_import",
-                            "detail": f"{rel}:{lineno} 出现禁止的 import {name}：{line.strip()}",
-                        }
-                    )
+        try:
+            tree = ast.parse("\n".join(lines), filename=str(path))
+        except SyntaxError as e:
+            violations.append({"rule": "source_unreadable", "detail": f"{rel}:{e.lineno}: {e.msg}"})
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                names = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.level == 0:
+                names = [node.module or ""]
+            else:
+                continue
+            for name in names:
+                if name.split(".")[0] in FORBIDDEN_IMPORTS:
+                    violations.append({
+                        "rule": "forbidden_import",
+                        "detail": f"{rel}:{node.lineno} 出现禁止的 import {name}",
+                    })
     return violations
 
 
