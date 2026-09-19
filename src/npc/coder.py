@@ -204,6 +204,7 @@ def _render_prompt_file(
     phase: str,
     round_n: int | None,
     implement_commit: str | None,
+    config: Config | None = None,
 ) -> tuple[Path, str]:
     """渲染 prompt 文件到 disk 并返回 (prompt_file, prompt_text)。
 
@@ -214,7 +215,7 @@ def _render_prompt_file(
 
     base.mkdir(parents=True, exist_ok=True)
     if phase == "implement":
-        exp_block, _ = _recall_experience(p, base, seq, phase=phase, round_n=None, change_id=change_id)
+        exp_block, _ = _recall_experience(p, base, seq, phase=phase, round_n=None, change_id=change_id, config=config)
         prompt_file = base / "implement.prompt.md"
         text = templates.render_implementer(
             change_id=change_id, base=str(base), repo_root=str(p.repo_root), experience_block=exp_block
@@ -244,7 +245,7 @@ def _render_prompt_file(
             findings_md = render_findings(blocking_findings)
         exp_block, _ = _recall_experience(
             p, base, seq, phase=phase, round_n=round_n, change_id=change_id,
-            blocking_findings=blocking_findings,
+            blocking_findings=blocking_findings, config=config,
         )
         text = templates.render_fixer(
             change_id=change_id,
@@ -411,7 +412,7 @@ def _do_implement_body(
     base = Path(entry.get("base") or _paths.base_for(p, seq, change_id))
 
     _, spawn_text = _render_prompt_file(
-        p, seq, change_id, base, "implement", None, None
+        p, seq, change_id, base, "implement", None, None, config=cfg
     )
 
     result, model = _run_backend(
@@ -519,7 +520,7 @@ def _do_fix_body(
     base = Path(entry.get("base") or _paths.base_for(p, seq, change_id))
 
     _, spawn_text = _render_prompt_file(
-        p, seq, change_id, base, "fix", round_n, implement_commit
+        p, seq, change_id, base, "fix", round_n, implement_commit, config=cfg
     )
 
     result, model = _run_backend(

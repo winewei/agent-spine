@@ -459,3 +459,13 @@ def test_cli_run_main_busy_exits_1_without_running(env_setup, make_args, capsys,
     assert out["error"] == "main_busy"
     assert "integrate seq=2" in out["message"]
     assert called == []
+
+
+def test_change_forwards_config_override_to_archive(env_setup, make_args, capsys, monkeypatch, tmp_path):
+    _bootstrap_run(make_args, capsys, "add-foo")
+    arc = Script([dict(OK_ARCHIVE)])
+    _patch(monkeypatch, implement=Script([OK_IMPL]), review=Script([review_result(0)]), archive=arc)
+    override = tmp_path / "selected.toml"
+    override.write_text("[experience]\nenabled = false\n")
+    assert _change.run_change(env_setup, 1, config_path=override)["ok"]
+    assert arc.calls[0][1]["config_path"] == override

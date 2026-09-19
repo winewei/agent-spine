@@ -488,6 +488,17 @@ def build_outcome_message(total_rounds: int, tests: str) -> str:
     )
 
 
+def _redact_values(value):
+    """Redact strings before JSON escaping can hide credential assignments."""
+    if isinstance(value, str):
+        return redact_secrets(value)
+    if isinstance(value, dict):
+        return {_redact_values(k): _redact_values(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redact_values(v) for v in value]
+    return value
+
+
 def build_messages(
     change_id: str,
     proj_key: str,
@@ -501,7 +512,7 @@ def build_messages(
     首尾两段恒存在（CaseSpec header 决定 fast path，outcome 决定学习信号）；
     中间三段缺文件时整段跳过——空 content 对抽取链路无信息量。
     """
-    case = build_case(change_id, proj_key, base, entry, repo_root=repo_root)
+    case = _redact_values(build_case(change_id, proj_key, base, entry, repo_root=repo_root))
     findings = collect_findings(base)
 
     messages: list[dict] = [

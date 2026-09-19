@@ -1119,3 +1119,15 @@ def test_experience_missing_credentials_writes_receipt(env_setup, make_args, cap
     receipt = Path(entry["base"]) / "experience.commit.json"
     assert out["reason"] == "no-credentials"
     assert json.loads(receipt.read_text())["reason"] == "no-credentials"
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_archive_experience_honors_config_override(env_setup, make_args, capsys, fake_repo, monkeypatch, enabled):
+    p = _prepare_archive(env_setup, make_args, capsys, fake_repo, monkeypatch)
+    (fake_repo / ".npc").mkdir(exist_ok=True)
+    (fake_repo / ".npc/config.toml").write_text(f"[experience]\nenabled = {str(not enabled).lower()}\n")
+    override = fake_repo / "override.toml"
+    override.write_text(f"[experience]\nenabled = {str(enabled).lower()}\nwrite_gate = 'any'\n")
+    result = _pipeline.run_archive(p, 1, config_path=override)
+    assert result["ok"]
+    assert ("experience" in result) == enabled
