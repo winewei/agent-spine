@@ -1035,3 +1035,17 @@ def test_fix_query_reserves_change_identity_before_truncating_findings():
     assert len(first) <= _exp.QUERY_MAX_CHARS
     assert first.endswith("change-one") and second.endswith("change-two")
     assert first != second
+
+
+def test_manual_recall_reports_only_budgeted_entries(env_setup, make_args, capsys, monkeypatch):
+    monkeypatch.chdir(env_setup.repo_root)
+    _enable(env_setup.repo_root, inject_max_tokens_fix=1)
+    _bootstrap(make_args, capsys)
+    monkeypatch.setattr(_exp, "from_config", lambda *a, **k: object())
+    monkeypatch.setattr(_exp, "recall", lambda *a, **k: _exp.RecallResult(entries=(
+        {"uri": EXP_URI, "score": .9, "text": "too large for one token"},)))
+    _exp.cli_recall(make_args(seq=1, phase="fix", round_n=1, query="q", strict=False))
+    out = _out(capsys)
+    assert out["entries"] == 0 and out["uris"] == []
+    assert Path(out["path"]).read_text() == ""
+    assert json.loads(Path(out["record"]).read_text())["uris"] == []

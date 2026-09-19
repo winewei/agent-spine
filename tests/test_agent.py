@@ -666,12 +666,16 @@ def test_experience_no_credentials_reports_error_without_recall(
     _enable_experience(env_setup.repo_root)
     _bootstrap(env_setup, make_args, capsys, "add-foo")
     monkeypatch.setattr(_experience, "from_config", lambda *a, **k: None)
+    calls = _spy_telemetry(monkeypatch)
 
     _render_implement(make_args)
     out = _read_emit(capsys)
 
     assert out["experience_injected"] == 0
     assert out["experience_error"] == "no-credentials"
+    record = json.loads(Path(out["experience_record"]).read_text())
+    assert record["error"] == "no-credentials" and record["uris"] == []
+    assert calls[0]["error"] == "no-credentials" and calls[0]["ok"] is False
 
 
 def test_experience_internal_exception_degrades_to_empty_block(
