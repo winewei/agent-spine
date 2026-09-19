@@ -1026,3 +1026,12 @@ def test_library_fingerprint_unavailable_is_not_an_empty_snapshot():
         def get(self, *a, **k):
             return {"result": {"entries": []}}
     assert _exp.library_fingerprint(Store()) is None
+
+
+def test_fix_query_reserves_change_identity_before_truncating_findings():
+    titles = ["validation: " + "a" * 300, "another finding"]
+    first = _exp.build_query("fix", change_id="change-one", findings_titles=titles)
+    second = _exp.build_query("fix", change_id="change-two", findings_titles=titles)
+    assert len(first) <= _exp.QUERY_MAX_CHARS
+    assert first.endswith("change-one") and second.endswith("change-two")
+    assert first != second
