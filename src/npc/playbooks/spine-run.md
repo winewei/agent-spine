@@ -145,12 +145,14 @@ DAG="$RUN_DIR/v3-dag-extract.json"
 jq --argjson w "$FINAL_WAVES" '.edges = (((.edges // []) + [range(1; ($w|length)) as $i | $w[$i-1][] as $a | $w[$i][] | [$a, .]]) | unique)' "$DAG" > "$DAG.tmp" && mv "$DAG.tmp" "$DAG"
 ```
 
+先打印 Wave Plan Summary（波次、拆分理由、降级/提级）。交互档此时 ExitPlanMode 并等待批准；若用户调整计划，返回 2.1 重算并重新确认，**批准前不能执行 `state init-run`**。`--auto` 跳过审批。仅在计划获批（或 auto 档确定）后执行：
+
 ```bash
 npc state init-run --plan-order "$(jq -nc --argjson w "$FINAL_WAVES" '$w|add')" --goal "<用户的原始目标一句话>"
 echo "$FINAL_WAVES" > "$RUN_DIR/v4-waves.json"
 ```
 
-打印 Wave Plan Summary（波次、拆分理由、降级/提级）留痕到 run.events.jsonl。交互档 ExitPlanMode 等批准；`--auto` 不进 plan 模式直接跑。
+把已采用的 Wave Plan Summary 留痕到 run.events.jsonl。
 
 ---
 
@@ -257,7 +259,12 @@ BRIEF=$(npc status --brief)   # notes = 人的转向指令；消费后 npc state
 
 ## Step 3S — 串行回退（`--serial`）
 
-用户明确要求、或宿主既无 sub-agent 并发也无后台执行时，退回逐波屏障：对 FINAL_WAVES 逐波执行 3b（波内全部 CID 同一消息并发 spawn；无 sub-agent 的宿主改为逐个 `npc implement run --seq $SEQ`，headless coder 直接在 main 上实施，无需 integrate）→ 逐个 3c 整合（整合后**不**续闸）→ 波内全部整合完毕后，对本波已整合的 change 按 SEQ 串行前台跑 3d 的 `npc change run` → 波收尾发 `wave.done`（字段同 3e，`wave` 替 `layer`）→ 波间检查点与 re-plan 同 3f。整波走完再进下一波。
+用户明确要求、或宿主既无 sub-agent 并发也无后台执行时，退回逐波屏障。两种执行路径必须分开：
+
+- **支持 sub-agent / worktree**：对 FINAL_WAVES 逐波执行 3b（波内并发）→ 逐个 3c 整合，成功更新 DONE/INNER，但不向下一波续闸 → 对本波 INNER 按 SEQ 串行前台跑 3d，处理全部退出码和终态。
+- **没有 sub-agent**：按波次、SEQ 逐个执行 `npc state add-change`，然后 `npc implement run --seq "$SEQ"` 直接在 main 实施。主 session 等待其退出，stdout/stderr 分开保存；检查退出码、JSON `.ok` 和 commit，成功后运行 `npc verify tests` 真实复跑。两项均成功才 `DONE += CID`、`INNER += CID` 并保存检查点，随即前台执行 `npc change run --seq "$SEQ" --from review ${AUTO:+--auto}`，按 3d 处理 archived/failed/skipped/needs-decision，移出 INNER、更新 FINISHED。此路径**完全跳过 3b 的 Agent 和 3c 的 npc integrate**，不要求 worktree RESULT/manifest，也不等待“已整合”标记。实施或验证失败不得进入 DONE/INNER；验证失败时先核对本次 commit 并 revert，再走 `npc auto-decide --seq "$SEQ" --trigger implementer-failed --apply`（交互档等待决策），显式重试或记终态，依赖失败的下游跳过。
+
+每波内环全部落定后发 `wave.done`（字段同 3e，`wave` 替 `layer`），波间检查点与 re-plan 同 3f。恢复同样先经过 Step 1 的恢复闸门；无后台能力不代表可以忽略已有任务。
 
 代价即 Step 3 要解决的问题：整波等最慢的一个 change，下一波空转。仅在正确性优先于墙钟、或宿主能力不足时使用。
 
