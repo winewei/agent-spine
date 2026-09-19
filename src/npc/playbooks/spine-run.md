@@ -105,12 +105,25 @@ INIT=$(npc init ${AUTO:+--auto} ${FRESH:+--fresh})   # run_ts / needs_resume / s
 
 ### 2.1 DAG 与波次（全部在 sub-agent 里）
 
-`|NODES| == 1` 时跳过本节：`FINAL_WAVES = [[cid]]`。
+`|NODES| == 1` 时不派分析 agent：令 `CID` 为唯一 change、`FINAL_WAVES = [[CID]]`，但必须先写入 Step 3 要读取的 DAG 文件，再进入 2.2：
+
+```bash
+jq -n --arg cid "$CID" '{nodes:[$cid],edges:[],files:{},tie_break:{}}' > "$RUN_DIR/v3-dag-extract.json"
+```
+
+多个 change 时执行以下两步：
 
 1. spawn `dag-analyst`（Explore，只读）：读 N×4 份文档 → 抽 nodes/edges/files（目录级条目用 Grep 展开）→ 跑 `npc plan waves` → 写 `<run_dir>/v3-dag-extract.json` → 回一行 RESULT。校验 nodes 完整、candidate.waves 展平=NODES；失败重发一次，再失败 `--auto` 才降级自抽（记 `dag_extract_fallback`），交互档真停。
 2. spawn 双架构师（并行，只读；`--no-architect` 跳过）：A=senior-system-architect 查语义耦合（共享状态/时序/不变量），B=senior-code-developer 查落地冲突（真实文件/import/构建）。任一判 serialize 即拆；提级须双方 independent+给理由。得 FINAL_WAVES。
 
 ### 2.2 落地
+
+架构师的最终波次必须转换为运行时依赖，不能只写展示文件。先确认 `FINAL_WAVES` 展平后恰好包含全部 NODES、无重复且尊重原 DAG；把相邻波次的先后关系追加为 edges，保留原有依赖。所有后续问闸和 re-plan 都使用这份已裁定的 DAG：
+
+```bash
+DAG="$RUN_DIR/v3-dag-extract.json"
+jq --argjson w "$FINAL_WAVES" '.edges = (((.edges // []) + [range(1; ($w|length)) as $i | $w[$i-1][] as $a | $w[$i][] | [$a, .]]) | unique)' "$DAG" > "$DAG.tmp" && mv "$DAG.tmp" "$DAG"
+```
 
 ```bash
 npc state init-run --plan-order "$(jq -nc --argjson w "$FINAL_WAVES" '$w|add')" --goal "<用户的原始目标一句话>"
@@ -129,11 +142,12 @@ echo "$FINAL_WAVES" > "$RUN_DIR/v4-waves.json"
 
 `v4-waves.json` 保留为**初始计划与人审展示物**，波号只用于 telemetry 与汇报；实际调度由 `npc plan ready` 按运行时集合逐次判定，不再有屏障。
 
-维护四个集合（主 session 内存，每次变更记 run.events.jsonl）：
+维护五个集合（主 session 内存，每次变更记 run.events.jsonl）：
 
 | 集合 | 含义 | 何时变 |
 |---|---|---|
 | DONE | 已 `npc integrate` 成功、代码在 main 上 | integrate exit 0 时 `+= CID` |
+| FINISHED | 已进入 archived/skipped/failed 终态、不再自动派发 | 明确终态时 `+= CID`；仅显式重试决策后移出 |
 | ACTIVE | implementer 正在 worktree 中跑 | spawn 时 `+= CID`；返回时 `-= CID` |
 | INNER | 已整合，排队或正在跑 `npc change run` | integrate 成功时 `+= CID`；内环结束时 `-= CID` |
 | PENDING | implementer 已返回、等待整合（内环占用 main 期间） | implementer 返回时 `+= CID`（同时 `ACTIVE -= CID`）；integrate 成功或终态失败时 `-= CID` |
@@ -144,14 +158,14 @@ echo "$FINAL_WAVES" > "$RUN_DIR/v4-waves.json"
 
 ```bash
 DAG="$RUN_DIR/v3-dag-extract.json"     # Step 2 产物：nodes / edges / files / tie_break（单 change 时为 {nodes:[cid],edges:[],files:{}}）
-READY=$(jq -c --argjson done "$DONE" --argjson active "$ACTIVE" --argjson pending "$PENDING" --argjson lim "$SLOTS" \
-          '{nodes,edges,files,tie_break} + {done:$done, active:($active + $pending), limit:$lim}' "$DAG" \
+READY=$(jq -c --argjson done "$DONE" --argjson active "$ACTIVE" --argjson pending "$PENDING" --argjson finished "$FINISHED" --argjson lim "$SLOTS" \
+          '{nodes,edges,files,tie_break} + {done:$done, active:($active + $pending), finished:$finished, limit:$lim}' "$DAG" \
         | npc plan ready | jq -r '.ready[]')
 ```
 
 `active` 参数传 **ACTIVE ∪ PENDING**：待整合的 change 虽不占 implementer 槽位，但必须留在排除集里——否则下一次问闸会把它再判为 ready、重复 spawn，产生两份互相竞争的 commit 与 manifest；其文件即将落到 main，与它有文件交集的 change 也应等它整合完再开。`SLOTS` 只按 `|ACTIVE|` 算，PENDING 不消耗槽位。
 
-初始开闸即 `DONE=[]`、`ACTIVE=[]`、`SLOTS=MAX_PARALLEL`，把返回的 ready 在**同一消息里**并发 spawn（3b）。
+初始开闸即 `DONE=[]`、`ACTIVE=[]`、`PENDING=[]`、`INNER=[]`、`FINISHED=[]`、`SLOTS=MAX_PARALLEL`，把返回的 ready 在**同一消息里**并发 spawn（3b）。
 
 **3b. spawn 一个 implementer（worktree 隔离）**——每开一个 change 都走这三行，然后 `ACTIVE += CID`：
 
@@ -174,20 +188,20 @@ npc integrate --seq "$SEQ" --result "<RESULT 行>" --manifest "<MANIFEST 路径>
 **main 互斥（硬约束）**：整合与内环都改 main worktree 和 state.json（cherry-pick / 跑测试 / fix commit / archive commit / 读改写 progress），**二者绝不并发**。规则：3d 的后台 `change run` 在跑时，implementer 返回的 RESULT/MANIFEST 只入 `PENDING` 队列（按返回顺序），不调 `npc integrate`；每次内环完成通知到达、且在启动下一个 `change run` **之前**，先把 `PENDING` 全部整合完（逐条 `npc integrate`，每条成功后续闸 3a），再起下一个内环。npc 层有两把真锁兜底：`npc integrate` 与 `npc change run` 全程互斥持有 `<task_log_dir>/.main.lock`（integrate 拿不到即返回 `step=inner-loop-active`，无副作用，收到即入队，不要 `--force`）；所有 state 装订（含 3b 的 `state add-change` / `phase rotate`）都在 `<state>.lock` 下读改写，所以内环在跑时**继续 spawn 是安全的**——spawn 只写 state 与 worktree，不碰 main。implementer 在 worktree 内继续跑，不受排队影响。
 
 - exit 0 → `ACTIVE -= CID`、`DONE += CID`、`INNER += CID`，然后**立刻**重跑 3a 的 `npc plan ready`（新的 DONE/ACTIVE），把新 ready 的 change 在**同一条消息里**并发 spawn 填满槽位，同时按 3d 推进内环队列。不要攒到"本波结束"再问闸。
-- 失败看 `.step`：`inner-loop-active` → `PENDING += CID`（已 `ACTIVE -= CID`），内环结束后重试；不算失败，不进 DONE，但仍在 3a 的排除集里；`verify-manifest`（plan-only）→ 重发该 implementer 一次（前缀 "IMPLEMENT NOW"），再失败标 failed 并 `ACTIVE -= CID`；`cherry-pick` → 记入 re-plan 信号（见 3f），该 change 改串行 `npc implement run --seq $SEQ`；`verify-tests`（已自动 revert）→ `npc auto-decide --seq $SEQ --trigger implementer-failed --apply`。
-- 任何失败都要把 CID 移出 ACTIVE 并重跑一次 3a——否则槽位泄漏，流水线越跑越窄。
+- 失败看 `.step`：`inner-loop-active` → `PENDING += CID`（已 `ACTIVE -= CID`），内环结束后重试；不算失败，不进 DONE，但仍在 3a 的排除集里；`verify-manifest`（plan-only）→ 重发该 implementer 一次（前缀 "IMPLEMENT NOW"），再失败标 failed、`FINISHED += CID` 并 `ACTIVE -= CID`；`cherry-pick` → 记入 re-plan 信号（见 3f），该 change 改串行 `npc implement run --seq $SEQ`；`verify-tests`（已自动 revert）→ `npc auto-decide --seq $SEQ --trigger implementer-failed --apply`。
+- 任何失败都要把 CID 移出 ACTIVE；若裁定为 failed/skipped，先加入 FINISHED 再重跑 3a——否则槽位泄漏，流水线越跑越窄。FINISHED 只排除重复调度，失败项不能放入 DONE 来满足下游依赖；有依赖的失败项触发 3f 重排，下游无法满足时明确标 skipped 并加入 FINISHED。
 
 **3d. 内环（后台执行，SEQ 序串行）**——对 INNER 队列按 SEQ 升序**一次只跑一个**：
 
 ```bash
-npc change run --seq "$SEQ" --from review ${AUTO:+--auto} > "$RUN_DIR/change-run-$SEQ.json" 2>&1
+npc change run --seq "$SEQ" --from review ${AUTO:+--auto} > "$RUN_DIR/change-run-$SEQ.json" 2> "$RUN_DIR/change-run-$SEQ.stderr.log"
 ```
 
 后台起（Claude Code：Bash `run_in_background: true`；其它宿主见顶部适配表），主 session 不阻塞，继续处理 implementer 返回（入 `PENDING`）与 spawn。**内环不并发、也不与整合并发**：review/fix/archive 的 commit 与 integrate 的 cherry-pick 都落在 main 上，同时跑会互相打架、测错 HEAD、覆盖 state。内环内部的 review-fix 循环由 npc 执行（默认上限 20 轮、尊重 `stale` 闸门），fix 轮的 coder 按 `[coder]` 路由起子进程。
 
 完成通知到达后读 `$RUN_DIR/change-run-$SEQ.json` 一行 JSON，`INNER -= CID`；**先排空 `PENDING`（3c）并续闸（3a）**，再按退出码分支并启动队列中下一个 `change run`：
 
-- exit 0 → archived；exit 1 → skipped/failed（auto-decide 已落账），继续队列下一个。
+- exit 0 → archived、`FINISHED += CID`；exit 1 → skipped/failed（auto-decide 已落账）、`FINISHED += CID`，继续队列下一个。
 - exit 5（needs-decision，仅交互档）：把 stdout 的 `trigger / round / blocking_trend / suggested` 转成 AskUserQuestion（选项映射 continue-retry / skip / force-archive / abort），然后 `npc change run --seq $SEQ --decision <答案>` 续跑。等人裁定期间内环队列暂停，但 implement 侧流水线继续跑。
 - 需要失败细节时不读日志：spawn 只读 triage agent，喂 stdout 里的 `pointer.*` 路径，收一行诊断 JSON。
 
@@ -207,7 +221,7 @@ BRIEF=$(npc status --brief)   # notes = 人的转向指令；消费后 npc state
 ```
 
 - `notes` 非空 → 按指令调整剩余计划，消费后打水位。
-- re-plan 触发（满足其一）：出现 cherry-pick 冲突、某 change 被 skip 且有下游依赖、人经 note 要求重排 → 先停止 3a 续闸（不动已在跑的 ACTIVE），对剩余未完成集合重跑 Step 2.1 的 dag-analyst + `npc plan waves`（交互档给人确认），刷新 `$DAG` 后恢复续闸，run.events.jsonl 记 `{"type":"v4.replan","reason":...}`。
+- re-plan 触发（满足其一）：出现 cherry-pick 冲突、某 change 被 skip 且有下游依赖、人经 note 要求重排 → 先停止 3a 续闸（不动已在跑的 ACTIVE），对剩余未完成集合重跑 Step 2.1 的 dag-analyst + `npc plan waves`（交互档给人确认），按 Step 2.2 把新的裁定约束写入 `$DAG` 后恢复续闸，run.events.jsonl 记 `{"type":"v4.replan","reason":...}`。
 
 ---
 
