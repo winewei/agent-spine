@@ -42,6 +42,12 @@ TOML 示例：
     model = "claude-opus-4-7"  # 可省略；省略则使用 claude 的默认 model
     extra_args = ["--permission-mode", "default"]
 
+    [experience]               # OpenViking 经验层（可省略；默认全关）
+    enabled = true
+    env_file = "~/.openviking/npc-client.env"   # 凭据指针，不入 git
+    write_gate = "verified"    # verified | any
+    extraction_model_declared = "gpt-5.4"       # 供 doctor 比对成本分层
+
     [host]                     # 宿主 CLI（可省略；默认 env 探测：CLAUDECODE → claude，否则 generic）
     name = "generic"           # claude | generic | 任意自定义名
     session_dir = ".kimi/sessions/{proj_key}"  # 可选：为非 Claude 宿主补 session 目录模板
@@ -190,6 +196,54 @@ class VerifyConfig:
 
 SUPPORTED_TEST_BASELINE_MODES: tuple[str, ...] = ("strict", "diff")
 
+# 经验层写入闸门：verified = 只提交独立 review 通过且未被污染的轨迹；any = 只要 archived
+SUPPORTED_WRITE_GATES: tuple[str, ...] = ("verified", "any")
+
+DEFAULT_EXPERIENCE_ENV_FILE = "~/.openviking/npc-client.env"
+DEFAULT_EXPERIENCE_ROOT_ENV_FILE = "~/.openviking/root.env"
+
+
+@dataclass(frozen=True)
+class ExperienceConfig:
+    """OpenViking 经验层配置（旁路软失败增强，默认关闭）。
+
+    凭据走 ``env_file`` + ``api_key_env`` 指针（对齐 :class:`ProviderConfig`），
+    绝不入 git。``base_url`` 省略时依次回退 env 文件的 ``OPENVIKING_BASE_URL``
+    与内置默认 ``http://127.0.0.1:1933``——解析在 :mod:`npc.experience` 完成，
+    本 dataclass 只承载声明。
+    """
+
+    enabled: bool = False
+    env_file: str = DEFAULT_EXPERIENCE_ENV_FILE
+    base_url: str | None = None
+    api_key_env: str = "OPENVIKING_API_KEY"
+    root_env_file: str = DEFAULT_EXPERIENCE_ROOT_ENV_FILE
+    timeout_recall_ms: int = 3000
+    timeout_commit_ms: int = 5000
+    inject_max_tokens_implement: int = 800
+    inject_max_tokens_fix: int = 600
+    score_threshold: float = 0.35
+    quota_experiences: int = 3
+    session_prefix: str = "npc"
+    write_gate: str = "verified"
+    # 不变量 4：抽取属"分析"，模型档位不得低于 coder，由人工声明、doctor 比对告警
+    extraction_model_declared: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.write_gate not in SUPPORTED_WRITE_GATES:
+            raise ConfigError(
+                f"experience.write_gate 不支持：{self.write_gate!r}"
+                f"（合法值 = {'/'.join(SUPPORTED_WRITE_GATES)}）"
+            )
+
+    def inject_max_tokens(self, phase: str) -> int:
+        """按 phase 取注入 token 预算；未知 phase 走 fix 档（更保守）。"""
+        return (
+            self.inject_max_tokens_implement
+            if phase == "implement"
+            else self.inject_max_tokens_fix
+        )
+
 
 @dataclass(frozen=True)
 class Config:
@@ -199,6 +253,7 @@ class Config:
     coder: CoderConfig = field(default_factory=CoderConfig)
     verify: VerifyConfig = field(default_factory=VerifyConfig)
     host: HostConfig = field(default_factory=HostConfig)
+    experience: ExperienceConfig = field(default_factory=ExperienceConfig)
     providers: tuple[ProviderConfig, ...] = BUILTIN_PROVIDERS
     source: str = "<default>"
 
@@ -356,6 +411,8 @@ def _build(data: dict, source: str) -> Config:
     if not isinstance(host_raw, dict):
         raise ConfigError(f"[host] 节必须是 table（{source}）")
 
+    experience = _build_experience(data.get("experience"), source)
+
     return Config(
         providers=providers,
         review=ReviewEngineConfig(
@@ -383,7 +440,72 @@ def _build(data: dict, source: str) -> Config:
             name=_opt_str(host_raw.get("name"), "host.name", source),
             session_dir=_session_dir_template(host_raw.get("session_dir"), source),
         ),
+        experience=experience,
         source=source,
+    )
+
+
+def _build_experience(raw: object, source: str) -> ExperienceConfig:
+    """解析 ``[experience]`` 段；缺省时返回全默认（enabled=False）。"""
+    if raw is None:
+        return ExperienceConfig()
+    if not isinstance(raw, dict):
+        raise ConfigError(f"[experience] 节必须是 table（{source}）")
+
+    defaults = ExperienceConfig()
+
+    def _s(key: str, default: str) -> str:
+        return _opt_str(raw.get(key), f"experience.{key}", source) or default
+
+    return ExperienceConfig(
+        enabled=_opt_bool(raw.get("enabled"), "experience.enabled", source, defaults.enabled),
+        env_file=_s("env_file", defaults.env_file),
+        base_url=_opt_str(raw.get("base_url"), "experience.base_url", source),
+        api_key_env=_s("api_key_env", defaults.api_key_env),
+        root_env_file=_s("root_env_file", defaults.root_env_file),
+        timeout_recall_ms=_opt_int(
+            raw.get("timeout_recall_ms"),
+            "experience.timeout_recall_ms",
+            source,
+            defaults.timeout_recall_ms,
+        ),
+        timeout_commit_ms=_opt_int(
+            raw.get("timeout_commit_ms"),
+            "experience.timeout_commit_ms",
+            source,
+            defaults.timeout_commit_ms,
+        ),
+        inject_max_tokens_implement=_opt_int(
+            raw.get("inject_max_tokens_implement"),
+            "experience.inject_max_tokens_implement",
+            source,
+            defaults.inject_max_tokens_implement,
+        ),
+        inject_max_tokens_fix=_opt_int(
+            raw.get("inject_max_tokens_fix"),
+            "experience.inject_max_tokens_fix",
+            source,
+            defaults.inject_max_tokens_fix,
+        ),
+        score_threshold=_opt_float(
+            raw.get("score_threshold"),
+            "experience.score_threshold",
+            source,
+            defaults.score_threshold,
+        ),
+        quota_experiences=_opt_int(
+            raw.get("quota_experiences"),
+            "experience.quota_experiences",
+            source,
+            defaults.quota_experiences,
+        ),
+        session_prefix=_s("session_prefix", defaults.session_prefix),
+        write_gate=_s("write_gate", defaults.write_gate),
+        extraction_model_declared=_opt_str(
+            raw.get("extraction_model_declared"),
+            "experience.extraction_model_declared",
+            source,
+        ),
     )
 
 
@@ -453,3 +575,30 @@ def _opt_str(val: object, name: str, source: str) -> str | None:
     if not isinstance(val, str):
         raise ConfigError(f"{name} 必须是字符串（{source}）")
     return val or None
+
+
+def _opt_bool(val: object, name: str, source: str, default: bool) -> bool:
+    if val is None:
+        return default
+    if not isinstance(val, bool):
+        raise ConfigError(f"{name} 必须是布尔值（{source}）")
+    return val
+
+
+def _opt_int(val: object, name: str, source: str, default: int) -> int:
+    if val is None:
+        return default
+    # bool 是 int 的子类，显式排除以免 true 被当成 1
+    if isinstance(val, bool) or not isinstance(val, int):
+        raise ConfigError(f"{name} 必须是整数（{source}）")
+    if val <= 0:
+        raise ConfigError(f"{name} 必须为正整数，实得 {val}（{source}）")
+    return val
+
+
+def _opt_float(val: object, name: str, source: str, default: float) -> float:
+    if val is None:
+        return default
+    if isinstance(val, bool) or not isinstance(val, (int, float)):
+        raise ConfigError(f"{name} 必须是数值（{source}）")
+    return float(val)

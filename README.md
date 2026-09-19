@@ -16,6 +16,7 @@ agent-spine splits an autonomous coding run into two layers with a strict contra
 - **Context economy** — sub-agent prompts render to disk; the main session passes a ~150-token stub instead of the full template (roughly 93% token saving on spawn).
 - **Host neutrality** — `npc` is the only distributed artifact. Playbooks ship inside the package and are materialized into any host via `npc playbook install` (Claude Code, Codex CLI, or any directory). Each playbook carries a host-adaptation table mapping Claude Code mechanisms to generic fallbacks.
 - **Externalized, resumable state** — all run state lives under `~/task_log/` with zero intrusion into the target repo. Runs resume across sessions (`npc resume detect`), self-heal on git/state drift (`npc state repair`), and feed cross-run telemetry (`npc telemetry hotspots`).
+- **Experience layer (optional, 1.8)** — every change's coder starts from scratch, so batches keep re-discovering the same environment facts and re-committing the same review finding classes. With [OpenViking](https://github.com/volcengine/OpenViking) running locally, npc distills each archived, review-passed change's trajectory into reusable rules and injects the 2–3 most relevant ones into the next change's coder prompt. Off by default; never touches the review gate; degrades to a no-op when the server is absent. See [docs/experience.md](docs/experience.md).
 
 ## How it works
 
@@ -103,7 +104,7 @@ Everything lands under `~/task_log/<PROJ_KEY>/`, keyed by project path — nothi
 
 ## Configuration
 
-TOML, layered and deep-merged: global `~/.config/npc/config.toml` defines providers and credentials; a project's `.npc/config.toml` only routes. Covers the review engine (`codex`/`claude`), coder provider registry, and host settings — see [docs/configuration.md](docs/configuration.md).
+TOML, layered and deep-merged: global `~/.config/npc/config.toml` defines providers and credentials; a project's `.npc/config.toml` only routes. Covers the review engine (`codex`/`claude`), coder provider registry, host settings, and the optional `[experience]` layer — see [docs/configuration.md](docs/configuration.md).
 
 ## Design principles
 
@@ -122,6 +123,7 @@ The full version, with the architecture invariants and roadmap, is in [docs/prin
 | [docs/usage.md](docs/usage.md) | Recommended setup: CLI + playbooks + project context, end to end |
 | [docs/cli.md](docs/cli.md) | Full `npc` contract: every command, stdout schema, exit codes |
 | [docs/configuration.md](docs/configuration.md) | Review engine, coder providers, host config, troubleshooting |
+| [docs/experience.md](docs/experience.md) | Optional experience layer: the problem it solves, installing OpenViking, enabling, measuring, troubleshooting |
 | [docs/design.md](docs/design.md) | Architecture and design-decision record |
 | [docs/principles.md](docs/principles.md) | Architecture invariants and roadmap |
 

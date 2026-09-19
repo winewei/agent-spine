@@ -378,6 +378,10 @@ def init_run(args: argparse.Namespace) -> None:
         "git_head_at_start": _git_head(p.repo_root),
         "cc_session": cc_session,
         "plan_order": plan_order,
+        # 本 run 首次召回时的经验库快照指纹（由 agent.prompt_render 回填）。
+        # 用于把 review 复发率与经验版本关联——跨 run 对比若不锁版本，比的是两个
+        # 不同的经验库。init 阶段不发网络请求，故此处只落占位。
+        "policy_snapshot_id": None,
         "progress": progress,
     }
 

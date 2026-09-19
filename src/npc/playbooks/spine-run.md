@@ -60,6 +60,8 @@ command -v codex >/dev/null || echo "[warn] 缺 codex；若 .npc/config.toml 未
 
 任一硬依赖缺失：用一句话告诉用户缺什么、怎么装，**不要继续**。
 
+经验层（可选，1.8）不是硬依赖：`npc doctor` 的 `experience` 项 warn 只记降级、不阻塞。启用时 `npc agent prompt render` / `npc archive run` 自动召回注入与提交，主 session 只看回执里的 `experience_injected` / `experience.ok` 标量，不读经验正文，也绝不把经验给 review。
+
 用 **TodoWrite** 建一个贯穿全程的任务列表（init / plan / 每个 change 一项 / 收尾），实时更新。
 
 ---

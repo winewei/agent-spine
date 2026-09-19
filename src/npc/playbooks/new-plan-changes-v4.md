@@ -22,6 +22,7 @@ tags: [openspec, plan, implement, parallel, worktree, v4]
 
 - `npc --version` ≥ 1.5.0
 - `npc doctor` 通过；缺 codex → 跳 review，记降级项、不阻塞
+- 经验层（可选，1.8）：`npc doctor` 的 `experience` 项为 warn 时只记一行降级、不阻塞——它是旁路增强，缺失只让 coder prompt 少一段。项目 `[experience].enabled=true` 时 `npc agent prompt render` 自动召回注入、`npc archive run` 自动提交轨迹，本 playbook 不需要任何额外步骤
 - `openspec` 可用（`openspec list --json` 是计划入口）
 - git 工作树 clean
 - worktree 隔离可用：Claude Code 宿主要求 `worktree.baseRef=head`（`.claude/settings.json` 或 `~/.claude/settings.json`），否则报错退出、不静默退化；其它宿主用 Bash `git worktree add`（基于 HEAD）等价实现
@@ -169,6 +170,7 @@ npc cost --since "$RUN_T0"
 ## 约束
 
 - 不逐轮读 review JSON、不手写 cherry-pick/sed、不批量读 changes 原文、不读日志/summary/review 原文。
+- 经验层只看标量：prompt render 回执的 `experience_injected` / `experience_error`、record 回执的 `experience_contaminated`、archive 回执的 `experience.ok`。**永不读** `<base>/*.experience.md` 或经验正文进主 session；经验只给 coder，绝不喂给 review。
 - 不为了填满槽位而 spawn `npc plan ready` 判为 `blocked` 的 change——尤其带 `dep-pending` 的：其 worktree 基线不含依赖代码，implement 必然写在错误前提上。槽位空着是正确状态，`limit` 与 `file-conflict` 同理。
 - 调度集合只信 `npc plan ready` 的返回，不凭 `v4-waves.json` 的波号自行判断"这波该开了"。
 - 后台 `change run` 在跑时不调 `npc integrate`（RESULT 入 `PENDING` 等内环结束）；收到 `step=inner-loop-active` 只入队，不 `--force`。

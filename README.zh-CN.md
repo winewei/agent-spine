@@ -16,6 +16,7 @@ agent-spine 把一次自主编码 run 拆成两层，层间以严格契约通信
 - **上下文经济性** — sub-agent 完整 prompt 渲染到磁盘，主 session 只传 ~150 tokens 薄引导语（spawn 环节约省 93% token）。
 - **宿主中立** — `npc` 是唯一分发物。playbook 随包发行，经 `npc playbook install` 物化到任意宿主（Claude Code、Codex CLI 或任意目录）。每份 playbook 顶部带宿主适配表，把 Claude Code 专有机制映射为通用回退。
 - **状态外置、可续跑** — 全部运行状态落在 `~/task_log/`，对目标仓库零侵入。跨 session 续跑（`npc resume detect`）、git/state 漂移自愈（`npc state repair`）、跨 run 指标沉淀（`npc telemetry hotspots`）。
+- **经验层（可选，1.8）** — 每个 change 的 coder 都是全新起点，批次里反复重新发现同一环境事实、反复吃同一类 review finding。本机运行 [OpenViking](https://github.com/volcengine/OpenViking) 后，npc 把每个已归档且 review 通过的 change 轨迹蒸馏为可复用规则，在下一个 change 的 coder prompt 里注入最相关的 2–3 条。默认关闭；不碰 review 闸门；server 不在时自动退化为无操作。见 [docs/experience.md](docs/experience.md)。
 
 ## 工作原理
 
@@ -103,7 +104,7 @@ Claude Code、Kimi CLI、Qwen Code、Codex CLI、OpenCode——其它 agent CLI 
 
 ## 配置
 
-TOML 分层深合并：全局 `~/.config/npc/config.toml` 定义 provider 与凭据，工程内 `.npc/config.toml` 只做路由。覆盖 review 引擎（`codex`/`claude`）、coder provider 注册表与宿主设置——详见 [docs/configuration.md](docs/configuration.md)。
+TOML 分层深合并：全局 `~/.config/npc/config.toml` 定义 provider 与凭据，工程内 `.npc/config.toml` 只做路由。覆盖 review 引擎（`codex`/`claude`）、coder provider 注册表、宿主设置与可选的 `[experience]` 经验层——详见 [docs/configuration.md](docs/configuration.md)。
 
 ## 设计哲学
 
@@ -122,6 +123,7 @@ TOML 分层深合并：全局 `~/.config/npc/config.toml` 定义 provider 与凭
 | [docs/usage.md](docs/usage.md) | 推荐用法：CLI + playbooks + 项目上下文三层配置，端到端 |
 | [docs/cli.md](docs/cli.md) | `npc` 完整契约：全部命令、stdout schema、exit code |
 | [docs/configuration.md](docs/configuration.md) | review 引擎、coder provider、宿主配置与排错 |
+| [docs/experience.md](docs/experience.md) | 可选经验层：解决什么问题、安装 OpenViking、启用、衡量收益、排错 |
 | [docs/design.md](docs/design.md) | 总体方案与设计决策记录 |
 | [docs/principles.md](docs/principles.md) | 架构不变量与 roadmap |
 

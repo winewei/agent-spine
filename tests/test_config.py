@@ -335,3 +335,97 @@ def test_host_section_must_be_table(tmp_path):
     (tmp_path / ".npc" / "config.toml").write_text('host = "kimi"\n', encoding="utf-8")
     with pytest.raises(_config.ConfigError):
         _config.load_config(tmp_path, home=tmp_path / "home")
+
+
+# ============================================================
+# [experience]（v1.8 经验层）
+# ============================================================
+
+
+def _write_exp_cfg(tmp_path, body: str):
+    (tmp_path / ".npc").mkdir(exist_ok=True)
+    (tmp_path / ".npc" / "config.toml").write_text(body, encoding="utf-8")
+    return _config.load_config(tmp_path, home=tmp_path / "home")
+
+
+def test_experience_defaults_are_off():
+    exp = _config.Config().experience
+    assert exp.enabled is False
+    assert exp.env_file == "~/.openviking/npc-client.env"
+    assert exp.base_url is None
+    assert exp.api_key_env == "OPENVIKING_API_KEY"
+    assert exp.root_env_file == "~/.openviking/root.env"
+    assert (exp.timeout_recall_ms, exp.timeout_commit_ms) == (3000, 5000)
+    assert (exp.inject_max_tokens_implement, exp.inject_max_tokens_fix) == (800, 600)
+    assert exp.score_threshold == 0.35
+    assert exp.quota_experiences == 3
+    assert exp.session_prefix == "npc"
+    assert exp.write_gate == "verified"
+    assert exp.extraction_model_declared is None
+
+
+def test_experience_absent_section_keeps_defaults(tmp_path):
+    cfg = _write_exp_cfg(tmp_path, '[review]\nengine = "codex"\n')
+    assert cfg.experience == _config.ExperienceConfig()
+
+
+def test_experience_explicit_values(tmp_path):
+    cfg = _write_exp_cfg(
+        tmp_path,
+        """
+[experience]
+enabled = true
+env_file = "~/x/client.env"
+base_url = "http://127.0.0.1:2000"
+api_key_env = "OV_KEY"
+root_env_file = "~/x/root.env"
+timeout_recall_ms = 1500
+timeout_commit_ms = 9000
+inject_max_tokens_implement = 1200
+inject_max_tokens_fix = 400
+score_threshold = 0.5
+quota_experiences = 5
+session_prefix = "spine"
+write_gate = "any"
+extraction_model_declared = "gpt-5.4"
+""",
+    )
+    exp = cfg.experience
+    assert exp.enabled is True
+    assert exp.env_file == "~/x/client.env"
+    assert exp.base_url == "http://127.0.0.1:2000"
+    assert exp.api_key_env == "OV_KEY"
+    assert exp.root_env_file == "~/x/root.env"
+    assert (exp.timeout_recall_ms, exp.timeout_commit_ms) == (1500, 9000)
+    assert exp.inject_max_tokens("implement") == 1200
+    assert exp.inject_max_tokens("fix") == 400
+    assert exp.score_threshold == 0.5
+    assert exp.quota_experiences == 5
+    assert exp.session_prefix == "spine"
+    assert exp.write_gate == "any"
+    assert exp.extraction_model_declared == "gpt-5.4"
+
+
+def test_experience_rejects_unknown_write_gate(tmp_path):
+    with pytest.raises(_config.ConfigError, match="write_gate"):
+        _write_exp_cfg(tmp_path, '[experience]\nwrite_gate = "always"\n')
+
+
+def test_experience_rejects_non_int_timeout(tmp_path):
+    with pytest.raises(_config.ConfigError, match="必须是整数"):
+        _write_exp_cfg(tmp_path, '[experience]\ntimeout_recall_ms = "3s"\n')
+
+
+def test_experience_rejects_non_positive_quota(tmp_path):
+    with pytest.raises(_config.ConfigError, match="正整数"):
+        _write_exp_cfg(tmp_path, "[experience]\nquota_experiences = 0\n")
+
+
+def test_experience_rejects_non_bool_enabled(tmp_path):
+    with pytest.raises(_config.ConfigError, match="必须是布尔值"):
+        _write_exp_cfg(tmp_path, '[experience]\nenabled = "yes"\n')
+
+
+def test_experience_section_must_be_table(tmp_path):
+    with pytest.raises(_config.ConfigError, match=r"\[experience\] 节必须是 table"):
+        _write_exp_cfg(tmp_path, 'experience = "on"\n')

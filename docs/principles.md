@@ -13,6 +13,7 @@
 - coder（spine-coder / MiMo 后端）只生成；是否合格由独立的 review（`npc review run`，codex 或 Claude 引擎）判定。
 - review 引擎**绝不可与 coder 同源**。尤其：coder 路由到 MiMo 时，review **必须**仍走 codex/Claude——否则就是"自己评自己"，验证形同虚设。
 - archive 闸门只认 review 的 `blocking==0`（或人类显式 override），不认 coder 自报"我写好了"。
+- 任何经验 / 先验类注入（`[experience]` 召回块等）**只进 coder**（implement / fix prompt），review 引擎永不消费经验——同源先验会让独立评估退化为相关评估，blocking 下降将成为测量假象而非质量改善。
 
 > 这是 aidevos 用 HMAC + append-only ledger 守的那条底线的轻量版：spine 用"独立 review + 人在回路"替代那套重机器，但同一条底线不动摇。
 
@@ -23,6 +24,7 @@
 - 主 session 只读 npc 子命令返回的一行 JSON 的关键字段做分支；不读 prompt 模板 / review.json / summary.md 原文。
 - 角色间交接走结构化契约：coder→主 session 只回一行 RESULT；npc→主 session 只回 JSON。
 - 全轨迹落 `~/task_log/<PROJ_KEY>/` + 跨 run 指标落 `_telemetry/`，是复盘与 `/spine-analyze` 的唯一依据。
+- 注入进 prompt 的外部内容必须落盘可重放（`<base>/*.experience.json` 记 uri / score / tokens / HEAD / sha256，注入块本体落同名 `.md`）；主 session 只读 `experience_injected` / `experience.ok` 这类标量，不读经验正文。
 - **反模式**：让主 session 去读 summary 原文做决策、把模板搬进 context——这把"智能"退化成"数据搬运"，正是 npc 存在要消灭的。
 
 ## 不变量 3 — 确定性"笼子" ∝ 1/(人在回路)

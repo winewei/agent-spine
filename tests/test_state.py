@@ -166,6 +166,8 @@ def test_init_run_creates_files(env_setup, capsys, make_args):
     assert s["progress"][0]["status"] == "pending"
     assert env_setup.state_md.exists()
     assert env_setup.run_events.exists()
+    # 经验库快照锚点：init 阶段不发网络请求，只落占位，首次召回时回填
+    assert s["policy_snapshot_id"] is None
 
 
 def test_init_run_refuses_overwrite(env_setup, capsys, make_args):

@@ -682,7 +682,17 @@ Recommendation: 添加 len(username) > 256 的判定...
 1. 从 STATE_JSON resolve seq / base / categories_seen / blocking_trend / implement_commit
 2. **implement**：渲染 §A 模板（含 Runtime Variables / 必读输入 / 双产物契约 / RESULT schema）
 3. **fix**：从 `--review-json` 抽 `in_scope=true && severity ∈ {critical,high}` 的 findings，渲染 §B 模板（含 Root-cause 全落点扫描 + 真实回归 + Self-Check 规则）
-4. 写到 output 路径
+4. 经验层召回（`[experience].enabled = true` 时）：向 OpenViking 检索历史经验，把注入块插入 prompt（implement 在「必读输入」之后，fix 在「修复历史」之后），并落两个副产物到 `$BASE`：`<phase>[-rN].experience.md`（注入块正文）与 `<phase>[-rN].experience.json`（注入回执：query / uri+score / tokens / 当时 HEAD / 注入块 sha256）
+5. 写到 output 路径
+
+**经验层召回语义**：
+
+- query：implement = `change_id + proposal.md 首个标题 + 语言栈`；fix = `上一轮 blocking findings 的 "category: title" + change_id`
+- `exclude_uris` = 本 change `$BASE` 下已有注入回执的全部 uri（同一 change 不重复注入同一条）
+- 注入条数受 `[experience].inject_max_tokens_implement|_fix` 预算裁剪，超预算按 score 从低到高丢弃
+- **纯增强、软失败**：未启用 / 无凭据 / 网络失败 / 内部异常一律退化为空注入块，prompt 照常渲染、**退出码不变**；`enabled = false` 时渲染结果与未接经验层的版本逐字节一致
+- 本 run 首次成功召回时把经验库快照指纹（完整目录中 URI 与正文哈希的 sha256；无法完整读取时不填写）写入 `STATE_JSON.policy_snapshot_id`，此后不再更新——review 复发率必须锚定同一经验库版本才可比
+- 每次召回落一条 telemetry `kind=experience.recall`（entries / injected_tokens / uris / error / duration_ms / policy_snapshot_id + `pointer.experience_json`）
 
 **stdout（implement）**：
 
@@ -694,9 +704,21 @@ Recommendation: 添加 len(username) > 256 的判定...
   "change_id": "add-foo",
   "output": "/Users/you/task_log/.../001-add-foo/implement.prompt.md",
   "bytes": 2344,
-  "template_version": "1.0.0"
+  "template_version": "1.0.0",
+  "experience_injected": 2,
+  "experience_tokens": 186,
+  "experience_record": "/Users/you/task_log/.../001-add-foo/implement.experience.json"
 }
 ```
+
+**经验层回执字段**：
+
+| 字段 | 语义 |
+|---|---|
+| `experience_injected` | 实际注入 prompt 的经验条数（预算裁剪后）；未启用 / 失败恒为 `0` |
+| `experience_tokens` | 注入块的 token 估算（bytes/4，与 telemetry 同口径）；仅启用时出现 |
+| `experience_record` | 注入回执绝对路径；仅启用时出现（召回为空或失败也写，用于复盘 query 与 error） |
+| `experience_error` | 仅失败时出现：`no-credentials`（缺凭据）/ `internal`（读取侧内部异常）/ `recall` 返回的传输码（`timeout` / `unreachable` / `http_<status>` / `bad_json` / `empty_query`） |
 
 **stdout（fix）**：implement 的字段 + `round` / `blocking_count` / `review_json` / `implement_commit`。
 
@@ -933,6 +955,7 @@ archive 一站式：precheck → openspec validate --strict → openspec archive
 5. `git add openspec/` + `git commit -m "chore: archive <change_id>"`；失败 → reason=git-commit
 6. 取 HEAD = archive_commit；统计 total_rounds（最大 review-rN 索引）
 7. `phase exit archive done` + `state set-progress status=archived archive_commit=... total_rounds=...`
+8. 经验层写入侧 hook（v1.8，`[experience].enabled = true` 时才执行）：按 phase exit 之后的 entry 过写入闸门 → 提交轨迹（等价于 `npc experience commit --seq N`）
 
 **stdout（成功）**：
 
@@ -943,9 +966,12 @@ archive 一站式：precheck → openspec validate --strict → openspec archive
   "change_id": "add-config-loader",
   "archive_commit": "5b33379...",
   "total_rounds": 2,
-  "final_status": "passed (round 2)"
+  "final_status": "passed (round 2)",
+  "experience": {"ok": true, "session_id": "npc-...", "task_id": "...", "messages": 5}
 }
 ```
+
+`experience` 字段**仅在经验层启用时出现**（未启用时回执与 v1.7.1 逐字节一致）。取值：闸门未放行 → `{"ok": false, "skipped": true, "reason": "<blocking-nonzero|override|force-archive|contaminated|not-archived|no-blocking-trend>"}`；无凭据 → `{"ok": false, "reason": "no-credentials"}`；提交失败 → `{"ok": false, "reason": "<unreachable|timeout|http_NNN|bad_json>", "detail": "..."}`；hook 内部异常 → `{"ok": false, "reason": "internal", "detail": "..."}`。**经验层永不改变 archive 的 `ok` 与退出码**（旁路软失败增强）；每次尝试落一条 telemetry `kind=experience.commit` 与 `<base>/experience.commit.json`。
 
 **stdout（失败）**：
 
@@ -989,7 +1015,8 @@ RESULT: commit=- tasks=<已完成数> tests=fail summary=<path or -> notes=<关�
 2. 校验：`commit != "-" && tests == "pass"`，否则 → `phase exit implement failed` + `state set-progress status=failed reason=implementer`
 3. 校验 summary 文件存在（除非 `--no-summary-check`）；失败 → reason=summary-missing
 4. 校验 commit 存在于 repo（`git cat-file -e`）；失败 → reason=commit-not-found
-5. `phase exit implement done` 含 `{commit, tasks, tests, summary}` + `state set-progress status=reviewing implement_commit=<hash>`
+5. 回抄检测（v1.8，仅当 `<base>/*.experience.json` 存在注入回执时）：summary 命中 `<npc-experience` 标签、注入 uri 字面或注入正文 ≥120 字符连续片段 → 装订 `experience_contaminated=true` 并 stderr warn
+6. `phase exit implement done` 含 `{commit, tasks, tests, summary}` + `state set-progress status=reviewing implement_commit=<hash>`
 
 **stdout（成功）**：
 
@@ -1004,6 +1031,8 @@ RESULT: commit=- tasks=<已完成数> tests=fail summary=<path or -> notes=<关�
   "summary": "/.../implement.summary.md"
 }
 ```
+
+命中回抄检测时额外带 `"experience_contaminated": true`（未命中或无注入回执时该字段不出现）：该 change 的轨迹此后不会被提交为经验（`write_gate=verified` 的判据之一），切断「经验 → prompt → summary → 经验」自激环。检测本身永不失败 record——任何异常一律吞掉。
 
 **exit**：`0` 成功；`1` 业务失败；`2` 参数错（既无 --result 又无 --result-file）
 
@@ -1080,6 +1109,7 @@ RESULT: commit=<hash> fixed=<n> tests=<pass|fail> summary=<path> categories_scan
 失败时与 implement record 类似（commit=-、tests=fail、summary 缺失、commit 不存在均会触发 phase exit failed）。
 
 校验通过后：
+- 回抄检测（v1.8）：与 `implement record` 同一判据，命中则装订 `experience_contaminated=true`、回执带同名字段、stderr warn
 - `phase exit fix-rN done` 含 `{commit, fixed, tests, summary, categories_scanned, regressions_added}`
 - `state set-progress status=in-fix-loop`（等下一轮 review）
 
@@ -1392,9 +1422,9 @@ best-effort webhook 推送。URL 解析顺序：`--url` > `$NPC_WEBHOOK` > `$NPC
 
 ### `npc doctor`
 
-环境前置体检：git / openspec / codex / claude / jq / portable-timeout（PATH 或 `~/.local/bin` 自举）/ review schema 自举情况 / mimo.env 成本路由 / npc config 可加载性 / 路由在用 provider 就绪性（v1.6+）/ `docs/principles.md`。除 `git` 外全部是 warn 级、不阻塞。
+环境前置体检：git / openspec / codex / claude / jq / portable-timeout（PATH 或 `~/.local/bin` 自举）/ review schema 自举情况 / mimo.env 成本路由 / npc config 可加载性 / 路由在用 provider 就绪性（v1.6+）/ 宿主解析（v1.7+）/ 安装来源（v1.7.1+）/ 经验层探活（v1.8+）/ `docs/principles.md`。除 `git` 外全部是 warn 级、不阻塞。
 
-**做什么**：对 `_BIN_CHECKS`（`git` 必备，`openspec`/`codex`/`claude`/`jq` 可选）逐个查 PATH；`portable-timeout` 额外查 `~/.local/bin` 自举位置并校验可执行位；`schema` 检查 `~/task_log/.new-plan-review-schema.json` 是否存在且为合法 JSON；`mimo.env` 检查 `~/.config/npc/mimo.env` 是否存在可读；`config` 尝试 `load_config`（失败降级 warn，不阻塞）；`providers`（v1.6+）对 coder 路由实际引用的每个 provider 检查 env_file 存在可读 + runner 可执行文件可用（未被引用的定义不产生噪音，问题一律 warn 不阻塞）；`host`（v1.7+）报告解析出的宿主（名字/来源/session 识别能力，信息级恒 ok）；`install-source` 读 npc 发行元数据的 `direct_url.json` 判定安装来源：**本地 checkout（`file://`）安装一律 warn**——开发中的代码会影响本机在用的 CLI，detail 附诊断事实（源码路径 @ 分支 sha、是否未合入 origin/main、源码 `__version__` 与已安装是否一致）与整改提示（`uv tool install --reinstall --from git+https://github.com/winewei/agent-spine@v<版本> npc`，开发期用 `uv run npc`）；远程 VCS 安装 → ok 并带 `vcs_info.commit_id` 前 7 位与 `requested_revision`；读不到 `direct_url.json` → warn。git 调用一律 5s 超时、异常降级 warn；`principles.md` 检查 `<repo>/docs/principles.md`。
+**做什么**：对 `_BIN_CHECKS`（`git` 必备，`openspec`/`codex`/`claude`/`jq` 可选）逐个查 PATH；`portable-timeout` 额外查 `~/.local/bin` 自举位置并校验可执行位；`schema` 检查 `~/task_log/.new-plan-review-schema.json` 是否存在且为合法 JSON；`mimo.env` 检查 `~/.config/npc/mimo.env` 是否存在可读；`config` 尝试 `load_config`（失败降级 warn，不阻塞）；`providers`（v1.6+）对 coder 路由实际引用的每个 provider 检查 env_file 存在可读 + runner 可执行文件可用（未被引用的定义不产生噪音，问题一律 warn 不阻塞）；`host`（v1.7+）报告解析出的宿主（名字/来源/session 识别能力，信息级恒 ok）；`install-source` 读 npc 发行元数据的 `direct_url.json` 判定安装来源：**本地 checkout（`file://`）安装一律 warn**——开发中的代码会影响本机在用的 CLI，detail 附诊断事实（源码路径 @ 分支 sha、是否未合入 origin/main、源码 `__version__` 与已安装是否一致）与整改提示（`uv tool install --reinstall --from git+https://github.com/winewei/agent-spine@v<版本> npc`，开发期用 `uv run npc`）；远程 VCS 安装 → ok 并带 `vcs_info.commit_id` 前 7 位与 `requested_revision`；读不到 `direct_url.json` → warn。git 调用一律 5s 超时、异常降级 warn；`experience`（v1.8+）在 `[experience].enabled = false`（默认）时直接 ok 且不发任何网络请求，启用时调 `experience.doctor_report`：`/health` 不通或缺凭据 → warn（**永不 missing**，经验层是旁路增强，不得让 doctor exit 4 阻塞一个本可跑完的 run），server 未开 `agent_evolution` / `auth_mode != "api_key"`（dev 模式）/ `base_url` 非本地 / `extraction_model_declared` 未声明或服务端实际模型与 coder 档位关系未经验证 → warn；`principles.md` 检查 `<repo>/docs/principles.md`。
 
 **stdout（单行，`ok` 恒真实反映 required 缺失情况；required 缺失时同一行内嵌 `error`/`message`）**：
 
@@ -1412,9 +1442,10 @@ best-effort webhook 推送。URL 解析顺序：`--url` > `$NPC_WEBHOOK` > `$NPC
     {"name": "mimo.env", "status": "warn", "detail": "成本路由 mimo.env 缺失：...；coder 将走默认 premium 层", "required": false},
     {"name": "config", "status": "ok", "detail": "使用内置默认配置（未找到配置文件）", "required": false},
     {"name": "host", "status": "ok", "detail": "宿主 claude（来源 env）；session 目录模板 .claude/projects/{proj_key}", "required": false},
+    {"name": "experience", "status": "ok", "detail": "experience 未启用（默认）；[experience].enabled = false", "required": false},
     {"name": "principles.md", "status": "ok", "detail": "已存在：...", "required": false}
   ],
-  "summary": {"ok": 8, "warn": 2, "missing": 0, "missing_required": []}
+  "summary": {"ok": 10, "warn": 2, "missing": 0, "missing_required": []}
 }
 ```
 
@@ -1669,6 +1700,132 @@ stdout（失败）:
   step=inner-loop-active 时附 holder={pid, owner, ts} 与 active=[{seq, change_id, phase}]，无副作用
 
 exit: 0 成功 / 1 任一步失败 / 2 用法错 / 3 环境错
+```
+
+## 8g. 经验层：轨迹回流为 coder 先验（v1.8+）
+
+`npc experience` 把已归档 change 的高信号轨迹（implement summary / review findings / fix summary）提交给本机 OpenViking，抽取为可复用经验，再在后续 change 的 coder prompt 里召回注入。设计蓝本见 `docs/optimization-proposals/2026-09-05-openviking-experience-layer.md`。
+
+四条不变量对齐：
+
+- **旁路软失败增强**：地位低于 codex 一档。缺失只降低 prompt 质量、不影响正确性，**任何 phase 都不因它 exit 4**；默认 `[experience].enabled = false`。只有 `doctor` 与 `--strict` 对 server 不可用返回非 0。
+- **只注入 coder**：经验进 implement / fix prompt，**绝不进 review focus**。若同一经验库同时喂 coder 与 reviewer，独立评估器退化为共享先验的相关评估器，blocking 下降成为测量假象。
+- **集成面只有 HTTP**：OpenViking 主仓与 Python SDK 为 AGPLv3 而 npc 为 MIT，且 `dependencies = []` 是发布契约——只用 stdlib `urllib.request`，禁 `import openviking`，由 `npc verify deps` 执法。
+- **主 session 不读经验正文**：只看 `entries` / `tokens` / `ok` 标量；注入块与 uri / score / HEAD / sha256 全部落盘，prompt 可完整重放。
+
+配置（`[experience]`，全部可省略）：`enabled`(false) / `env_file`(`~/.openviking/npc-client.env`) / `base_url`(空则读 env 的 `OPENVIKING_BASE_URL`，再回退 `http://127.0.0.1:1933`) / `api_key_env`(`OPENVIKING_API_KEY`) / `root_env_file`(`~/.openviking/root.env`) / `timeout_recall_ms`(3000) / `timeout_commit_ms`(5000) / `inject_max_tokens_implement`(800) / `inject_max_tokens_fix`(600) / `score_threshold`(0.35) / `quota_experiences`(3) / `session_prefix`(`npc`) / `write_gate`(`verified`) / `extraction_model_declared`(空)。凭据只经 env 文件指针，绝不入 git。
+
+### `npc experience commit --seq N [--dry-run] [--strict] [--gate verified|any]`
+
+把一个 archived change 的轨迹提交为经验语料（fire-and-forget，不等服务端异步抽取完成）。
+
+组装五段 messages（CaseSpec header / implement summary / review findings / fix summary / outcome），首消息以 `# OpenViking Batch Training CaseSpec v1` + ```json 围栏 Case 开头以命中 fast path，跳过服务端 LLM case 判定。三步提交：`POST /api/v1/sessions`（`memory_policy={"memory_types":["experiences"]}`）→ 逐条 `POST /sessions/{id}/messages` → `POST /sessions/{id}/commit`。成功回执可直接复用；session 已存在（409）返回 `session-exists`，不重放消息。部分提交失败或 commit 响应丢失时，先检查远端 session/task；禁止盲目重试追加。
+
+**写入闸门**（`--gate`，默认取 `[experience].write_gate`）：
+
+| gate | 条件 |
+|---|---|
+| `verified`（默认） | `status == "archived"` ∧ `blocking_trend[-1] == 0` ∧ 非 `force-archive` / 人工 `override` ∧ `experience_contaminated != true` |
+| `any` | 只要求 `status == "archived"` |
+
+**脱敏白名单（硬约束）**：只读 `implement.summary.md`（Key Decisions / Issues Encountered / Files Modified）、`round-N.review.json`（in_scope findings 的 severity / category / title / file，不含 detail）、`round-N.fix.summary.md`（Per-Finding Resolution / Locations Scanned / Invariant Sweep）与 `proposal.md` 的 Why / What Changes 前 600 字符。**绝不提交** diff、代码正文、`events.jsonl`、`*.prompt.md` / `*.focus.md`。所有正文先剥离注入块（`<npc-experience>` 标签与「历史经验（外部召回」章节），切断「经验 → prompt → summary → 经验」自激环。
+
+写盘：`<base>/experience.commit.json`（成功与失败都落，供补偿提交与审计）；`--dry-run` 落 `<base>/experience.messages.json` 且不发任何请求。
+
+```text
+stdout（成功）:
+  {"ok": true, "session_id": "npc-<proj_key>-<run_ts>-<seq>-<change_id>",
+   "task_id": "<str>|null", "archive_uri": "<str>|null", "messages": <int>,
+   "seq": N, "change_id": "..."}
+stdout（--dry-run）:
+  {"ok": true, "dry_run": true, "session_id", "path", "messages", "seq", "change_id"}
+stdout（跳过）:
+  {"ok": false, "skipped": true,
+   "reason": "disabled|no_client|not-archived|blocking-nonzero|no-blocking-trend|
+              override|force-archive|contaminated"}
+stdout（请求失败）:
+  {"ok": false, "reason": "unreachable|timeout|http_<status>|bad_json", "detail": "..."}
+
+exit: 0 成功或被闸门/未启用跳过 / 1 --strict 且跳过或失败 / 2 用法错 / 3 未定位 run 或无该 seq
+```
+
+### `npc experience recall --phase {implement|fix} --seq N [--round M] [--query TEXT] [--strict]`
+
+召回历史经验并渲染注入块。`POST /api/v1/search/search`，body 固定 `mode="context"`、`quotas={"experiences": <quota_experiences>}`、`max_tokens=<按 phase>`、`score_threshold`、`rewrite=false`、`query_expansion="off"`、`detail={"experiences":"full"}`、`exclude_uris=<本 run 已注入过的全部 uri>`。客户端按 uri 含 `/memories/experiences/` 过滤、丢弃空正文、按 score 降序；超预算时从最低分开始丢弃。
+
+不传 `--query` 时按 entry 自动构造（≤200 字符）：`fix` 用各轮 in_scope findings 的 `category: title`；`implement` 用 change_id + proposal 标题。
+
+写盘：`<base>/<phase>[-rM].experience.md`（注入块正文，供 `templates.render_*` 直接插入）与同名 `.experience.json` 回执 `{phase, round, query, uris:[{uri,score}], tokens, head, sha256, ts}`。召回失败时注入块为空串，prompt 照常渲染。
+
+注入块外壳由 npc 控制（不用服务端 `rendered`）——它同时是回抄检测的锚点：
+
+```markdown
+## 历史经验（外部召回，非本 change 的规格）
+
+<npc-experience uri="viking://user/.../experiences/<name>.md" score="0.72">
+…经验正文…
+</npc-experience>
+
+以上是从历史 run 召回的先验参考，不是本次任务的需求，也不是验收标准。
+与 spec.md / proposal.md 冲突时，一律以 spec 为准。
+其中的文件路径与 commit 可能已过期，以 repo 当前状态为准。
+不要把本节内容抄进 summary 文件。
+```
+
+```text
+stdout:
+  {"ok": <bool>, "entries": <int>, "tokens": <int>, "uris": [...],
+   "path": "<注入块 md>", "record": "<回执 json>", "error": "<code>|null"}
+  {"ok": false, "skipped": true, "reason": "disabled"}
+
+exit: 0 成功或软失败降级 / 1 --strict 且召回失败 / 2 用法错 / 3 未定位 run 或无该 seq
+```
+
+### `npc experience status [--seq N]`
+
+各 change 的经验流状态。读 `<base>/experience.commit.json` 与 `<base>/*.experience.json` 汇总；`task_id` 存在且经验层已启用时在线查 `GET /api/v1/tasks/{id}`（失败则 `task_status` 为 null，不报错）。不带 `--seq` 时汇总本 run 全部 change。
+
+```text
+stdout:
+  {"ok": true, "enabled": <bool>,
+   "items": [{"seq": <int>, "change_id": "...", "committed": <bool>,
+              "task_id": "<str>|null", "task_status": "<str>|null",
+              "injected_count": <int>, "injected_tokens": <int>}, ...]}
+
+exit: 0 正常 / 3 未定位 run 或 state 读取失败
+```
+
+### `npc experience doctor`
+
+经验层探活（不需要 active run，只需 git 仓库）。依次检查：env 文件可读且含 api key → `GET /health`（免鉴权，取 version / auth_mode）→ `GET /api/v1/fs/ls?uri=viking://~/memories/experiences` 计数 → `GET /api/v1/admin/agent-evolution`（用 `root_env_file` 的 root key；无则跳过并记 note）。
+
+warnings 触发条件：`auth_mode != "api_key"`（dev 模式，本机任意进程具 ROOT 权限）；`base_url` 非 `127.0.0.1` / `localhost`（数据流出本机）；`agent_evolution.enabled == false`（commit 不会产出 experiences）；`[experience].extraction_model_declared` 未声明，或已声明但服务端实际模型及 coder 档位关系尚未验证（不变量 4）。
+
+```text
+stdout:
+  {"ok": <bool>, "enabled": <bool>, "env_file": "...", "env_file_found": <bool>,
+   "base_url": "...",
+   "health": {"ok": <bool>, "version": "...", "auth_mode": "..."} | null,
+   "agent_evolution": <bool>|null, "experiences_count": <int>|null,
+   "warnings": [...], "notes": [...]}
+
+exit: 0 health 连通（即使有 warnings） / 1 health 不通、缺凭据或配置加载失败
+```
+
+### `npc verify deps`
+
+依赖不变量执法（属 `npc verify` 家族，与经验层同批落地）。两条规则：
+
+1. `pyproject.toml` 的 `[project].dependencies` 必须是空数组；
+2. `src/npc/**/*.py` 不得出现 `openviking` / `httpx` / `requests` 的 import，逐处报 `file:line`（只匹配行首 import 语句，注释与字符串提及不算）。
+
+```text
+stdout:
+  {"ok": <bool>, "repo_root": "...",
+   "violations": [{"rule": "dependencies_not_empty|forbidden_import|pyproject_missing|
+                           pyproject_unreadable|source_unreadable", "detail": "..."}, ...]}
+
+exit: 0 无 violation / 1 有 violation / 3 repo_root 定位失败
 ```
 
 ### `npc status --brief`

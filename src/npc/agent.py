@@ -14,9 +14,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
+import time
 from pathlib import Path
 
-from . import _io, paths as _paths, telemetry as _telemetry, templates
+from . import (
+    _io,
+    config as _config,
+    experience as _experience,
+    paths as _paths,
+    telemetry as _telemetry,
+    templates,
+)
 from .fixer import render_findings
 from .review import parse_review
 from .state import read_state, update_state
@@ -84,6 +93,216 @@ def _default_review_path(base: Path, round_n: int) -> Path:
     return base / f"round-{round_n - 1}.review.json"
 
 
+# ----------------------------- 经验层召回（旁路增强） -----------------------------
+
+# 语言栈粗判：只用来给检索 query 加一个区分度较高的词，判错的代价是召回稍差。
+_STACK_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("python", ("pyproject.toml", "setup.py", "requirements.txt")),
+    ("node", ("package.json",)),
+    ("go", ("go.mod",)),
+    ("rust", ("Cargo.toml",)),
+)
+
+
+def _detect_stack(repo_root: Path) -> str:
+    for name, markers in _STACK_MARKERS:
+        if any((repo_root / m).is_file() for m in markers):
+            return name
+    return "unknown"
+
+
+def _proposal_title(repo_root: Path, change_id: str) -> str:
+    """proposal.md 的检索摘要：首个 ``# `` 标题 + ``## Why`` / ``## What Changes`` 段各自首句。
+
+    只拼 change_id 会让 query 退化为标识符本身（对语义检索几乎无信息量）；
+    Why / What 的首句才承载"这是什么问题、改了什么"。
+    """
+    path = repo_root / "openspec" / "changes" / change_id / "proposal.md"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    title = ""
+    sections: dict[str, str] = {}
+    current = None
+    for line in text.splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        if s.startswith("# ") and not title:
+            title = s[2:].strip()
+            continue
+        if s.startswith("## "):
+            current = s[3:].strip().lower()
+            continue
+        if current and current not in sections:
+            sections[current] = s.lstrip("-* ").strip()
+    why = next((v for k, v in sections.items() if k.startswith("why")), "")
+    what = next((v for k, v in sections.items() if k.startswith("what")), "")
+    parts = [p for p in (title, why[:80], what[:80]) if p]
+    return " ".join(parts)
+
+
+def _short_head(repo_root: Path) -> str:
+    """当前 HEAD 短 hash；取不到返回 ``-``（注入回执宁可缺 hash 也不缺记录）。"""
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return "-"
+    return out.stdout.strip() or "-"
+
+
+def _sync_policy_snapshot(p, result, client) -> str | None:
+    """本 run 首次成功召回时把经验库快照指纹钉进 state；返回生效的指纹。
+
+    钉住之后不再更新：同一 run 内比较 review 复发率必须锚定同一个经验库版本，
+    中途换锚点等于把两批不可比的数据混在一起。
+    """
+    try:
+        state = read_state(p.state_json)
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return None
+    existing = state.get("policy_snapshot_id")
+    if existing:
+        return str(existing)
+    if not result.entries:
+        return None
+
+    snapshot = _experience.library_fingerprint(client)
+    if snapshot is None:
+        return None
+
+    def mutate(s: dict) -> None:
+        if not s.get("policy_snapshot_id"):
+            s["policy_snapshot_id"] = snapshot
+
+    try:
+        state = update_state(p.state_json, p.state_md, mutate)
+        return state.get("policy_snapshot_id")
+    except (FileNotFoundError, OSError, ValueError):
+        return None
+
+
+def _injected_uris(base: Path) -> list[str]:
+    """本 change 已注入过的 uri——同一条经验在同一个 change 内不重复注入。"""
+    out: list[str] = []
+    seen: set[str] = set()
+    for rec in _experience.read_injection_records(base):
+        for item in rec.get("uris") or []:
+            uri = item.get("uri") if isinstance(item, dict) else item
+            if uri and str(uri) not in seen:
+                seen.add(str(uri))
+                out.append(str(uri))
+    return out
+
+
+def _build_recall_query(p, change_id: str, phase: str, blocking_findings) -> str:
+    if phase == "fix":
+        titles = [
+            f"{f.get('category') or 'unknown'}: {(f.get('title') or '').strip()}"
+            for f in blocking_findings
+        ]
+        return _experience.build_query(
+            "fix", change_id=change_id, findings_titles=titles
+        )
+    return _experience.build_query(
+        "implement",
+        change_id=change_id,
+        proposal_title=_proposal_title(p.repo_root, change_id),
+        stack=_detect_stack(p.repo_root),
+    )
+
+
+def _recall_experience(
+    p,
+    base: Path,
+    seq: int,
+    *,
+    phase: str,
+    round_n: int | None,
+    change_id: str,
+    blocking_findings=(),
+    config: _config.Config | None = None,
+) -> tuple[str, dict]:
+    """召回历史经验并渲染注入块。返回 ``(block, meta)``，meta 并入 stdout 回执。
+
+    读取侧是纯增强：未启用、无凭据、网络失败、模块内部异常一律退化为空块 +
+    一个 error 码，prompt 照常渲染、退出码不变。故此处刻意兜底 ``Exception``。
+
+    副作用（均在 ``<base>`` 下）：写 ``<phase>[-rN].experience.md`` 注入块正文与
+    同名 ``.experience.json`` 注入回执，使 prompt 可完整重放并支持回抄检测。
+    """
+    try:
+        cfg = (config if config is not None else _config.load_config(p.repo_root)).experience
+    except _config.ConfigError:
+        return "", {"experience_injected": 0}
+    if not cfg.enabled:
+        return "", {"experience_injected": 0}
+
+    try:
+        client = _experience.from_config(cfg, p.repo_root)
+        query = _build_recall_query(p, change_id, phase, blocking_findings)
+
+        started = time.monotonic()
+        result = (
+            _experience.RecallResult(error="no-credentials", query=query)
+            if client is None else _experience.recall(
+                client, cfg, phase=phase, query=query,
+                exclude_uris=_experience._already_injected_uris(p, seq),
+            )
+        )
+        duration_ms = int((time.monotonic() - started) * 1000)
+
+        block = _experience.render_block(
+            result, max_tokens=cfg.inject_max_tokens(phase)
+        )
+        stem = _experience.injection_record_stem(phase, round_n)
+        (base / f"{stem}.experience.md").write_text(block, encoding="utf-8")
+        record = _experience.write_injection_record(
+            base, phase, round_n, result, _short_head(p.repo_root), block=block
+        )
+
+        injected = block.count(_experience.INJECTION_TAG)
+        tokens = _experience.estimate_tokens(block)
+        snapshot = _sync_policy_snapshot(p, result, client)
+
+        _telemetry.emit_experience_recall(
+            proj_key=p.proj_key,
+            run_ts=p.run_ts,
+            change_seq=seq,
+            change_id=change_id,
+            phase=phase,
+            round_n=round_n,
+            ok=result.error is None,
+            entries=injected,
+            injected_tokens=tokens,
+            uris=[e["uri"] for e in _experience.injected_entries(result, block)],
+            error=result.error,
+            duration_ms=duration_ms,
+            state_json=p.state_json,
+            run_events=p.run_events,
+            record_path=record,
+            policy_snapshot_id=snapshot,
+        )
+
+        meta = {
+            "experience_injected": injected,
+            "experience_tokens": tokens,
+            "experience_record": str(record),
+        }
+        if result.error:
+            meta["experience_error"] = result.error
+        return block, meta
+    except Exception:  # noqa: BLE001 - 读取侧永不影响 prompt 渲染
+        return "", {"experience_injected": 0, "experience_error": "internal"}
+
+
 # ----------------------------- CLI handlers -----------------------------
 
 
@@ -140,10 +359,14 @@ def prompt_render(args: argparse.Namespace) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
 
     if phase == "implement":
+        exp_block, exp_meta = _recall_experience(
+            p, base, seq, phase="implement", round_n=None, change_id=args.change_id
+        )
         text = templates.render_implementer(
             change_id=args.change_id,
             base=str(base),
             repo_root=str(p.repo_root),
+            experience_block=exp_block,
         )
         meta_extra: dict = {}
     else:  # fix
@@ -177,6 +400,16 @@ def prompt_render(args: argparse.Namespace) -> None:
 
         findings_md = render_findings(parsed["blocking_findings"])
 
+        exp_block, exp_meta = _recall_experience(
+            p,
+            base,
+            seq,
+            phase="fix",
+            round_n=round_n,
+            change_id=args.change_id,
+            blocking_findings=parsed["blocking_findings"],
+        )
+
         text = templates.render_fixer(
             change_id=args.change_id,
             round_n=round_n,
@@ -186,6 +419,7 @@ def prompt_render(args: argparse.Namespace) -> None:
             blocking_findings_md=findings_md,
             categories_seen=entry.get("categories_seen") or [],
             blocking_trend=entry.get("blocking_trend") or [],
+            experience_block=exp_block,
         )
         meta_extra = {
             "round": round_n,
@@ -206,6 +440,7 @@ def prompt_render(args: argparse.Namespace) -> None:
             "bytes": len(text.encode("utf-8")),
             "template_version": templates.TEMPLATE_VERSION,
             **meta_extra,
+            **exp_meta,
         }
     )
 

@@ -23,7 +23,9 @@
         "review.round",
         "archive.done",
         "agent.spawn",
-        "agent.timeout"
+        "agent.timeout",
+        "experience.recall",
+        "experience.commit"
       ],
       "description": "事件类型；phase.exit 用于 implement/fix/archive 等通用 phase 结束，review.round 是 pipeline.run_review_round 的高层信号"
     },
@@ -123,7 +125,8 @@
         "summary_md": {"type": ["string", "null"]},
         "review_json": {"type": ["string", "null"]},
         "focus_md": {"type": ["string", "null"]},
-        "prompt_md": {"type": ["string", "null"]}
+        "prompt_md": {"type": ["string", "null"]},
+        "experience_json": {"type": ["string", "null"]}
       }
     }
   }

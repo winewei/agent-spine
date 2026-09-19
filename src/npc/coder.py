@@ -27,7 +27,7 @@ from typing import Callable
 
 from . import _io, agent as _agent, config, paths as _paths, pipeline as _pipeline, templates
 from .config import Config, load_config
-from .state import read_state
+from .state import read_state, update_state
 
 
 DEFAULT_MIMO_ENV_FILE = Path(config.DEFAULT_MIMO_ENV_FILE).expanduser()
@@ -204,16 +204,21 @@ def _render_prompt_file(
     phase: str,
     round_n: int | None,
     implement_commit: str | None,
-) -> tuple[Path, str]:
+    config: Config | None = None,
+) -> tuple[Path, str, dict]:
     """渲染 prompt 文件到 disk 并返回 (prompt_file, prompt_text)。
 
     与 ``agent.prompt_render`` 走同一套 templates；implement 走
     ``render_implementer``，fix 走 ``render_fixer``（含 blocking findings）。
     """
+    from .agent import _recall_experience
+
+    base.mkdir(parents=True, exist_ok=True)
     if phase == "implement":
+        exp_block, exp_meta = _recall_experience(p, base, seq, phase=phase, round_n=None, change_id=change_id, config=config)
         prompt_file = base / "implement.prompt.md"
         text = templates.render_implementer(
-            change_id=change_id, base=str(base), repo_root=str(p.repo_root)
+            change_id=change_id, base=str(base), repo_root=str(p.repo_root), experience_block=exp_block
         )
     else:  # fix
         if round_n is None:
@@ -221,6 +226,7 @@ def _render_prompt_file(
         prompt_file = base / f"round-{round_n}.fix.prompt.md"
         review_path = base / f"round-{round_n - 1}.review.json"
         findings_md = ""
+        blocking_findings = []
         categories_seen: list[str] = []
         blocking_trend: list[int] = []
         state = read_state(p.state_json)
@@ -235,7 +241,12 @@ def _render_prompt_file(
 
             review_data = json.loads(review_path.read_text(encoding="utf-8"))
             parsed = parse_review(review_data)
-            findings_md = render_findings(parsed["blocking_findings"])
+            blocking_findings = parsed["blocking_findings"]
+            findings_md = render_findings(blocking_findings)
+        exp_block, exp_meta = _recall_experience(
+            p, base, seq, phase=phase, round_n=round_n, change_id=change_id,
+            blocking_findings=blocking_findings, config=config,
+        )
         text = templates.render_fixer(
             change_id=change_id,
             round_n=round_n,
@@ -245,6 +256,7 @@ def _render_prompt_file(
             blocking_findings_md=findings_md,
             categories_seen=categories_seen,
             blocking_trend=blocking_trend,
+            experience_block=exp_block,
         )
     prompt_file.parent.mkdir(parents=True, exist_ok=True)
     prompt_file.write_text(text, encoding="utf-8")
@@ -254,7 +266,10 @@ def _render_prompt_file(
         prompt_file=str(prompt_file.resolve()),
         extension=None,
     )
-    return prompt_file, spawn_text
+    def record_meta(state):
+        state["progress"][seq - 1]["experience_recall"] = exp_meta
+    update_state(p.state_json, p.state_md, record_meta)
+    return prompt_file, spawn_text, exp_meta
 
 
 # ============================================================
@@ -399,8 +414,8 @@ def _do_implement_body(
     entry = state.get("progress", [{}])[seq - 1] if state.get("progress") else {}
     base = Path(entry.get("base") or _paths.base_for(p, seq, change_id))
 
-    _, spawn_text = _render_prompt_file(
-        p, seq, change_id, base, "implement", None, None
+    _, spawn_text, exp_meta = _render_prompt_file(
+        p, seq, change_id, base, "implement", None, None, config=cfg
     )
 
     result, model = _run_backend(
@@ -419,6 +434,7 @@ def _do_implement_body(
     record = _pipeline.record_implement(p, seq, result_line)
     return {
         **record,
+        **exp_meta,
         "backend": selected,
         "model": model,
         "coder_exit": result.exit_code,
@@ -507,8 +523,8 @@ def _do_fix_body(
     implement_commit = entry.get("implement_commit")
     base = Path(entry.get("base") or _paths.base_for(p, seq, change_id))
 
-    _, spawn_text = _render_prompt_file(
-        p, seq, change_id, base, "fix", round_n, implement_commit
+    _, spawn_text, exp_meta = _render_prompt_file(
+        p, seq, change_id, base, "fix", round_n, implement_commit, config=cfg
     )
 
     result, model = _run_backend(
@@ -527,6 +543,7 @@ def _do_fix_body(
     record = _pipeline.record_fix(p, seq, round_n, result_line)
     return {
         **record,
+        **exp_meta,
         "backend": selected,
         "model": model,
         "coder_exit": result.exit_code,
