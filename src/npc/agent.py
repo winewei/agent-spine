@@ -246,14 +246,15 @@ def _recall_experience(
 
     try:
         client = _experience.from_config(cfg, p.repo_root)
-        if client is None:
-            return "", {"experience_injected": 0, "experience_error": "no-credentials"}
-
         query = _build_recall_query(p, change_id, phase, blocking_findings)
 
         started = time.monotonic()
-        result = _experience.recall(
-            client, cfg, phase=phase, query=query, exclude_uris=_experience._already_injected_uris(p, seq)
+        result = (
+            _experience.RecallResult(error="no-credentials", query=query)
+            if client is None else _experience.recall(
+                client, cfg, phase=phase, query=query,
+                exclude_uris=_experience._already_injected_uris(p, seq),
+            )
         )
         duration_ms = int((time.monotonic() - started) * 1000)
 

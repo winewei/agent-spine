@@ -917,6 +917,7 @@ def write_injection_record(
         "phase": phase,
         "round": round_n,
         "query": result.query,
+        "error": result.error,
         "uris": [{"uri": e["uri"], "score": e["score"]} for e in injected_entries(result, text)],
         "tokens": estimate_tokens(text),
         "head": head,
@@ -1253,9 +1254,9 @@ def cli_recall(args: argparse.Namespace) -> None:
     _io.emit(
         {
             "ok": result.error is None,
-            "entries": len(result.entries),
+            "entries": len(injected_entries(result, block)),
             "tokens": estimate_tokens(block),
-            "uris": result.uris,
+            "uris": [e["uri"] for e in injected_entries(result, block)],
             "path": str(md_path),
             "record": str(record),
             "error": result.error,
