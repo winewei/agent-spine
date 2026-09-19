@@ -386,3 +386,12 @@ v1.4 的账目：review-fix 循环体活在 skill 里，每 change 主 session �
 - **污染检测**：`record_implement` / `record_fix` 在 summary 校验后比对 `<base>/*.experience.json` 的 uri 与正文片段，命中即置 `experience_contaminated`，该 change 轨迹不再提交为经验——切断「经验 → prompt → summary → 经验」自激环。
 - **telemetry**：新增 kind `experience.recall` / `experience.commit`（`ok` / `skipped` / `reason` / `entries` / `tokens` / `task_id` / `duration_ms` + pointer），回答"注入了多少 token、经验库为何没长大"。`policy_snapshot_id`（经验库快照指纹，`init-run` 置 null、本 run 首次成功召回时钉住、此后不再更新）随 `experience.recall` record 落盘——它是"经验是否有用"的可测性前置：同一 run 内的复发率对比必须锚定同一经验库版本。
 - **不做**：不进 review 引擎；不上传 diff / 代码正文 / `events.jsonl` / `*.prompt.md` / `*.focus.md`；不自动回写或删除服务端经验（降权候选由人执行 `ov rm`）。
+
+### 11.14 单一执行入口：v4 并入 spine-run（1.9）
+
+来源：`spine-run`（串行逐 change）与 `new-plan-changes-v4`（DAG 波次 + worktree 并行 + 流水化内环）长期并存，用户面对"哪个是并行的"的选择成本，且两份 playbook 的执行引擎已漂移一代（spine-run 的 Step 3 仍是逐个 change 的 implement→review→fix→archive，不具备 worktree 隔离与 `npc integrate`）。执行能力上 v4 严格覆盖 spine-run（`--serial-waves` 即其串行回退），spine-run 独有的只是"自由目标 → 拆解 changes"入口与 headless coder 的措辞。
+
+- **合并**：`spine-run.md` 以 v4 的 Step 1–4 为执行引擎原文，前置 Step 2.0 收编三种输入形态（目标 → sub-agent 拆解并 `openspec new change` + strict validate；指定 change 名；空 = 全部 in-progress）。单 change 时跳过 DAG 抽取，`FINAL_WAVES=[[cid]]`，其余流程不变。`--serial-waves` 改名 `--serial`（旧名保留）。
+- **coder 路由中立化**：删除 playbook 内 MiMo 专属表述；执行层由 `[providers.*]` + `[coder]` / `[coder.phase]` 决定（默认 claude，deepseek / kimi / qwen / mimo 皆为普通 provider），不变量 1 / 4 的措辞改为"第三方廉价 provider 只许执行"。
+- **v4 降为别名**：`new-plan-changes-v4.md` 保留注册名与文件（`npc playbook install` / `show` 不破坏），内容为参数对照表并指向 spine-run；README / INSTALL / usage 的入口说明统一为 `spine-run`。
+- **不做**：不删除 v2 / v3 历史 playbook；不改 npc 代码——合并只发生在 playbook 层，`npc plan ready` / `integrate` / `change run` 契约不变。

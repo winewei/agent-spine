@@ -9,7 +9,7 @@ agent-spine splits an autonomous coding run into two layers with a strict contra
 ## Capabilities
 
 - **Spec-to-delivery autonomy** — hand the harness a batch of OpenSpec changes or a one-line goal; it plans, implements, reviews, fixes, and archives. Interactive mode stops at decision forks; `--auto` mode runs unattended end to end, with routine decisions delegated to `npc auto-decide`.
-- **Wave-parallel batch execution** — `new-plan-changes-v4` slices active changes into dependency waves (DAG), runs one implementer per change in an isolated git worktree, then integrates serially (`npc integrate` / `npc change run`).
+- **Wave-parallel execution** — `spine-run` slices the changes into dependency waves (DAG), runs one implementer per change in an isolated git worktree, then integrates serially (`npc integrate` / `npc change run`). It accepts a one-line goal (decomposed into changes first), explicit change names, or nothing (= all active changes).
 - **Independent review gate** — every change goes through a review→fix loop driven by a premium engine (`codex exec` or `claude -p`, pluggable), with blocking-trend tracking and stale detection. Cheap execution backends are structurally barred from reviewing their own work (`npc verify routing`).
 - **Multi-model coder routing** — a provider registry routes implement/fix to any Anthropic-compatible endpoint (Kimi / Qwen / DeepSeek / …) or to `codex exec`. Credentials and models are defined once globally; each project declares only which provider to use, optionally per phase.
 - **Deterministic execution layer** — state, events, prompt templates, review parsing, archiving, and git mechanics are each a single `npc` subcommand with a one-line JSON stdout and a documented exit-code contract (`0` ok / `1` business / `2` usage / `3` environment / `4` missing dependency).
@@ -22,8 +22,8 @@ agent-spine splits an autonomous coding run into two layers with a strict contra
 
 ```
 ┌─ Intelligence layer (playbooks, run in your agent CLI) ─────────────┐
-│  spine-run            single goal / single change, full loop        │
-│  new-plan-changes-v4  batch: DAG waves + worktrees   ← recommended  │
+│  spine-run            goal / changes → DAG waves + worktrees  ← the entry │
+│  new-plan-changes-v4  merged into spine-run (alias kept for compat)     │
 │  spine-analyze        cross-run metrics, harness self-iteration     │
 │  spine-coder          coder sub-agent definition / persona          │
 └──────────────────────────────┬──────────────────────────────────────┘
@@ -34,7 +34,7 @@ agent-spine splits an autonomous coding run into two layers with a strict contra
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-`npc` is usable on its own (in CI or a plain terminal), but the recommended form is playbook + npc together: batch work through `new-plan-changes-v4`, single-goal autonomous loops through `spine-run`. (`new-plan-changes-v2`/`v3` are earlier iterations kept for reference.)
+`npc` is usable on its own (in CI or a plain terminal), but the recommended form is playbook + npc together: everything goes through `spine-run`. (`new-plan-changes-v2`/`v3`/`v4` are earlier iterations; `v4` is now an alias that redirects to `spine-run`.)
 
 ## Quick start
 
@@ -54,8 +54,8 @@ To upgrade, rerun the same two commands. For local development, install from a c
 Then, inside a git project that has an `openspec/` directory:
 
 ```text
-/new-plan-changes-v4              # batch: drive all active changes in parallel waves
-/spine-run add rate limiting to the auth module --auto   # single goal, fire-and-forget
+/spine-run --auto --max-parallel 4                       # all active changes, parallel waves, fire-and-forget
+/spine-run add rate limiting to the auth module --auto   # one goal: decompose into changes, then same pipeline
 ```
 
 The full three-layer setup (CLI + playbooks + project context snippet) is documented in [docs/usage.md](docs/usage.md).
