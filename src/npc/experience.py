@@ -773,10 +773,11 @@ def build_query(
     ``category: title`` 拼接 + change_id——findings 已结构化，命中最容易验证。
     """
     if phase == "fix":
-        parts = [t.strip() for t in findings_titles if t and t.strip()]
-        parts.append(change_id)
-    else:
-        parts = [change_id, proposal_title.strip(), stack.strip()]
+        identifier = change_id[:QUERY_MAX_CHARS]
+        titles = " ".join(t.strip() for t in findings_titles if t and t.strip())
+        budget = max(0, QUERY_MAX_CHARS - len(identifier) - bool(identifier))
+        return " ".join(p for p in (titles[:budget].rstrip(), identifier) if p)
+    parts = [change_id, proposal_title.strip(), stack.strip()]
     return " ".join(p for p in parts if p)[:QUERY_MAX_CHARS]
 
 
