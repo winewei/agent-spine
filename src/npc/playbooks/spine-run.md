@@ -231,10 +231,16 @@ npc change run --seq "$SEQ" --from review ${AUTO:+--auto} > "$RUN_DIR/change-run
 
 后台起（Claude Code：Bash `run_in_background: true`；其它宿主见顶部适配表），主 session 不阻塞，继续处理 implementer 返回（入 `PENDING`）与 spawn。**内环不并发、也不与整合并发**：review/fix/archive 的 commit 与 integrate 的 cherry-pick 都落在 main 上，同时跑会互相打架、测错 HEAD、覆盖 state。内环内部的 review-fix 循环由 npc 执行（默认上限 20 轮、尊重 `stale` 闸门），fix 轮的 coder 按 `[coder]` 路由起子进程。
 
-完成通知到达后读 `$RUN_DIR/change-run-$SEQ.json` 一行 JSON，`INNER -= CID`；**先排空 `PENDING`（3c）并续闸（3a）**，再按退出码分支并启动队列中下一个 `change run`：
+完成通知到达后先读取 `$RUN_DIR/change-run-$SEQ.json`，联合检查退出码、`status` 和 `error`，**判定以下分支之前不得移出 INNER、整合 PENDING、续闸或启动下一个内环**：
 
-- exit 0 → archived、`FINISHED += CID`；exit 1 → skipped/failed（auto-decide 已落账）、`FINISHED += CID`，继续队列下一个。
+- exit 0 且 `status=archived` → `INNER -= CID`、`FINISHED += CID`。
+- exit 1 且 `status=skipped/failed` → `INNER -= CID`、`FINISHED += CID`，按 3f 处理失败依赖。
+- `status=aborted` → 立即停止整个 run 的调度；保存检查点，停止/等待在飞任务到安全点，向用户报告中止，不再整合、续闸或处理队列中的后续 change。
+- `error=main_busy` → 非终态，保留 INNER、不加 FINISHED；核对并等待已有 main 锁持有任务结束后重试同一 change，不强制解锁或推进队列。
+- exit 2/3/4、JSON 缺失/损坏或未知状态 → 停止调度并报告具体错误，恢复闸门核对后再续，不能猜成 failed/skipped。
 - exit 5（needs-decision，仅交互档）：把 stdout 的 `trigger / round / blocking_trend / suggested` 转成 AskUserQuestion（选项映射 continue-retry / skip / force-archive / abort），然后 `npc change run --seq $SEQ --decision <答案>` 续跑。等人裁定期间内环队列暂停，但 implement 侧流水线继续跑。
+仅 archived/skipped/failed 已明确落定后，保存检查点，排空 `PENDING`（3c）并续闸（3a），再启动下一个内环。needs-decision 分支只允许明确规定的 implement 活动，不能启动另一个内环。
+
 - 需要失败细节时不读日志：spawn 只读 triage agent，喂 stdout 里的 `pointer.*` 路径，收一行诊断 JSON。
 
 **3e. 层收尾 telemetry**——流水线下已无"波结束"这一时刻，在 `v4-waves.json` 中**某一层的全部 change 都进入 INNER 或终态**（即该层实施与整合全部落定）时发一次：
