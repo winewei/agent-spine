@@ -1062,3 +1062,10 @@ def test_case_redacts_quoted_secrets_before_json_escape(tmp_path, monkeypatch):
     assert "secretvalue123" not in serialized
     case = json.loads(messages[0]["content"].split("```json\n")[1].split("\n```")[0])
     assert "<redacted>" in case["proposal"]
+
+
+def test_review_execution_count_includes_round_zero(tmp_path):
+    entry = {"total_rounds": 0, "phases": {"review-r0": {"status": "done"}}}
+    assert _exp.total_rounds_of(entry, tmp_path) == 1
+    assert "共 1 轮 review" in _exp.build_messages("c", "p", tmp_path, entry)[-1]["content"]
+    assert _exp.total_rounds_of({"total_rounds": 0, "phases": {}}, tmp_path) == 0

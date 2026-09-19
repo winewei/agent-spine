@@ -739,10 +739,12 @@ def test_headless_prompt_injects_experience(env_setup, make_args, capsys, monkey
     events = []
     monkeypatch.setattr(telemetry, "emit_experience_recall", lambda **kw: events.append(kw))
     base = env_setup.run_dir / "001-add-foo"
-    path, _ = _coder._render_prompt_file(env_setup, 1, "add-foo", base, phase, round_n, "head")
+    path, _, meta = _coder._render_prompt_file(env_setup, 1, "add-foo", base, phase, round_n, "head")
     assert "Validate before writing" in path.read_text()
     assert (base / f"{experience.injection_record_stem(phase, round_n)}.experience.json").exists()
     assert events[0]["phase"] == phase
+    assert meta["experience_injected"] == 1
+    assert meta["experience_record"].endswith(".experience.json")
 
 
 @pytest.mark.parametrize("phase,round_n", [("implement", None), ("fix", 1)])

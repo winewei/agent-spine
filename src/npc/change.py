@@ -172,6 +172,7 @@ def _decision_point(
         "blocking_trend": entry.get("blocking_trend") or [],
         "categories_seen": entry.get("categories_seen") or [],
         "pointer": _pointer(p, entry, seq),
+        **(entry.get("experience_recall") or {}),
     }
     if detail:
         result["detail"] = detail[:500]
@@ -188,6 +189,7 @@ def _terminal(
         "status": status,
         "blocking_trend": entry.get("blocking_trend") or [],
         "pointer": _pointer(p, entry, seq),
+        **(entry.get("experience_recall") or {}),
     }
     if reason:
         out["reason"] = reason

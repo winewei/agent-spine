@@ -469,3 +469,12 @@ def test_change_forwards_config_override_to_archive(env_setup, make_args, capsys
     override.write_text("[experience]\nenabled = false\n")
     assert _change.run_change(env_setup, 1, config_path=override)["ok"]
     assert arc.calls[0][1]["config_path"] == override
+
+
+def test_change_exposes_persisted_recall_metadata(env_setup, make_args, capsys, monkeypatch):
+    _bootstrap_run(make_args, capsys, "add-foo")
+    meta = {"experience_injected": 0, "experience_error": "no-credentials", "experience_record": "receipt.json"}
+    _set_entry(env_setup, 1, experience_recall=meta)
+    _patch(monkeypatch, implement=Script([OK_IMPL]), review=Script([review_result(0)]), archive=Script([dict(OK_ARCHIVE)]))
+    result = _change.run_change(env_setup, 1)
+    assert {key: result[key] for key in meta} == meta

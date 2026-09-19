@@ -362,11 +362,16 @@ def proposal_summary(repo_root: Path | None, change_id: str) -> str:
 
 
 def total_rounds_of(entry: dict, base: Path) -> int:
-    """轮次数：优先取 archive 写入的 ``total_rounds``，回退数 review JSON 文件。"""
+    """Count recorded review executions, not the zero-based archive round index."""
+    rounds = {int(m.group(1)) for key in (entry.get("phases") or {})
+              if (m := re.fullmatch(r"review-r(\d+)", key))}
+    rounds.update(n for n, _ in _round_files(base, "review.json"))
+    if rounds:
+        return len(rounds)
+    if "phases" in entry:
+        return 0  # Includes force-archive without a review.
     val = entry.get("total_rounds")
-    if isinstance(val, int) and val >= 0:
-        return val
-    return len(_round_files(base, "review.json"))
+    return val + 1 if isinstance(val, int) and val >= 0 else 0
 
 
 def tests_of(entry: dict) -> str:

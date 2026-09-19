@@ -1080,7 +1080,7 @@ exit code:
 组装 CaseSpec v1 五段 messages（CaseSpec header / implement summary / review
 findings / fix summary / outcome），三步提交：POST /sessions（memory_policy 只允许
 experiences）→ 逐条 POST /sessions/{id}/messages → POST /sessions/{id}/commit。
-session 已存在（409）幂等继续；fire-and-forget，不等异步抽取。
+本地成功回执可直接复用；远端 session 已存在（409）时停止重试，须核对远端 session/task，避免重复写入。提交成功后不等异步抽取。
 
 闸门（--gate，默认取 [experience].write_gate）：
   verified  status=archived ∧ blocking_trend[-1]==0 ∧ 非 force-archive/override
