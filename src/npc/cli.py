@@ -867,6 +867,11 @@ exit code:
         "--engine", choices=["codex", "claude"], default=None, help="覆盖 review 引擎"
     )
     p_change_run.add_argument("--config", default=None, help="显式 TOML 配置路径")
+    p_change_run.add_argument("--isolated", action="store_true", help="在独立 worktree 中执行完整内环，返回 ready-to-integrate（1.8.1）")
+    p_change_run.add_argument("--handoff", action="store_true", help="实现/修复交给宿主原生 agent；返回 needs-coder 和可恢复的 prompt/worktree")
+    p_change_run.add_argument("--worktree", default=None, help="接管已有 implementer worktree；省略则创建/恢复独立 worktree")
+    p_change_run.add_argument("--result-file", default=None, help="接管 implementer 的 RESULT 文件（需 --worktree 和 --manifest）")
+    p_change_run.add_argument("--manifest", default=None, help="接管 implementer 的 manifest")
     p_change_run.set_defaults(
         handler=_make_handler("change", "cli_run"), _cmd_path="change run"
     )
@@ -902,6 +907,7 @@ exit code:
 """,
     )
     p_integrate.add_argument("--seq", type=int, required=True)
+    p_integrate.add_argument("--prepared", action="store_true", help="发布 isolated 内环的已审查产物并归档；测试在 worktree 中执行")
     p_integrate.add_argument(
         "--result", default=None, help="implementer 的 RESULT 行原文（与 --result-file 二选一）"
     )
@@ -1693,7 +1699,9 @@ exit code:
     p_notify.add_argument("--timeout", type=float, default=5.0)
     p_notify.set_defaults(handler=_make_handler("notify", "run"), _cmd_path="notify")
 
-    # ===== task / watch =====
+    # ===== task / watch / monitor =====
+    from .monitor import add_parser as add_monitor_parser
+    add_monitor_parser(sub)
     p_task = sub.add_parser("task", help="后台任务观测契约（start/update/heartbeat/finish）")
     sub_task = p_task.add_subparsers(dest="task_cmd", required=True)
 
@@ -1811,13 +1819,28 @@ exit code:
         formatter_class=_EPILOG_FMT,
         epilog="""\
 默认观测当前 cwd 所属项目的 active run；--all 扫描 ~/task_log/*/active.json 指向
-的全部 active run；--project PATH 观测指定 worktree。无 --once 时循环刷新终端
-TUI 视图（无结构化 stdout）；--once 输出一次快照后退出，适合脚本/测试。
+的全部 active run；--project PATH 观测指定 worktree。三种输出模式：
+  --once     输出一次 JSON 快照后退出，适合脚本/测试/恢复闸门
+  --follow   追加式行流：每 --interval 秒一行摘要，状态迁移时输出
+             NEW / STALL / ABANDONED / FINISHED / RESUMED 行；设计为挂在宿主的
+             后台监视工具（Claude Code Monitor）下，主 session 只在迁移时被唤醒
+  （默认）   循环刷新终端 TUI 视图（无结构化 stdout）
+
+观测面除 npc task 契约外，还包含宿主 spawn 的 sub-agent 转录（Claude Code
+<session>/subagents/*.jsonl，Codex ~/.codex/sessions/**/rollout-*.jsonl）：
+取 mtime + 末行时间戳为心跳，不要求 sub-agent 显式上报。观测状态：
+running / stale（> --stale-seconds，默认 900）/ abandoned（> --abandoned-seconds，
+默认 14400）/ finished / unknown。
 
 stdout（--once）:
   {"ok": true, "schema_version": 1, "generated_at": "<iso>", "scope": "project|all|...",
    "runs": [{"proj_key","run_ts","state":{...},
-             "tasks": [{"task_id","observed_status","heartbeat_age_seconds", ...}, ...]}, ...]}
+             "tasks": [{"task_id","observed_status","heartbeat_age_seconds", ...}, ...],
+             "agents": {"host": "claude|codex|generic", "layout": "...",
+                        "summary": {"total": N, "by_status": {...}},
+                        "rows": [{"agent_id","change_id","name","agent_type","observed_status",
+                                  "idle_seconds","last_activity_at","last_tool","worktree",
+                                  "transcript","session_id"}, ...]}}, ...]}
 
 exit code:
   0  成功
@@ -1827,8 +1850,24 @@ exit code:
     p_watch.add_argument("--all", action="store_true", help="扫描所有 task_log 项目的 active run")
     p_watch.add_argument("--project", default=None, help="指定项目/worktree 路径")
     p_watch.add_argument("--once", action="store_true", help="输出一次 JSON 快照后退出")
-    p_watch.add_argument("--interval", type=float, default=2.0, help="TUI 刷新间隔秒数")
+    p_watch.add_argument("--follow", action="store_true", help="追加式行流（配合宿主 Monitor）")
+    p_watch.add_argument(
+        "--interval", type=float, default=None,
+        help="刷新间隔秒数（TUI 默认 2，--follow 默认 600）",
+    )
     p_watch.add_argument("--stale-seconds", dest="stale_seconds", type=int, default=None)
+    p_watch.add_argument(
+        "--abandoned-seconds", dest="abandoned_seconds", type=int, default=None,
+        help="sub-agent 空闲超过此秒数视为 abandoned（默认 14400）",
+    )
+    p_watch.add_argument(
+        "--max-age-seconds", dest="max_age_seconds", type=int, default=None,
+        help="只扫描 mtime 在此秒数内的 sub-agent 转录（默认 43200）",
+    )
+    p_watch.add_argument(
+        "--session-id", dest="session_id", default=None,
+        help="只看该主 session 派生的 sub-agent（默认取 NPC_SESSION_ID；无则不过滤）",
+    )
     p_watch.set_defaults(handler=_make_handler("watch", "run"), _cmd_path="watch")
 
     # ===== agent =====

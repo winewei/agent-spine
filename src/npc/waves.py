@@ -267,6 +267,9 @@ def ready(data: dict) -> dict:
     ``dep-pending → file-conflict → limit`` 短路，只报首个生效的层级。
     """
     nodes = _validate_nodes(data)
+    file_policy = data.get("file_policy", "exclusive")
+    if file_policy not in ("exclusive", "isolated"):
+        raise ValueError("file_policy must be exclusive or isolated")
     nodeset = set(nodes)
     edges = data.get("edges") or []
     files = data.get("files") or {}
@@ -292,6 +295,7 @@ def ready(data: dict) -> dict:
     selected: list[str] = []
     selected_files: dict = {}
     blocked: dict = {}
+    integration_risks: dict = {}
 
     for n in sorted([n for n in nodes if n not in excluded], key=lambda x: _key(x, tie_break)):
         pending = sorted(p for p in preds[n] if p not in done)
@@ -304,8 +308,10 @@ def ready(data: dict) -> dict:
         conflicts = [h for h in holders if _conflict(fn, active_files[h])]
         conflicts += [s for s in selected if _conflict(fn, selected_files[s])]
         if conflicts:
-            blocked[n] = [f"file-conflict:{c}" for c in conflicts]
-            continue
+            if file_policy == "exclusive":
+                blocked[n] = [f"file-conflict:{c}" for c in conflicts]
+                continue
+            integration_risks[n] = [f"file-overlap:{c}" for c in conflicts]
 
         if limit is not None and len(selected) >= limit:
             blocked[n] = ["limit"]
@@ -319,6 +325,7 @@ def ready(data: dict) -> dict:
         "blocked": blocked,
         "remaining": len([n for n in nodes if n not in terminal]),
         "warnings": sorted(warnings),
+        "integration_risks": integration_risks,
     }
 
 

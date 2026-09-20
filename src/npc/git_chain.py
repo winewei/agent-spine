@@ -95,6 +95,10 @@ def scan_state_drift(repo_root: Path, state: dict) -> dict:
     for entry in state.get("progress") or []:
         if entry.get("status") in ("pending", None):
             continue
+        check_root = repo_root
+        isolated = entry.get("isolation") or {}
+        if isolated.get("worktree") and not entry.get("integrated_commit"):
+            check_root = Path(isolated["worktree"])
         kinds: list[tuple[str, str]] = []  # (kind, commit)
         impl = entry.get("implement_commit")
         if impl:
@@ -120,7 +124,7 @@ def scan_state_drift(repo_root: Path, state: dict) -> dict:
             try:
                 # 用 is_ancestor 判定 commit 是否仍属当前 HEAD 链：
                 # cat-file -e 只查对象存在性，无法识别 git reset 后的 dangling commit
-                if not is_ancestor(repo_root, c):
+                if not check_root.is_dir() or not is_ancestor(check_root, c):
                     missing_commits.append(c)
                     missing_kinds.append(kind)
             except RuntimeError:

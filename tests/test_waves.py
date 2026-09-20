@@ -358,3 +358,24 @@ def test_cli_registers_plan_ready():
     assert args._cmd_path == "plan ready"
     assert args.input == "dag.json"
     assert callable(args.handler)
+
+
+def test_isolated_policy_parallelizes_shared_registry_without_dropping_real_dependencies():
+    data = {'nodes': ['a', 'b', 'c', 'd'], 'edges': [['a', 'd']],
+            'files': {n: ['app.py'] for n in 'abcd'}, 'file_policy': 'isolated', 'limit': 4}
+    out = _waves.ready(data)
+    assert out['ready'] == ['a', 'b', 'c']
+    assert out['blocked']['d'] == ['dep-pending:a']
+    assert out['integration_risks']['b'] == ['file-overlap:a']
+    out = _waves.ready({**data, 'done': ['a'], 'active': ['b', 'c'], 'limit': 1})
+    assert out['ready'] == ['d']
+
+
+def test_no_wave_barrier_after_actual_dependency_completes():
+    assert _waves.ready({'nodes': ['a','b','c'], 'edges': [['a','c']],
+                         'done': ['a'], 'active': ['b'], 'limit': 1})['ready'] == ['c']
+
+
+def test_unknown_conflict_policy_rejected():
+    with pytest.raises(ValueError, match='file_policy'):
+        _waves.ready({'nodes': ['a'], 'file_policy': 'ignore-everything'})

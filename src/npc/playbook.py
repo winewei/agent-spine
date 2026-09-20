@@ -14,8 +14,8 @@ agents 内容以宿主中立措辞收编到包资源 ``src/npc/playbooks/``，np
 
 - ``claude``：command → ``~/.claude/commands/``，skill →
   ``~/.claude/skills/<name>/SKILL.md``，agent → ``~/.claude/agents/``
-- ``codex``：command / skill → ``~/.codex/prompts/``（Codex CLI 自定义 prompt
-  目录）；agent 无对应机制，跳过并记入 skipped
+- ``codex``：spine-run → ``~/.codex/skills/spine-run/SKILL.md``，其它旧入口保留
+  ``~/.codex/prompts/``；agent 跳过并记入 skipped
 - ``--dest DIR``：全部平铺为 ``DIR/<name>.md``（任意其它宿主按各自机制挂载）
 """
 
@@ -49,7 +49,7 @@ PLAYBOOKS: tuple[Playbook, ...] = (
         name="spine-run",
         kind="command",
         file="spine-run.md",
-        summary="自主 harness：目标/changes → DAG 波次 + worktree 并行 implement → integrate → review→fix→archive 流水线",
+        summary="自主 harness：worktree 并行 implement/review/fix → 验证发布到启动分支；全角色进展 monitor",
     ),
     Playbook(
         name="spine-analyze",
@@ -133,6 +133,8 @@ def _install_target(pb: Playbook, host: str | None, dest: Path | None, home: Pat
     if host == "codex":
         if pb.kind == "agent":
             return None  # Codex CLI 无自定义 subagent 文件机制
+        if pb.name == "spine-run":
+            return home / ".codex" / "skills" / pb.name / "SKILL.md"
         return home / ".codex" / "prompts" / f"{pb.name}.md"
     raise PlaybookError(
         f"未知 install host：{host!r}（可选 {'/'.join(SUPPORTED_INSTALL_HOSTS)}，或改用 --dest DIR）"
@@ -154,7 +156,9 @@ def install(
     if (host is None) == (dest is None):
         raise PlaybookError("--host 与 --dest 必须二选一")
     h = home or Path.home()
-    selected = [get(n) for n in names] if names else list(PLAYBOOKS)
+    selected = [get(n) for n in names] if names else [
+        pb for pb in PLAYBOOKS if pb.name != "new-plan-changes-v4"
+    ]
 
     installed: list[dict] = []
     skipped: list[dict] = []

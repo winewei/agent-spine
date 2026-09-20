@@ -17,9 +17,17 @@ npc 总是被某个 agent CLI（宿主）在其 shell 工具里调用。v1.7 起
 
 内置宿主：
 
-- ``claude``：Claude Code（session 目录 + settings 授权）
-- ``generic``：任意其他 CLI（kimi / codex / qwen / …）；无 session 目录扫描、
+- ``claude``：Claude Code（session 目录 + settings 授权 + sub-agent 转录布局）。
+  session 目录随 ``CLAUDE_CONFIG_DIR`` 迁移（未设则 ``~/.claude``）。
+- ``codex``：Codex CLI（无 per-project session 目录；sub-agent 转录布局为
+  ``~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl``，首行 session_meta 标 parent）
+- ``generic``：任意其他 CLI（kimi / qwen / …）；无 session 目录扫描、
   无授权写入。可用 ``[host].session_dir`` 补一个 session 目录模板升级识别能力。
+
+第四件宿主差异（1.9+）：**sub-agent 转录布局**（``subagent_layout``）。宿主 spawn
+的 sub-agent 每次模型回合都会 append 自己的转录文件，文件 mtime 即真实心跳，
+``npc watch`` 据此派生 implementer 存活状态，不要求 sub-agent 显式上报。npc 只读
+首行元数据、mtime 与末行时间戳，不依赖转录正文格式。
 
 选择顺序：``[host].name`` 显式配置 > env 探测（``CLAUDECODE=1`` → claude）>
 ``generic``。探测放在 env 而非二进制，因为 npc 跑在宿主的子 shell 里，宿主二进制
@@ -34,12 +42,20 @@ from pathlib import Path
 
 
 HOST_CLAUDE = "claude"
+HOST_CODEX = "codex"
 HOST_GENERIC = "generic"
 
 # Claude Code 在其 Bash 工具子进程注入的环境变量
 _CLAUDE_ENV_MARKER = "CLAUDECODE"
+# Claude Code 配置目录重定向（session 目录随之迁移）
+_CLAUDE_CONFIG_DIR_ENV = "CLAUDE_CONFIG_DIR"
 
 CLAUDE_SESSION_DIR_TEMPLATE = ".claude/projects/{proj_key}"
+CODEX_SESSIONS_DIR = ".codex/sessions"
+
+# sub-agent 转录布局标识（subagents.py 按此分派扫描器）
+LAYOUT_CLAUDE = "claude"
+LAYOUT_CODEX = "codex"
 
 
 @dataclass(frozen=True)
@@ -56,21 +72,55 @@ class ResolvedHost:
     session_dir_template: str | None = None
     settings_grant: bool = False
     source: str = "default"
+    subagent_layout: str | None = None
 
     def session_dir(self, home: Path, proj_key: str) -> Path | None:
-        """该宿主的 session 目录（绝对路径）；宿主无此能力返回 None。"""
+        """该宿主的 session 目录（绝对路径）；宿主无此能力返回 None。
+
+        模板为绝对路径时（``CLAUDE_CONFIG_DIR`` 重定向）``home /`` 拼接自动让位。
+        """
         if not self.session_dir_template:
             return None
         return home / self.session_dir_template.format(proj_key=proj_key)
 
+    def subagent_root(self, home: Path, proj_key: str) -> Path | None:
+        """sub-agent 转录扫描根目录；宿主无转录布局返回 None。"""
+        if self.subagent_layout == LAYOUT_CLAUDE:
+            return self.session_dir(home, proj_key)
+        if self.subagent_layout == LAYOUT_CODEX:
+            return home / CODEX_SESSIONS_DIR
+        return None
 
-def _builtin(name: str, source: str, session_dir_override: str | None) -> ResolvedHost:
+
+def _claude_session_template(env: dict[str, str]) -> str:
+    config_dir = env.get(_CLAUDE_CONFIG_DIR_ENV)
+    if config_dir:
+        return str(Path(config_dir).expanduser() / "projects" / "{proj_key}")
+    return CLAUDE_SESSION_DIR_TEMPLATE
+
+
+def _builtin(
+    name: str,
+    source: str,
+    session_dir_override: str | None,
+    env: dict[str, str] | None = None,
+) -> ResolvedHost:
+    e = env or {}
     if name == HOST_CLAUDE:
         return ResolvedHost(
             name=HOST_CLAUDE,
-            session_dir_template=session_dir_override or CLAUDE_SESSION_DIR_TEMPLATE,
+            session_dir_template=session_dir_override or _claude_session_template(e),
             settings_grant=True,
             source=source,
+            subagent_layout=LAYOUT_CLAUDE,
+        )
+    if name == HOST_CODEX:
+        return ResolvedHost(
+            name=HOST_CODEX,
+            session_dir_template=session_dir_override,
+            settings_grant=False,
+            source=source,
+            subagent_layout=LAYOUT_CODEX,
         )
     # generic 或任意自定义名：能力面一致（session 目录仅在显式配置时可用）
     return ResolvedHost(
@@ -97,10 +147,10 @@ def resolve_host(
     """
     e = env if env is not None else dict(os.environ)
     if name:
-        return _builtin(name, "config", session_dir)
+        return _builtin(name, "config", session_dir, e)
     if e.get(_CLAUDE_ENV_MARKER):
-        return _builtin(HOST_CLAUDE, "env", session_dir)
-    return _builtin(HOST_GENERIC, "default", session_dir)
+        return _builtin(HOST_CLAUDE, "env", session_dir, e)
+    return _builtin(HOST_GENERIC, "default", session_dir, e)
 
 
 def resolve_host_from_config(cfg, *, env: dict[str, str] | None = None) -> ResolvedHost:

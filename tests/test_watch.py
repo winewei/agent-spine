@@ -216,3 +216,51 @@ def test_watch_all_scans_only_active_runs(computed_paths: _paths.Paths, fake_hom
 
     assert snapshot["scope"] == "all"
     assert [r["run_ts"] for r in snapshot["runs"]] == [computed_paths.run_ts]
+
+
+# ------------------------------------------------------------------
+# --follow 迁移流（纯函数 follow_tick）
+# ------------------------------------------------------------------
+
+
+def _snap(agents: list[dict], tasks: list[dict] | None = None) -> dict:
+    return {"runs": [{"agents": {"rows": agents}, "tasks": tasks or []}]}
+
+
+def _agent(aid: str, status: str, *, cid: str = "c1", idle: int = 10) -> dict:
+    return {"agent_id": aid, "change_id": cid, "observed_status": status, "idle_seconds": idle, "last_tool": "Bash", "worktree": "/wt"}
+
+
+def test_follow_tick_baseline_then_transitions():
+    # 首个 tick：只打基线摘要，历史 stale 不当告警
+    lines, prev = _watch.follow_tick({}, _snap([_agent("a1", "running"), _agent("a2", "stale", cid="c2", idle=1200)]), stamp="10:00")
+    assert len(lines) == 1
+    assert lines[0] == "[10:00] c1:running/idle10s c2:stale/idle20m00s | finished=0"
+    assert prev == {"a1": "running", "a2": "stale"}
+
+    # 第二个 tick：a1 → stale，a2 → finished，a3 新 running
+    lines, prev = _watch.follow_tick(
+        prev,
+        _snap([_agent("a1", "stale", idle=1000), _agent("a2", "finished", cid="c2"), _agent("a3", "running", cid="c3")]),
+        stamp="10:10",
+    )
+    tags = [l.split(" ", 1)[0] for l in lines]
+    assert tags == ["STALL", "FINISHED", "NEW", "[10:10]"]
+    assert "STALL c1 agent=a1 idle=16m40s tool=Bash worktree=/wt" in lines
+    assert lines[-1].endswith("| finished=1")
+
+    # 第三个 tick：无变化 → 只有摘要行；finished 后再被唤醒 → RESUMED
+    lines, prev = _watch.follow_tick(prev, _snap([_agent("a1", "stale", idle=1600), _agent("a2", "running", cid="c2"), _agent("a3", "running", cid="c3")]), stamp="10:20")
+    assert [l.split(" ", 1)[0] for l in lines] == ["RESUMED", "[10:20]"]
+
+
+def test_follow_tick_first_seen_non_running_is_not_alarm():
+    _, prev = _watch.follow_tick({}, _snap([]), stamp="t0")
+    lines, _ = _watch.follow_tick(prev, _snap([_agent("old", "abandoned", idle=99999)]), stamp="t1")
+    assert [l.split(" ", 1)[0] for l in lines] == ["[t1]"]
+
+
+def test_follow_tick_task_stale_transition():
+    _, prev = _watch.follow_tick({}, _snap([], [{"task_id": "t1", "observed_status": "running", "phase": "implement", "heartbeat_age_seconds": 5}]), stamp="t0")
+    lines, _ = _watch.follow_tick(prev, _snap([], [{"task_id": "t1", "observed_status": "stale", "phase": "implement", "heartbeat_age_seconds": 950}]), stamp="t1")
+    assert lines[0] == "STALL task=t1 phase=implement age=15m50s"

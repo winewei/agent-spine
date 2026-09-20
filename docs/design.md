@@ -333,6 +333,8 @@ v1.3 把包从 `agent_spine`（嵌套 `npc/` 子包）改名为顶层 `npc`（`s
 
 对应 2026-07-02 watch 提案，但实现走了与提案不同的路线：**不解析 Claude Code 的 transcript jsonl**（`~/.claude/projects/.../agent-*.jsonl`，内部格式无契约、防御性解析成本高），而是先落地 npc 自有的任务上报契约——后台 agent 通过 `npc task start/update/heartbeat/finish` 把生命周期写到 `<run_dir>/tasks/<task-id>.json`（+ `.events.jsonl`），`npc watch` 只观测这份自有契约。提案设想的 `npc serve` HTTP 端未实施。取舍：观测面从"Claude Code 内部状态"收窄为"显式上报的任务"，换来零逆向工程成本与格式稳定性。
 
+**sub-agent 隐式心跳（1.9）**：显式契约有一个盲区——宿主 spawn 的 implementer（Claude Code `Agent` / Codex `spawn_agent`）从不调 npc，主 session 在 `Waiting for background agents` 期间又不执行任何命令，于是 sub-agent 假死时主 session 只能白等（2026-09-20 migrate-glue-table run 中主 session 被动等了 30 分钟，之后即兴写了一个看 worktree mtime 的 bash 巡检脚本挂 Monitor；worktree mtime 是间接信号，agent 读文档或跑长测试都显示 idle）。本版把宿主为每个 sub-agent 维护的转录文件当作心跳源（`subagents.py`）：Claude Code `<session>/subagents/agent-<id>.jsonl` + `.meta.json`，Codex `~/.codex/sessions/**/rollout-*.jsonl` 首行 `session_meta`。只读三样东西——伴随元数据、文件 mtime、末行时间戳与终止标记——不解析正文，与"不解析 transcript"的边界一致；宿主差异收敛为 `hosts.ResolvedHost.subagent_layout`。`npc watch --follow` 把快照变成追加式行流（摘要 + `STALL`/`FINISHED`/... 迁移行），由宿主的后台监视工具（Claude Code `Monitor`）托管，主 session 只在迁移时被唤醒；spine-run playbook 3g 规定 STALL 的处置阶梯（SendMessage 问一次 → TaskStop + auto-decide），判断留在主 session，npc 不自动杀进程。sub-agent 侧零改动：prompt 不加指令，不占 coder 上下文。review / coder 子进程仍走 npc 自有的 `events.jsonl` 流，不在此观测面内。
+
 ### 11.9 波次并行与通知（1.4 已落地）
 
 服务 `/new-plan-changes-v3`（波次并行 skill），把 v3 skill 原随附的脚本全部下沉进 npc：
@@ -396,3 +398,12 @@ v1.4 的账目：review-fix 循环体活在 skill 里，每 change 主 session �
 - **coder 路由中立化**：删除 playbook 内 MiMo 专属表述；执行层由 `[providers.*]` + `[coder]` / `[coder.phase]` 决定（默认 claude，deepseek / kimi / qwen / mimo 皆为普通 provider），不变量 1 / 4 的措辞改为"第三方廉价 provider 只许执行"。
 - **v4 降为别名**：`new-plan-changes-v4.md` 保留注册名与文件（`npc playbook install` / `show` 不破坏），内容为参数对照表并指向 spine-run；README / INSTALL / usage 的入口说明统一为 `spine-run`。
 - **不做**：不删除 v2 / v3 历史 playbook；不改 npc 代码——合并只发生在 playbook 层，`npc plan ready` / `integrate` / `change run` 契约不变。
+
+
+## 1.8.1：以工程产物为中心的 worktree 生命周期
+
+[详细设计与恢复协议](release-1.8.1.md)。每个 change 在独立 worktree 中完成全部生成与验证，主 session 使用原生 agent 交接或 headless 执行器，按真实依赖和总容量分配工作。工具仅负责可验证的状态与 Git 动作，主 agent 保留按需取证、诊断、拆分、调试与修复权限。
+
+启动分支的完整 ref/commit 落 run.json，续跑保持不变；原 .main.lock 是兼容锁文件名，不指代固定分支。prepared 绑定审查 HEAD、补丁摘要和测试；candidate 绑定组合基线与验证结果；publication 是快进前写入的恢复凭据。不同 change 的长任务不争抢目标锁，目标锁只保护最终发布/归档。
+
+共享文件是整合风险，不是自动依赖；展示波次不产生运行时全连接边。验证的是补丁在组合树中的保持性及组合测试，跨变更语义仍由真实依赖、独立审查与工程测试保障。保留 legacy 命令接口，但新 playbook 不再使用共享工作区串行内环。

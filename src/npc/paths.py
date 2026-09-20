@@ -49,6 +49,9 @@ class Paths:
     index_file: Path
     schema_path: Path
     run_events: Path
+    # Internal execution context: isolated worktrees inherit the initiating
+    # project's provider settings even when .npc/config.toml is untracked.
+    config_root: Path | None = None
 
     def to_env(self) -> dict[str, str]:
         """投影为环境变量字典（仅供 ``--shell-exports`` 兼容路径使用）。"""
@@ -67,7 +70,9 @@ class Paths:
 
     def to_run_json_dict(self) -> dict:
         """序列化为 ``run.json`` 的 dict 形态。"""
+        from .target import capture
         return {
+            **capture(self.repo_root),
             "schema_version": RUN_JSON_SCHEMA_VERSION,
             "repo_root": str(self.repo_root),
             "proj_key": self.proj_key,
@@ -211,8 +216,17 @@ def write_run_json(paths: Paths) -> Path:
     """把 Paths 写入 ``<run_dir>/run.json``，返回写入路径。"""
     target = run_json_path_for(paths.task_log_dir, paths.run_ts)
     target.parent.mkdir(parents=True, exist_ok=True)
+    payload = paths.to_run_json_dict()
+    if target.is_file():
+        # init on resume must not silently rebind the integration branch.
+        old = json.loads(target.read_text(encoding="utf-8"))
+        if "target_ref" in old:
+            payload.update({k: old.get(k) for k in ("target_ref", "target_initial_commit")})
+        else:
+            # The original branch of legacy runs is unknown; don't guess.
+            payload.update(target_ref=None, target_initial_commit=None)
     target.write_text(
-        json.dumps(paths.to_run_json_dict(), ensure_ascii=False, indent=2) + "\n",
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
     return target

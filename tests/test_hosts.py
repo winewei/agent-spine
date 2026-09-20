@@ -69,3 +69,23 @@ def test_resolve_from_config(tmp_path: Path):
     h = hosts.resolve_host_from_config(cfg, env={})
     assert h.name == "kimi"
     assert h.session_dir_template == ".kimi/s/{proj_key}"
+
+
+def test_claude_config_dir_redirects_session_dir(tmp_path: Path):
+    h = hosts.resolve_host(env={"CLAUDECODE": "1", "CLAUDE_CONFIG_DIR": str(tmp_path / "cfg")})
+    assert h.session_dir(Path("/home/u"), "-k") == tmp_path / "cfg" / "projects" / "-k"
+    assert h.subagent_root(Path("/home/u"), "-k") == tmp_path / "cfg" / "projects" / "-k"
+    assert h.subagent_layout == hosts.LAYOUT_CLAUDE
+
+
+def test_codex_builtin_host():
+    h = hosts.resolve_host("codex", env={})
+    assert h.name == "codex"
+    assert h.settings_grant is False
+    assert h.session_dir_template is None
+    assert h.subagent_layout == hosts.LAYOUT_CODEX
+    assert h.subagent_root(Path("/home/u"), "-k") == Path("/home/u/.codex/sessions")
+
+
+def test_generic_has_no_subagent_layout():
+    assert hosts.resolve_host(env={}).subagent_layout is None

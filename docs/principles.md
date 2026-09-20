@@ -21,11 +21,11 @@
 
 系统状态以落盘的结构化数据为准，绝不以 LLM 的自然语言自述为准。
 
-- 主 session 只读 npc 子命令返回的一行 JSON 的关键字段做分支；不读 prompt 模板 / review.json / summary.md 原文。
+- 结构化回执决定阶段状态；主 session 可以按需读取 prompt / review / summary / 源码和测试日志来诊断，避免无目的全量重复读取。
 - 角色间交接走结构化契约：coder→主 session 只回一行 RESULT；npc→主 session 只回 JSON。
 - 全轨迹落 `~/task_log/<PROJ_KEY>/` + 跨 run 指标落 `_telemetry/`，是复盘与 `/spine-analyze` 的唯一依据。
 - 注入进 prompt 的外部内容必须落盘可重放（`<base>/*.experience.json` 记 uri / score / tokens / HEAD / sha256，注入块本体落同名 `.md`）；主 session 只读 `experience_injected` / `experience.ok` 这类标量，不读经验正文。
-- **反模式**：让主 session 去读 summary 原文做决策、把模板搬进 context——这把"智能"退化成"数据搬运"，正是 npc 存在要消灭的。
+- **反模式**：强迫主 agent 只转发标量、禁止读取问题证据，或每次重派任务都从头阅读所有材料。工具管理机械状态，agent 保留分析、重排、调试与修复能力。
 
 ## 不变量 3 — 确定性"笼子" ∝ 1/(人在回路)
 

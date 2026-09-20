@@ -1637,6 +1637,18 @@ push 当前分支到远程（对外动作）。不自作主张决定要不要推
 
 设计依据 [docs/optimization-proposals/2026-07-05-orchestration-context-budget.md](./optimization-proposals/2026-07-05-orchestration-context-budget.md)：主 session 每推进一个 change 消耗 O(1) token；确定性循环与多步编排全部收进 npc，主 session 只在决策分叉点出场。
 
+### 1.8.1 默认：隔离内环与原生 agent 交接
+
+`npc change run --seq N --isolated [--handoff] [--worktree PATH] [--result-file PATH --manifest PATH]`
+
+每个 change 的实现、review、fix 都在同一个 worktree 中推进。`--handoff` 返回 needs-coder 及 phase/round/worktree/prompt；宿主原生 agent 提交后回传 RESULT/manifest，继续同一命令。已有 implementer 可用 --worktree 接入。不加 --handoff 时使用配置的 headless coder。中断恢复默认不指定 --from，避免重复执行已完成阶段。
+
+`ready-to-integrate` 后运行 `npc integrate --seq N --prepared`：在隔离工作区组合验证，补丁变化要求重新 review，发布时核对启动目标分支及基线，最后快进和归档。禁止 --force/--no-verify-tests 绕过准备协议。目标是主 session 启动分支，不是固定 main；历史锁文件名 .main.lock 保留兼容。
+
+`npc plan ready` 的输入可增加 `file_policy:"isolated"`：共享文件返回 integration_risks，真实依赖和容量限制仍生效。默认 exclusive 保持旧接口语义。
+
+完整状态表、示例与迁移边界见 [1.8.1 说明](release-1.8.1.md)。以下是不加 --isolated/--prepared 的兼容路径。
+
 ### `npc change run --seq N [--from PHASE] [--decision ACTION] [--max-rounds 20] [--auto] [--backend ...] [--engine ...] [--config PATH]`
 
 单 change 内环一条命令跑完：implement → review round-0 → (fix → review)* → archive。复用既有 pipeline（`implement/fix run` / `review run` / `archive run`）与 `auto-decide`，不重写。
@@ -1663,7 +1675,7 @@ exit: 0 archived / 1 终态失败（skipped|failed|aborted）或 main_busy / 5 n
       2 用法错 / 3 环境错 / 4 依赖缺失
 ```
 
-**main 互斥**（1.7.1+）：全程持有 `<task_log_dir>/.main.lock`，与 `npc integrate` 及另一个 `change run` 互斥（内环的 fix / archive commit 都落在 main 上）。锁被占用时有界等待 120s，超时输出 `{"ok": false, "error": "main_busy", "message": "...holder=..."}` exit 1，不做任何改动。
+**兼容路径的目标工作区互斥**（1.7.1+，不适用于隔离内环）：全程持有 `<task_log_dir>/.main.lock`，与 `npc integrate` 及另一个 `change run` 互斥（内环的 fix / archive commit 都落在 main 上）。锁被占用时有界等待 120s，超时输出 `{"ok": false, "error": "main_busy", "message": "...holder=..."}` exit 1，不做任何改动。
 
 ### `npc integrate --seq N --result '<RESULT行>' [--result-file PATH] [--manifest PATH] [--no-verify-tests] [--force]`
 
@@ -1675,7 +1687,7 @@ worktree 产物整合进 main 的多步编排（替代 v3 skill Step 9 伪 bash 
 4. `implement record` 装订，失败 → `git revert` 摘除；
 5. verify tests 真实复跑（探测不到测试命令 → skipped 警告），失败 → revert + progress 回退 `failed/verify-tests-failed`。
 
-**main 互斥**（1.7.1+）：整合全程持有 `<task_log_dir>/.main.lock`（`fcntl.flock`，非阻塞抢锁，进程退出自动释放）。`npc change run` 在其整个生命周期持同一把锁（有界等待 120s，超时 `error=main_busy` exit 1）。原因：整合在 main 上 cherry-pick、跑测试并读改写 state.json，与内环的 fix / archive commit 并发会产生 git 锁冲突、测错 HEAD、state 覆盖写；两个 integrate 并发同理。抢不到锁时**未做任何改动**即返回 `step=inner-loop-active, reason=main-busy`，附 `holder={pid, owner, ts}`（锁文件里的持有者）与 `active=[{seq, change_id, phase}]`（state 中处于 in-progress 的内环 phase 快照，仅诊断用）。调用方（v4 playbook 3c）应把该 RESULT 排队，等当前内环结束再重试；implementer 在 worktree 内继续跑不受影响。人工确认无并发后可 `--force` 跳过锁。
+**兼容路径的目标工作区互斥**（1.7.1+，不适用于隔离内环）：整合全程持有 `<task_log_dir>/.main.lock`（`fcntl.flock`，非阻塞抢锁，进程退出自动释放）。`npc change run` 在其整个生命周期持同一把锁（有界等待 120s，超时 `error=main_busy` exit 1）。原因：整合在 main 上 cherry-pick、跑测试并读改写 state.json，与内环的 fix / archive commit 并发会产生 git 锁冲突、测错 HEAD、state 覆盖写；两个 integrate 并发同理。抢不到锁时**未做任何改动**即返回 `step=inner-loop-active, reason=main-busy`，附 `holder={pid, owner, ts}`（锁文件里的持有者）与 `active=[{seq, change_id, phase}]`（state 中处于 in-progress 的内环 phase 快照，仅诊断用）。调用方（v4 playbook 3c）应把该 RESULT 排队，等当前内环结束再重试；implementer 在 worktree 内继续跑不受影响。人工确认无并发后可 `--force` 跳过锁。
 
 state.json 的所有读改写（`update_state`）另持 `<state>.lock`，tmp 文件名带 pid——主 session 的 `state add-change` / `phase rotate` 与后台内环装订并发时不再互相覆盖。
 
@@ -2049,20 +2061,52 @@ npc task finish --id implement-001 [--status done|failed|cancelled] \
 ### `npc watch`
 
 ```bash
-npc watch [--once] [--all] [--project PATH] [--interval 2] [--stale-seconds N]
+npc watch [--once | --follow] [--all] [--project PATH] [--interval N] [--stale-seconds N]
+          [--abandoned-seconds N] [--max-age-seconds N] [--session-id SID]
 ```
 
-- 默认：观测当前 cwd 所属项目的 active run。
-- `--once`：输出一次单行 JSON 快照后退出，适合脚本/测试。
-- 无 `--once`：循环刷新终端视图。
+- 默认：观测当前 cwd 所属项目的 active run，循环刷新终端视图（无结构化 stdout）。
+- `--once`：输出一次单行 JSON 快照后退出，适合脚本/测试/playbook 恢复闸门。
+- `--follow`：追加式行流，每 `--interval` 秒（默认 600）一行摘要，状态迁移时输出 `NEW` / `STALL` / `ABANDONED` / `FINISHED` / `RESUMED` 行。设计为挂在宿主的后台监视工具下（Claude Code `Monitor(persistent=true)`），主 session 只在迁移时被唤醒。首个 tick 只打基线不打迁移，历史遗留的 stale/abandoned 不当告警。
 - `--all`：只扫描 `~/task_log/*/active.json` 指向的 active run，不扫全部历史。
 - `--project PATH`：按指定 worktree/project 的 active run 观测。
+- `--stale-seconds N`：任务心跳与 sub-agent 空闲的 stale 阈值（默认 900）。
+- `--abandoned-seconds N`：sub-agent 空闲超过此值视为 `abandoned`（默认 14400）。
+- `--max-age-seconds N`：只扫描 mtime 在此范围内的 sub-agent 转录（默认 43200）。
+- `--session-id SID`：只看该主 session 派生的 sub-agent；省略取 `NPC_SESSION_ID`（`npc init` 注入），也没有则不过滤，靠 repo_root 归属收敛。
 - 如需指定历史 run，使用全局参数：`npc --task-log-dir PATH --run-ts TS watch --once`。
+
+**两个观测面**：
+
+1. `tasks`：`<run_dir>/tasks/*.json` 显式上报契约（`npc task start/heartbeat/finish`）。
+2. `agents`：宿主 spawn 的 sub-agent 转录（只读，零上报）。宿主为每个 sub-agent 维护一份 jsonl，每次模型回合与工具调用 append 一行，文件 mtime 与末行时间戳即心跳。按宿主布局（`[host].name`）分派：
+   - `claude`：`<session_dir>/<session_id>/subagents/agent-<id>.jsonl` + `.meta.json`（agentType / description / name / worktreePath）；`session_dir` 随 `CLAUDE_CONFIG_DIR` 迁移。
+   - `codex`：`~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`，首行 `session_meta` 带 `thread_source="subagent"` / `parent_thread_id` / `cwd`。
+   - `generic`：无转录布局，`agents.rows` 为空。
+
+   只保留 worktree 或 cwd 位于当前 repo_root 之下的转录；`change_id` 由描述/名称/分支名匹配 state 中的 change id 派生（最长匹配）。npc 只读首行元数据、mtime 与末行（回溯 ≤ 40 行取最近工具名与终止标记），不解析转录正文。
+
+`observed_status`：`running`（空闲 ≤ stale）/ `stale`（> stale）/ `abandoned`（> abandoned）/ `finished`（Claude 末行 `stop_reason=end_turn|stop_sequence`；Codex 末行 `task_complete`）/ `unknown`（无时间戳）。agent 交付后被主 session 再次唤醒会从 `finished` 回到 `running`（follow 流打 `RESUMED`）。
 
 stdout（`--once`）：
 
 ```json
-{"ok":true,"schema_version":1,"generated_at":"...","scope":"project","runs":[{"proj_key":"...","run_ts":"...","state":{...},"tasks":[{"task_id":"implement-001","observed_status":"running","heartbeat_age_seconds":2}]}]}
+{"ok":true,"schema_version":1,"generated_at":"...","scope":"project","runs":[{"proj_key":"...","run_ts":"...","state":{...},
+  "tasks":[{"task_id":"implement-001","observed_status":"running","heartbeat_age_seconds":2}],
+  "agents":{"host":"claude","layout":"claude","summary":{"total":2,"by_status":{"running":1,"finished":1}},
+            "rows":[{"agent_id":"a4b49...","change_id":"add-worker-unit-claim-api","name":"impl-seq16","agent_type":"spine-coder",
+                     "observed_status":"running","idle_seconds":19,"last_activity_at":"...","last_tool":"Bash",
+                     "worktree":"/repo/.claude/worktrees/agent-a4b49...","transcript":"...","session_id":"2dbd0292-..."}]}}]}
+```
+
+stdout（`--follow`，每行一个事件）：
+
+```
+[14:08] add-worker-unit-claim-api:running/idle19s add-web-job-pages:running/idle2m03s | finished=17
+STALL add-web-job-pages agent=a80e4... idle=15m12s tool=Bash worktree=/repo/.claude/worktrees/agent-a80e4...
+FINISHED add-worker-unit-claim-api agent=a4b49... idle=4s tool=- worktree=...
+STALL task=npc-spine-2026-09-20-0135 phase=layer-2 age=16m40s
+ERROR watch_failed 项目没有 active run：...
 ```
 
 ---
@@ -2137,7 +2181,7 @@ v1.7 起仓库不再发布 Claude Code plugin；原 plugin 的 commands / skills
 物化 playbooks 到宿主目录（**写盘副作用**；幂等覆盖，升级 npc 后重跑即同步内容）。
 
 - `--host claude`：command → `~/.claude/commands/<name>.md`；skill → `~/.claude/skills/<name>/SKILL.md`；agent → `~/.claude/agents/<name>.md`
-- `--host codex`：command/skill → `~/.codex/prompts/<name>.md`；agent 无对应机制 → 记入 `skipped`
+- `--host codex`：spine-run → `~/.codex/skills/spine-run/SKILL.md`；其它旧入口保留 `~/.codex/prompts/<name>.md`；agent 无对应机制 → 记入 `skipped`
 - `--dest DIR`：全部平铺为 `DIR/<name>.md`（任意其它宿主自行挂载）
 - `--name` 可多次，只装子集；缺省装全部
 
@@ -2299,3 +2343,13 @@ Breaking change（命令更名 / 参数语义变化 / stdout schema 字段移除
 - `agent timeout-budget` / `agent record-timeout`（§7a，1.1+ 渐进退避 timeout 预算）
 
 同时修正两处已实现但文档描述滞后的参数漂移：`review run` 补记 `--engine {codex,claude}`（§8a，默认读 `[review].engine`，缺省 `codex`；stdout 增 `engine` 字段，失败 error 码随引擎变化为 `<engine>-exec-failed`）与 `--config PATH`；`notify` 补记 `--timeout`（默认 `5.0`，§8c）。契约版本仍为 `v1.4`。
+
+## 全角色进展监控（1.8.1）
+
+`npc monitor tick` 初始化/恢复监控；`follow --interval 60` 单实例后台检查，默认询问周期 600 秒、无进展阈值 900 秒、回复期限 300 秒（可用 `--inquiry-seconds`、`--stalled-seconds`、`--grace-seconds` 调整）。主 session 在首个 subagent 前启动，并用宿主通知或有界等待处理事件。
+
+所有角色显式 `register --id ID --role ROLE --handle HANDLE [--worktree PATH] [--artifact PATH ...]`。每个任务的专属产物内容和隔离 worktree 的 HEAD/diff 是工作证据，心跳/日志活动不算进展；无 Git 产出的分析任务使用专属 artifact。未跟踪文件需显式登记 artifact。文件变化不代表收敛，周期询问不会因此取消。
+
+`CHECK_IN` 由宿主发送询问，再 `ack --action-id ID --decision sent`。回复后 `--decision progress --note 证据`；合理长任务 `--decision wait --wait-seconds 600 --note 原因`（1–900 秒）；到期未处理进入 `CONTROL_REQUIRED`，主 session 诊断并 `--decision intervene --note 已采取的动作`。相同 action id 幂等展示，不能每个 tick 重发询问；重复 sent 不延长回复期限。监控只维护自己的检查点，不直接发宿主消息、停止进程或修改 Git/业务 state。
+
+核验退出/收单后 `finish --id ID --note 证据`；全部结束后 `stop`，后台 follow 随之退出。恢复保留未完成 action 与计时，缺少转录不等于任务完成。`npc watch` 仍提供只读活动快照，供核对漏登任务；只有真实通知能力或主 session 的有界等待才能驱动干预，单独运行 follow 不等于自治控制。

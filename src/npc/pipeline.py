@@ -173,6 +173,7 @@ def _do_phase_enter(p: _paths.Paths, seq: int, phase: str) -> dict:
     started_at = _io.now_iso()
     started_ms = _io.now_ms()
     captured: dict[str, Any] = {}
+    started_head = _git_head(p.repo_root)
 
     def mutate(state: dict) -> None:
         entry = _get_entry(state, seq)
@@ -185,6 +186,7 @@ def _do_phase_enter(p: _paths.Paths, seq: int, phase: str) -> dict:
             "status": "in-progress",
             "started_at": started_at,
             "started_ms": started_ms,
+            "started_head": started_head,
         }
         captured["change_id"] = entry["change_id"]
         captured["base"] = entry["base"]
@@ -391,6 +393,11 @@ def _do_review_phase_exit_and_trend(
         entry["blocking_trend"] = trend
         entry["rounds_since_strict_decrease"] = new_rsd
         entry["categories_seen"] = seen
+        if metrics.get("reviewed_head"):
+            entry["last_review"] = {"head": metrics["reviewed_head"],
+                                    "blocking": blocking,
+                                    "round": int(phase.split("-r")[1])}
+            new_phase["reviewed_head"] = metrics["reviewed_head"]
 
         captured["change_id"] = entry["change_id"]
         captured["base"] = entry.get("base")
@@ -549,6 +556,13 @@ def _render_focus(
             fixed_history_md=history_md,
             own_commits=own,
         )
+    isolation = (entry or {}).get("isolation") or {}
+    if isolation.get("base_commit"):
+        text += ("\n\n## Final isolated patch\n"
+                 "Review the complete current patch, including merge/conflict resolutions, "
+                 "not only the historical implementation/fix commits. Read the affected code "
+                 "and its callers in this worktree.\n"
+                 f"Run: git diff {isolation['base_commit']} HEAD --\n")
     return text, src, fixed_count
 
 
@@ -570,7 +584,7 @@ def run_review_round(
     ``config_path`` 显式指定 TOML 配置；省略走 :func:`config.load_config` 的标准查找链。
     """
     try:
-        cfg = load_config(p.repo_root, override_path=config_path)
+        cfg = load_config(p.config_root or p.repo_root, override_path=config_path)
     except ConfigError as e:
         raise ValueError(str(e)) from e
     review_cfg = cfg.review
@@ -579,6 +593,7 @@ def run_review_round(
             f"未知 review engine：{engine_name!r}（仅支持 codex / claude）"
         )
     selected_engine = (engine_name or review_cfg.engine).lower()
+    reviewed_head = _git_head(p.repo_root)
 
     state = _state.read_state(p.state_json)
     entry = _get_entry(state, seq)
@@ -730,6 +745,11 @@ def run_review_round(
             "detail": str(e),
         }
 
+    # Bind the receipt to the immutable revision actually read by the reviewer.
+    if _git_head(p.repo_root) != reviewed_head:
+        _do_phase_exit(p, seq, phase, status="failed", extra={"reason": "review-head-changed"})
+        return {"ok": False, "error": "review-head-changed", "seq": seq}
+    metrics["reviewed_head"] = reviewed_head
     # 5. phase exit + trend（原子）
     stale = _do_review_phase_exit_and_trend(p, seq, phase, metrics)
     # 计算 review-rN 的 duration_ms（从 state 重新读最简单）
@@ -819,7 +839,7 @@ def _experience_commit_hook(
     started_ms = _io.now_ms()
     try:
         try:
-            cfg = load_config(p.repo_root, override_path=config_path).experience
+            cfg = load_config(p.config_root or p.repo_root, override_path=config_path).experience
         except (ConfigError, OSError):
             return None
         if not cfg.enabled:
@@ -927,7 +947,7 @@ def run_archive(
 
     # Preserve this exact proposal before openspec moves it out of the active tree.
     try:
-        if load_config(p.repo_root, override_path=config_path).experience.enabled:
+        if load_config(p.config_root or p.repo_root, override_path=config_path).experience.enabled:
             summary = _experience.proposal_summary(p.repo_root, change_id)
             if summary:
                 (base / "experience.proposal.md").write_text(_experience.redact_secrets(summary), encoding="utf-8")

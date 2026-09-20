@@ -17,7 +17,7 @@ import subprocess
 from pathlib import Path
 from typing import Any, Callable
 
-from . import _io, locks as _locks, paths as _paths
+from . import _io, locks as _locks, paths as _paths, target as _target
 
 
 SCHEMA_VERSION = 2
@@ -31,6 +31,9 @@ VALID_PROGRESS_STATUS = {
     "failed",
     "needs-user-decision",
     "skipped-auto",
+    "ready-to-integrate",
+    "needs-review",
+    "integrated",
 }
 
 VALID_TOP_STATUS = {"in-progress", "completed", "completed-with-issues", "aborted"}
@@ -376,6 +379,7 @@ def init_run(args: argparse.Namespace) -> None:
         "project_root": str(p.repo_root),
         "proj_key": p.proj_key,
         "git_head_at_start": _git_head(p.repo_root),
+        **(_target.metadata(p) or _target.capture(p.repo_root)),
         "cc_session": cc_session,
         "plan_order": plan_order,
         # 本 run 首次召回时的经验库快照指纹（由 agent.prompt_render 回填）。

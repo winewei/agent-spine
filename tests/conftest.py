@@ -11,6 +11,14 @@ import pytest
 from npc import paths as _paths
 
 
+@pytest.fixture(autouse=True)
+def _isolate_host_env(monkeypatch):
+    """屏蔽开发机宿主环境：CLAUDE_CONFIG_DIR 会把 session 目录重定向到真实配置目录，
+    NPC_SESSION_ID 会让 sub-agent 扫描按真实 session 过滤，二者都会让 fake HOME 失效。"""
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.delenv("NPC_SESSION_ID", raising=False)
+
+
 @pytest.fixture
 def fake_repo(tmp_path: Path) -> Path:
     """创建一个临时 git 仓库。"""
