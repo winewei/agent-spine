@@ -277,6 +277,32 @@ def _render_prompt_file(
 # ============================================================
 
 
+def prepare_handoff(p: _paths.Paths, seq: int, change_id: str, phase: str,
+                    round_n: int, *, config_path: Path | None = None) -> dict:
+    """Expose a durable coding task to a host-native agent, without spawning a CLI.
+
+    The caller owns the change lock. Repeated polls return the same task until a
+    RESULT/manifest is accepted; session compaction must not dispatch it twice.
+    """
+    entry = read_state(p.state_json)["progress"][seq - 1]
+    pending = entry.get("pending_coder")
+    if pending:
+        return pending
+    _pipeline._do_phase_enter(p, seq, phase if phase == "implement" else f"fix-r{round_n}")
+    cfg = load_config(p.config_root or p.repo_root, override_path=config_path)
+    base = Path(entry.get("base") or _paths.base_for(p, seq, change_id))
+    prompt, guide, _ = _render_prompt_file(p, seq, change_id, base, phase,
+                                           round_n if phase == "fix" else None,
+                                           entry.get("implement_commit"), config=cfg)
+    payload = {"ok": True, "status": "needs-coder", "seq": seq, "change_id": change_id,
+               "phase": phase, "round": round_n, "worktree": str(p.repo_root),
+               "base_head": _pipeline._git_head(p.repo_root),
+               "prompt_file": str(prompt), "prompt": guide}
+    update_state(p.state_json, p.state_md,
+                 lambda st: st["progress"][seq - 1].update(pending_coder=payload))
+    return payload
+
+
 _FAILED_IMPLEMENT_RESULT = (
     "RESULT: commit=- tasks=0 tests=fail summary=- "
     "notes=coder 未产出 RESULT 行（backend 可能异常）"
@@ -372,7 +398,7 @@ def run_implement(
     runner: Runner = _default_runner,
 ) -> dict:
     """跑完整 implement coder：phase enter → 渲染 prompt → backend 子进程 → record。"""
-    cfg = load_config(p.repo_root, override_path=config_path)
+    cfg = load_config(p.config_root or p.repo_root, override_path=config_path)
     selected = resolve_backend(cfg, "implement", backend)
 
     _pipeline._do_phase_enter(p, seq, "implement")
@@ -431,6 +457,7 @@ def _do_implement_body(
     result_line = _extract_result_line(
         result.stdout, fallback=_FAILED_IMPLEMENT_RESULT
     )
+    (base / "implement.result.txt").write_text(result_line + "\n", encoding="utf-8")
     record = _pipeline.record_implement(p, seq, result_line)
     return {
         **record,
@@ -480,7 +507,7 @@ def run_fix(
     runner: Runner = _default_runner,
 ) -> dict:
     """跑完整 fix coder：phase enter → 渲染 prompt → backend 子进程 → record。"""
-    cfg = load_config(p.repo_root, override_path=config_path)
+    cfg = load_config(p.config_root or p.repo_root, override_path=config_path)
     selected = resolve_backend(cfg, "fix", backend)
 
     phase = f"fix-r{round_n}"
@@ -540,6 +567,7 @@ def _do_fix_body(
     result_line = _extract_result_line(
         result.stdout, fallback=_failed_fix_result(round_n)
     )
+    (base / f"round-{round_n}.fix.result.txt").write_text(result_line + "\n", encoding="utf-8")
     record = _pipeline.record_fix(p, seq, round_n, result_line)
     return {
         **record,

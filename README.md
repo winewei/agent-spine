@@ -4,12 +4,12 @@
 
 A human-steered autonomous engineering harness that runs inside any agent CLI (Claude Code / Kimi CLI / Qwen Code / Codex / OpenCode / …) and drives work from spec to delivered code.
 
-agent-spine splits an autonomous coding run into two layers with a strict contract between them: an **intelligence layer** of host-neutral playbooks that do scheduling and judgment, and a **deterministic execution layer** — the `npc` CLI — that does everything mechanical. The main agent session reads one-line JSON and makes decisions; it never shuttles templates, parses logs, or hand-rolls state.
+agent-spine splits an autonomous coding run into two layers with a strict contract between them: an **intelligence layer** of host-neutral playbooks that do scheduling and judgment, and a **deterministic execution layer** — the `npc` CLI — that does everything mechanical. Structured receipts keep transitions reliable. The main agent can inspect source, reviews and logs on demand, diagnose failures and adapt the plan without hand-rolling state.
 
 ## Capabilities
 
-- **Spec-to-delivery autonomy** — hand the harness a batch of OpenSpec changes or a one-line goal; it plans, implements, reviews, fixes, and archives. Interactive mode stops at decision forks; `--auto` mode runs unattended end to end, with routine decisions delegated to `npc auto-decide`.
-- **Wave-parallel execution** — `spine-run` slices the changes into dependency waves (DAG), runs one implementer per change in an isolated git worktree, then integrates serially (`npc integrate` / `npc change run`). It accepts a one-line goal (decomposed into changes first), explicit change names, or nothing (= all active changes).
+- **Spec-to-delivery autonomy** — hand the harness a batch of OpenSpec changes or a one-line goal; it plans, implements, reviews, fixes, and archives. Interactive mode stops at decision forks; `--auto` mode runs unattended end to end, with engineering decisions retained by the orchestrating agent.
+- **Parallel development loops (1.8.1)** — each change implements, reviews and fixes in its own git worktree, using native Codex/Claude Code agents or headless coders. `npc integrate --prepared` publishes verified work to the session’s starting branch; only publication and archive serialize. Shared files are integration risks, not automatic scheduling dependencies. It accepts a one-line goal (decomposed into changes first), explicit change names, or nothing (= all active changes).
 - **Independent review gate** — every change goes through a review→fix loop driven by a premium engine (`codex exec` or `claude -p`, pluggable), with blocking-trend tracking and stale detection. Cheap execution backends are structurally barred from reviewing their own work (`npc verify routing`).
 - **Multi-model coder routing** — a provider registry routes implement/fix to any Anthropic-compatible endpoint (Kimi / Qwen / DeepSeek / …) or to `codex exec`. Credentials and models are defined once globally; each project declares only which provider to use, optionally per phase.
 - **Deterministic execution layer** — state, events, prompt templates, review parsing, archiving, and git mechanics are each a single `npc` subcommand with a one-line JSON stdout and a documented exit-code contract (`0` ok / `1` business / `2` usage / `3` environment / `4` missing dependency).
@@ -45,7 +45,7 @@ npc --version          # npc 1.7.0
 
 # 2) Materialize playbooks into your host CLI (pick one)
 npc playbook install --host claude    # Claude Code: commands/skills/agents dirs
-npc playbook install --host codex     # Codex CLI: ~/.codex/prompts/
+npc playbook install --host codex     # Codex CLI: ~/.codex/skills/spine-run/ + legacy prompts
 npc playbook install --dest <DIR>     # any other host: flat files, mount yourself
 ```
 

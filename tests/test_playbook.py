@@ -42,7 +42,8 @@ def test_read_text_returns_markdown():
 def test_install_dest_flat_layout(tmp_path: Path):
     result = playbook.install(None, host=None, dest=tmp_path / "out", home=tmp_path)
     assert result["ok"] is True
-    assert len(result["installed"]) == len(EXPECTED_NAMES)
+    assert len(result["installed"]) == len(EXPECTED_NAMES) - 1
+    assert "new-plan-changes-v4" not in {i["name"] for i in result["installed"]}
     assert result["skipped"] == []
     for item in result["installed"]:
         assert Path(item["path"]).is_file()
@@ -69,7 +70,11 @@ def test_install_host_codex_skips_agent(tmp_path: Path):
     assert "spine-coder" not in names
     assert result["skipped"] and result["skipped"][0]["name"] == "spine-coder"
     for i in result["installed"]:
-        assert Path(i["path"]).parent == tmp_path / ".codex" / "prompts"
+        if i["name"] == "spine-run":
+            assert Path(i["path"]) == tmp_path / ".codex/skills/spine-run/SKILL.md"
+            assert Path(i["path"]).read_text() == playbook.read_text(playbook.get("spine-run"))
+        else:
+            assert Path(i["path"]).parent == tmp_path / ".codex" / "prompts"
 
 
 def test_install_subset_and_idempotent(tmp_path: Path):
@@ -136,7 +141,7 @@ def test_spine_single_node_creates_runtime_dag(tmp_path):
     assert ready(dag)["ready"] == ["single"]
 
 
-def test_spine_final_waves_enforce_runtime_dependencies(tmp_path):
+def test_spine_explicit_ordering_preserves_independent_work(tmp_path):
     import os
     import re
     import shutil
@@ -145,14 +150,14 @@ def test_spine_final_waves_enforce_runtime_dependencies(tmp_path):
         pytest.skip("jq is required by the playbook")
     text = playbook.read_text(playbook.get("spine-run"))
     block = next(b for b in re.findall(r"```bash\n(.*?)```", text, re.S)
-                 if b.startswith('DAG=') and '--argjson w' in b)
+                 if b.startswith('DAG=') and 'ordering_edges' in b)
     path = tmp_path / "v3-dag-extract.json"
     path.write_text(json.dumps({"nodes": ["a", "b", "c"], "edges": [["a", "c"]], "files": {}}))
     subprocess.run(["bash", "-c", block], check=True, env={**os.environ,
                    "RUN_DIR": str(tmp_path), "FINAL_WAVES": '[["a"],["b","c"]]'})
     from npc.waves import ready
     dag = json.loads(path.read_text())
-    assert ready(dag)["ready"] == ["a"]
+    assert ready(dag)["ready"] == ["a", "b"]
     assert ready({**dag, "done": ["a"]})["ready"] == ["b", "c"]
 
 

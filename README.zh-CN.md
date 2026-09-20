@@ -4,12 +4,12 @@
 
 人驾驭的自主工程 harness，跑在任意 agent CLI 宿主进程内（Claude Code / Kimi CLI / Qwen Code / Codex / OpenCode / …），从 spec 一路推进到代码交付。
 
-agent-spine 把一次自主编码 run 拆成两层，层间以严格契约通信：**智能层**是宿主中立的 playbook，负责调度与语义判断；**确定性执行层**是 `npc` CLI，负责一切机械动作。主 session 只读一行 JSON 做决策——不搬运模板、不解析日志、不手工维护状态。
+agent-spine 把一次自主编码 run 拆成两层，层间以严格契约通信：**智能层**是宿主中立的 playbook，负责调度与语义判断；**确定性执行层**是 `npc` CLI，负责一切机械动作。结构化回执用于可靠交接；主 agent 按需读源码、审查意见和日志，负责诊断与工程决策。
 
 ## 核心能力
 
 - **spec 到交付的自主闭环** — 给 harness 一批 OpenSpec change 或一句话目标，它自动完成 plan → implement → review → fix → archive。交互档在决策分叉点停下问人；`--auto` 档全程无人值守，例行决策下沉给 `npc auto-decide`。
-- **波次并行执行** — `spine-run` 按依赖关系把 changes 切成 DAG 波次，每个 change 在独立 git worktree 内并行实施，再串行整合（`npc integrate` / `npc change run`）。输入可以是一句话目标（先拆解成 changes）、指定 change 名，或留空（= 全部 active changes）。
+- **完整闭环并行（1.8.1）** — 每个 change 在自己的 git worktree 中完成 implement/review/fix；原生 Codex/Claude Code agent 可接手实现和修复，通过后用 `npc integrate --prepared` 发布到主 session 启动分支。只有发布与归档短暂互斥，共享文件不再自动阻止并行。输入可以是一句话目标（先拆解成 changes）、指定 change 名，或留空（= 全部 active changes）。
 - **独立 review 闸门** — 每个 change 经过 premium 引擎（`codex exec` 或 `claude -p`，可插拔）驱动的 review→fix 循环，带 blocking 趋势追踪与 stale 检测。廉价执行后端在结构上被禁止给自己的产出盖章（`npc verify routing` 强制拦截）。
 - **coder 多模型路由** — provider 注册表把 implement / fix 路由到任意 Anthropic 兼容端点（Kimi / Qwen / DeepSeek / …）或 `codex exec`。凭据与模型全局定义一次，每个工程只声明用哪个，可按阶段细分。
 - **确定性执行层** — 状态、事件、prompt 模板、review 解析、archive、git 机械动作各是一条 `npc` 子命令：stdout 一行 JSON + 文档化 exit code 契约（`0` 成功 / `1` 业务失败 / `2` 用法错 / `3` 环境错 / `4` 依赖缺失）。
@@ -45,7 +45,7 @@ npc --version          # npc 1.7.0
 
 # 2) 把 playbooks 物化到你的宿主 CLI（三选一）
 npc playbook install --host claude    # Claude Code：commands/skills/agents 目录
-npc playbook install --host codex     # Codex CLI：~/.codex/prompts/
+npc playbook install --host codex     # Codex CLI：~/.codex/skills/spine-run/ + 旧版 prompts
 npc playbook install --dest <DIR>     # 其它宿主：平铺到任意目录，自行挂载
 ```
 

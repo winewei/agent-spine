@@ -1,8 +1,17 @@
-"""``npc watch`` scanner and lightweight terminal renderer.
+"""``npc watch`` scanner, terminal renderer and ``--follow`` event stream.
 
-The scanner is intentionally file-based and read-only.  It treats npc state
-files and ``tasks/*.json`` as the canonical observation surface, with Claude
-transcripts left as optional pointers inside task records.
+The scanner is intentionally file-based and read-only.  Two observation
+surfaces:
+
+- npc state files and ``tasks/*.json`` (explicit ``npc task`` contract);
+- host-spawned sub-agent transcripts (:mod:`npc.subagents`), whose mtime and
+  tail timestamp are used as an implicit heartbeat for implementers that never
+  call npc themselves.
+
+``--follow`` turns the snapshot into an append-only line stream (one summary
+line per tick plus ``NEW`` / ``STALL`` / ``ABANDONED`` / ``FINISHED`` transition
+lines), designed to be hosted by the host CLI's background monitor tool so the
+main session is woken only on state changes.
 """
 
 from __future__ import annotations
@@ -15,8 +24,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from . import _io, paths as _paths, state as _state, status as _status
-from . import task as _task
+from . import _io, config as _config, hosts as _hosts, paths as _paths, state as _state, status as _status
+from . import subagents as _subagents, task as _task
 
 
 def _parse_iso(value: str | None) -> datetime | None:
@@ -111,13 +120,72 @@ def scan_tasks(run_dir: Path, *, now: datetime, stale_seconds_override: int | No
     return rows
 
 
-def scan_run(p: _paths.Paths, *, now: datetime, stale_seconds_override: int | None = None) -> dict:
-    """Return one run snapshot from npc state + watchable tasks."""
+def _resolve_host(repo_root: Path, home: Path) -> _hosts.ResolvedHost:
+    try:
+        return _hosts.resolve_host_from_config(_config.load_config(repo_root, home=home))
+    except (_config.ConfigError, OSError):
+        return _hosts.resolve_host()
+
+
+def scan_agents(
+    p: _paths.Paths,
+    *,
+    now: datetime,
+    change_ids: list[str],
+    stale_seconds: int | None = None,
+    abandoned_seconds: int | None = None,
+    max_age_seconds: int | None = None,
+    session_id: str | None = None,
+    home: Path | None = None,
+    worktree_roots: list[Path] | None = None,
+) -> dict:
+    """Derive liveness for host-spawned sub-agents belonging to this repo."""
+    h = home or Path.home()
+    host = _resolve_host(p.repo_root, h)
+    rows = _subagents.scan(
+        host,
+        home=h,
+        proj_key=p.proj_key,
+        repo_root=p.repo_root,
+        change_ids=change_ids,
+        now=now,
+        stale_seconds=stale_seconds or _subagents.DEFAULT_STALE_SECONDS,
+        abandoned_seconds=abandoned_seconds or _subagents.DEFAULT_ABANDONED_SECONDS,
+        max_age_seconds=max_age_seconds or _subagents.DEFAULT_MAX_AGE_SECONDS,
+        session_id=session_id,
+        worktree_roots=worktree_roots,
+    )
+    return {
+        "host": host.name,
+        "layout": host.subagent_layout,
+        "summary": _subagents.summarize(rows),
+        "rows": rows,
+    }
+
+
+def scan_run(
+    p: _paths.Paths,
+    *,
+    now: datetime,
+    stale_seconds_override: int | None = None,
+    abandoned_seconds: int | None = None,
+    max_age_seconds: int | None = None,
+    session_id: str | None = None,
+    home: Path | None = None,
+) -> dict:
+    """Return one run snapshot from npc state + watchable tasks + sub-agents."""
     state_summary: dict | None = None
     state_error: str | None = None
+    change_ids: list[str] = []
+    state: dict = {}
     try:
         state = _state.read_state(p.state_json)
         state_summary = _status.summarize_status(state)
+        change_ids = [
+            c.get("change_id")
+            for c in (state.get("progress") or [])
+            if isinstance(c, dict) and c.get("change_id")
+        ]
     except (OSError, ValueError) as e:
         state_error = str(e)
 
@@ -134,6 +202,19 @@ def scan_run(p: _paths.Paths, *, now: datetime, stale_seconds_override: int | No
             p.run_dir,
             now=now,
             stale_seconds_override=stale_seconds_override,
+        ),
+        "agents": scan_agents(
+            p,
+            now=now,
+            change_ids=change_ids,
+            stale_seconds=stale_seconds_override,
+            abandoned_seconds=abandoned_seconds,
+            max_age_seconds=max_age_seconds,
+            session_id=session_id,
+            home=home,
+            worktree_roots=[Path(c["isolation"]["worktree"])
+                            for c in state.get("progress", [])
+                            if (c.get("isolation") or {}).get("worktree")],
         ),
     }
 
@@ -195,7 +276,15 @@ def build_snapshot(args: argparse.Namespace) -> dict:
         "generated_at": _io.now_iso(),
         "scope": "all" if getattr(args, "all", False) else "project",
         "runs": [
-            scan_run(p, now=now, stale_seconds_override=stale_override)
+            scan_run(
+                p,
+                now=now,
+                stale_seconds_override=stale_override,
+                abandoned_seconds=getattr(args, "abandoned_seconds", None),
+                max_age_seconds=getattr(args, "max_age_seconds", None),
+                session_id=getattr(args, "session_id", None),
+                home=getattr(args, "_home", None),
+            )
             for p in targets
         ],
     }
@@ -238,6 +327,13 @@ def render_text(snapshot: dict) -> str:
             )
         elif run.get("state_error"):
             lines.append(f"  state: unreadable ({run.get('state_error')})")
+        agents = (run.get("agents") or {}).get("rows") or []
+        if agents:
+            lines.append("  agents:")
+            for a in agents:
+                lines.append("    " + _agent_label(a, verbose=True))
+        else:
+            lines.append(f"  agents: none (host={(run.get('agents') or {}).get('host')})")
         tasks = run.get("tasks") or []
         if not tasks:
             lines.append("  tasks: none")
@@ -265,8 +361,105 @@ def render_text(snapshot: dict) -> str:
     return "\n".join(lines)
 
 
+# ------------------------------------------------------------------
+# --follow：追加式事件流
+# ------------------------------------------------------------------
+
+_TRANSITION_TAGS = {
+    _subagents.STATUS_STALE: "STALL",
+    _subagents.STATUS_ABANDONED: "ABANDONED",
+    _subagents.STATUS_FINISHED: "FINISHED",
+    _subagents.STATUS_RUNNING: "RESUMED",
+}
+
+
+def _agent_key(a: dict) -> str:
+    return a.get("change_id") or a.get("name") or a.get("agent_id") or "?"
+
+
+def _agent_label(a: dict, *, verbose: bool = False) -> str:
+    base = f"{_agent_key(a)}:{a.get('observed_status')}/idle{_fmt_age(a.get('idle_seconds'))}"
+    if not verbose:
+        return base
+    tool = a.get("last_tool") or "-"
+    return f"[{a.get('observed_status')}] {_agent_key(a)} agent={a.get('agent_id')} idle={_fmt_age(a.get('idle_seconds'))} tool={tool} worktree={a.get('worktree') or '-'}"
+
+
+def follow_tick(prev: dict[str, str], snapshot: dict, *, stamp: str) -> tuple[list[str], dict[str, str]]:
+    """Pure step of the follow loop: (lines to print, next prev-state map).
+
+    ``prev`` maps agent_id → observed_status from the previous tick.  On the
+    very first tick (``prev`` empty) existing agents are printed as a baseline
+    without transition lines, so a freshly attached monitor does not replay
+    history as alarms.
+    """
+    lines: list[str] = []
+    nxt: dict[str, str] = {}
+    live: list[str] = []
+    finished = 0
+    baseline = not prev
+    for run in snapshot.get("runs") or []:
+        for a in (run.get("agents") or {}).get("rows") or []:
+            aid = a.get("agent_id") or "?"
+            status = a.get("observed_status") or _subagents.STATUS_UNKNOWN
+            nxt[aid] = status
+            before = prev.get(aid)
+            if status == _subagents.STATUS_FINISHED:
+                finished += 1
+            else:
+                live.append(_agent_label(a))
+            if baseline or before == status:
+                continue
+            tag = _TRANSITION_TAGS.get(status)
+            if tag is None:
+                continue
+            if before is None and status != _subagents.STATUS_RUNNING:
+                # 首次出现即非 running：历史遗留，不当作新告警
+                continue
+            if before is None:
+                tag = "NEW"
+            lines.append(
+                f"{tag} {_agent_key(a)} agent={aid} idle={_fmt_age(a.get('idle_seconds'))} "
+                f"tool={a.get('last_tool') or '-'} worktree={a.get('worktree') or '-'}"
+            )
+        for t in run.get("tasks") or []:
+            tid = f"task:{t.get('task_id')}"
+            status = t.get("observed_status") or "unknown"
+            nxt[tid] = status
+            if not baseline and prev.get(tid) not in (None, status) and status == "stale":
+                lines.append(f"STALL task={t.get('task_id')} phase={t.get('phase') or '-'} age={_fmt_age(t.get('heartbeat_age_seconds'))}")
+    summary = " ".join(live) if live else "no live agents"
+    lines.append(f"[{stamp}] {summary} | finished={finished}")
+    return lines, nxt
+
+
+def _follow(args: argparse.Namespace) -> None:
+    interval = getattr(args, "interval", None) or 600.0
+    prev: dict[str, str] = {}
+    while True:
+        try:
+            snapshot = build_snapshot(args)
+        except WatchError as e:
+            sys.stdout.write(f"ERROR watch_failed {e}\n")
+            sys.stdout.flush()
+            time.sleep(interval)
+            continue
+        lines, prev = follow_tick(prev, snapshot, stamp=datetime.now().strftime("%H:%M"))
+        for line in lines:
+            sys.stdout.write(line + "\n")
+        sys.stdout.flush()
+        time.sleep(interval)
+
+
 def run(args: argparse.Namespace) -> None:
-    """``npc watch``: snapshot once as JSON or refresh a terminal view."""
+    """``npc watch``: snapshot once as JSON, stream --follow lines, or refresh a TUI."""
+    if getattr(args, "follow", False):
+        try:
+            _follow(args)
+        except KeyboardInterrupt:
+            pass
+        return
+
     try:
         snapshot = build_snapshot(args)
     except WatchError as e:

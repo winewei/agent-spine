@@ -130,6 +130,8 @@ def run_integrate(
     if not (1 <= seq <= len(progress)):
         raise ValueError(f"seq={seq} 超出 progress 数组长度（total={len(progress)}）")
     change_id = progress[seq - 1].get("change_id")
+    if progress[seq - 1].get("isolation"):
+        raise ValueError("isolated change requires integrate --prepared")
 
     if force:
         return _run_integrate_locked(
@@ -166,6 +168,9 @@ def _run_integrate_locked(
     verify_tests: bool,
     runner,
 ) -> dict:
+
+    from .target import check
+    check(p)
 
     # 1. verify manifest（plan-only 判定 + 文件核对）
     parsed = _verify.parse_result_verdict(result_line, manifest_path)
@@ -327,6 +332,11 @@ def cli_integrate(args: argparse.Namespace) -> None:
         p = _paths.load_paths(args)
     except _paths.PathsError as e:
         _io.emit_error("env_missing", str(e), exit_code=3)
+        return
+
+    if getattr(args, "prepared", False):
+        from . import isolated
+        isolated.cli_publish(p, args)
         return
 
     result_line = args.result

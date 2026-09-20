@@ -84,6 +84,18 @@ def derive_start(entry: dict, from_phase: str | None) -> tuple[str, int]:
         if from_phase in ("review", "fix"):
             return from_phase, max(rn, 1) if from_phase == "fix" else rn
         return "archive", rn
+    # Resume the last recorded phase, rather than interpreting a completed review
+    # as permission to run another review before its required fix.
+    phases = entry.get("phases") or {}
+    if phases.get("implement", {}).get("status") == "done":
+        from .resume import _next_phase_for_entry
+        import re
+        next_phase = _next_phase_for_entry(entry)
+        match = re.fullmatch(r"(review|fix)-r(\d+)", next_phase)
+        if match:
+            return match[1], int(match[2])
+        if next_phase == "archive":
+            return "archive", rn
     status = entry.get("status") or "pending"
     if status in ("reviewing",):
         return "review", rn
@@ -212,6 +224,8 @@ def run_change(
     review_timeout: int = 900,
     engine_name: str | None = None,
     config_path: Path | None = None,
+    defer_archive: bool = False,
+    handoff: bool = False,
 ) -> dict:
     """单 change 内环状态机。返回终态 dict；needs-decision 时带 status 字段。
 
@@ -296,6 +310,9 @@ def run_change(
 
     # ---- 状态机主循环 ----
     while True:
+        if handoff and phase in ("implement", "fix"):
+            return _coder.prepare_handoff(p, seq, change_id, phase, round_n,
+                                          config_path=config_path)
         if phase == "implement":
             res = _coder.run_implement(
                 p, seq, change_id,
@@ -376,7 +393,8 @@ def run_change(
                 trigger = "max-rounds"
             if trigger:
                 dp = _decision_point(
-                    p, seq, trigger=trigger, phase="review", round_n=round_n, auto=auto,
+                    p, seq, trigger=trigger, phase="fix", round_n=round_n + 1,
+                    auto=auto and not defer_archive,
                 )
                 if dp["kind"] == "needs-decision":
                     return dp["result"]
@@ -389,6 +407,9 @@ def run_change(
             continue
 
         # phase == "archive"
+        if defer_archive:
+            return _terminal(p, seq, entry, status="ready-to-integrate",
+                             extra={"ok": True})
         res = _pipeline.run_archive(p, seq, **({"config_path": config_path} if config_path is not None else {}))
         if not res.get("ok"):
             # archive 失败多为硬性问题（chain broken / validate），auto-decide 无对应
@@ -435,6 +456,21 @@ def cli_run(args: argparse.Namespace) -> None:
     except _paths.PathsError as e:
         _io.emit_error("env_missing", str(e), exit_code=3)
         return
+    if getattr(args, "isolated", False):
+        from . import isolated
+        isolated.cli_run(p, args)
+        return
+    if any(getattr(args, flag, None) for flag in ("handoff", "worktree", "result_file", "manifest")):
+        _io.emit_error("invalid_args", "worktree/handoff/receipt options require --isolated", exit_code=2)
+        return
+    try:
+        isolated_entry = _entry(_state.read_state(p.state_json), args.seq).get("isolation")
+    except (ValueError, OSError) as e:
+        _io.emit_error("invalid_args", str(e), exit_code=2)
+        return
+    if isolated_entry:
+        _io.emit_error("invalid_args", "isolated change must resume with --isolated", exit_code=2)
+        return
     # main 互斥：内环的 fix / archive commit 都落在 main 上，全程持锁；
     # 与 npc integrate（try-lock）、另一个 change run（有界等待）互斥。
     lock_path = _locks.main_lock_path(p.task_log_dir)
@@ -445,12 +481,18 @@ def cli_run(args: argparse.Namespace) -> None:
     except _locks.LockBusy as e:
         _io.emit_error(
             "main_busy",
-            f"main 被占用（holder={e.holder}, lock={lock_path}），"
-            f"{int(_locks.MAIN_LOCK_WAIT_SEC)}s 内未释放；等待其结束后重试，或确认无并发后删除锁文件",
+            f"启动目标工作区被占用（holder={e.holder}, lock={lock_path}），"
+            f"{int(_locks.MAIN_LOCK_WAIT_SEC)}s 内未释放；等待持锁进程结束后重试，不要删除活锁文件",
             exit_code=1,
         )
         return
     try:
+        from .target import check
+        try:
+            check(p)
+        except ValueError as e:
+            _io.emit_error("target_changed", str(e), exit_code=2)
+            return
         result = _run_change_cli(p, args)
     finally:
         _locks.release(lock_fh)

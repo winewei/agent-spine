@@ -27,7 +27,7 @@ playbooks 随 npc 包发行（宿主中立措辞，每份顶部带宿主适配�
 
 ```bash
 npc playbook install --host claude    # Claude Code：commands/skills/agents 目录（重启后生效）
-npc playbook install --host codex     # Codex CLI：~/.codex/prompts/
+npc playbook install --host codex     # Codex CLI：~/.codex/skills/spine-run/ + 旧版 prompts
 npc playbook install --dest <DIR>     # 其它宿主（kimi / qwen / opencode 等）：平铺到其自定义命令目录
 ```
 
@@ -52,14 +52,14 @@ npc playbook install --dest <DIR>     # 其它宿主（kimi / qwen / opencode �
   - `spine-run <目标>` —— 自由目标，harness 自动拆解成 changes 再跑
   - `spine-run <change名…>` —— 只跑指定的 openspec change
   - `spine-run <…> --auto [--max-parallel N]` —— 全自主档，fire-and-forget
-  执行引擎统一：DAG 波次并行 + worktree 隔离，整合与单 change 内环走 `npc integrate` / `npc change run`；
-  调度是流水线而非逐波屏障——每次 integrate 成功后立刻 `npc plan ready` 续闸，
-  下一波的 implement 在上一波 review/fix 期间就起跑（`--serial` 可退回逐波屏障）
+  1.8.1 默认执行：`npc change run --isolated --handoff` 将实现和修复交给原生 agent，review 在同一个 worktree 中独立执行；不加 `--handoff` 可使用 headless coder。
+  多个 change 的完整内环并行，共享一个并发预算。`npc integrate --prepared` 验证组合结果后发布到启动分支并归档；每次发布后按真实依赖补位。
+  `--serial` 只把容量设为 1，不改变隔离与恢复协议。
 
 规则：
-- 主 session 只调度与决策；实现/修复一律 spawn `spine-coder` subagent。
+- 主 session 负责工程判断，优先分派独立实现/修复，也可在对应 worktree 内直接处理小修复，再交独立 reviewer。
 - 确定性动作（状态/事件/模板/review/archive）一律走 `npc` 子命令，看一行 JSON 做分支。
-- 不在 context 里搬运 prompt 模板 / review.json / summary.md 原文。
+- 避免重复搬运模板；按需读取源码、review/findings、测试日志，诊断后更新任务或执行策略。
 - 跑过几个 run 后，用 `spine-analyze` playbook 读跨 run 指标迭代 harness 自身。
 ```
 

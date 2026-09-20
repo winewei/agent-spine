@@ -48,6 +48,8 @@ def find_latest_in_progress(task_log_dir: Path) -> Path | None:
 
 def _next_phase_for_entry(entry: dict) -> str:
     """根据 progress 条目的 phases 字典推断下一个 phase。"""
+    if entry.get("prepared") or entry.get("status") == "integrated":
+        return "integrate"
     phases = entry.get("phases") or {}
     if not phases:
         return "implement"
