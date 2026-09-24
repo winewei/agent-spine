@@ -210,8 +210,22 @@ def run_test_cmd(
             return subprocess.CompletedProcess(
                 argv, TEST_TIMEOUT_RETURNCODE, text(exc.stdout),
                 f"{text(exc.stderr)}\n[npc] test command timed out after {timeout}s\n")
+    proc, timed_out = run_in_group(argv, repo_root, timeout)
+    if timed_out:
+        return subprocess.CompletedProcess(
+            argv, TEST_TIMEOUT_RETURNCODE, proc.stdout,
+            f"{proc.stderr}\n[npc] test command timed out after {timeout}s; process group killed\n")
+    return proc
+
+
+def run_in_group(argv: list[str], cwd: Path | str | None,
+                 timeout: float | None) -> tuple[subprocess.CompletedProcess, bool]:
+    """POSIX：在独立进程组运行，结束或超时后整组 SIGKILL；返回 (结果, 是否超时)。
+
+    输出落临时文件，残留进程持有输出句柄时也不会阻塞等待。
+    """
     with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
-        proc = subprocess.Popen(argv, cwd=str(repo_root), stdout=out, stderr=err,
+        proc = subprocess.Popen(argv, cwd=str(cwd) if cwd else None, stdout=out, stderr=err,
                                 stdin=subprocess.DEVNULL, start_new_session=True)
         # WNOWAIT 等待不回收 leader：其 pid 在整组回收前不会被复用为他人的进程组号
         timed_out = False
@@ -228,15 +242,11 @@ def run_test_cmd(
         finally:
             _kill_group(proc.pid)
             returncode = proc.wait()
-        note = ""
-        if timed_out:
-            returncode = TEST_TIMEOUT_RETURNCODE
-            note = f"\n[npc] test command timed out after {timeout}s; process group killed\n"
         out.seek(0)
         err.seek(0)
         stdout = out.read().decode(errors="replace")
-        stderr = err.read().decode(errors="replace") + note
-    return subprocess.CompletedProcess(argv, returncode, stdout, stderr)
+        stderr = err.read().decode(errors="replace")
+    return subprocess.CompletedProcess(argv, returncode, stdout, stderr), timed_out
 
 
 def truncated(proc: subprocess.CompletedProcess) -> bool:
