@@ -66,7 +66,7 @@ metadata:
 
 ## Step 0 — 前置检查（缺依赖立即停）
 
-- `npc --version` ≥ 1.8.1；缺或版本过低 → 提示从发布 tag 安装（`uv tool install --reinstall --from git+https://github.com/winewei/agent-spine@v<版本> npc`）并停止；开发期验证用仓库内 `uv run npc`，不要用 `--from .` 本地目录安装
+- `npc --version` ≥ 1.9.0；缺或版本过低 → 提示从发布 tag 安装（`uv tool install --reinstall --from git+https://github.com/winewei/agent-spine@v<版本> npc`）并停止；开发期验证用仓库内 `uv run npc`，不要用 `--from .` 本地目录安装
 - `npc doctor` 通过；配置的 review engine 及其可执行程序/凭据必须可用（默认 codex）。缺失时在初始化前停止并提示安装或配置可用的 reviewer；不能声明“跳 review”后仍调用 `change run --from review`，也不能静默免审归档。
 - 经验层（可选，1.8）：`npc doctor` 的 `experience` 项为 warn 时只记一行降级、不阻塞——它是旁路增强。项目 `[experience].enabled=true` 时 `npc agent prompt render` 自动召回注入、`npc archive run` 自动提交轨迹，本 playbook 不需要额外步骤；主 session 只看回执里的 `experience_injected` / `experience.ok` 标量，不读经验正文，也绝不把经验给 review
 - `openspec` 可用（`openspec list --json` 是计划入口）
@@ -99,28 +99,40 @@ export RUN_DIR RUN_TS STATE_JSON RUN_T0
 
 ### 启动 monitor（计划分析之前，整个 run 只启动一个）
 
-初始化路径后立即执行 `npc monitor tick`，创建或恢复 `$RUN_DIR/monitor.json`，随后启动 `npc monitor follow --interval 60`。它是确定性后台监控，不占常驻 LLM 编码槽位；默认每 10 分钟询问，15 分钟无产出标记停滞，已发送询问给 5 分钟回复期限。只在事件变化或询问周期输出，不要每分钟唤醒 LLM 重读所有日志。
+初始化路径后立即执行 `npc monitor tick`，创建或恢复 `$RUN_DIR/monitor.json`，随后启动 `npc monitor follow --interval 60`。它是确定性后台监控，不占常驻 LLM 编码槽位。默认询问节奏：最近 10 分钟没有新证据的 agent 每 10 分钟询问一次，证据持续变化的 agent 放宽到每 30 分钟一次；15 分钟无产出标记停滞；已发送询问给 5 分钟回复期限。follow 只在出现新动作（或动作转为无进展）时输出一行，未处理动作每 30 分钟重复提醒；主 session 自己的 register/ack/finish 不会触发输出，空闲时不输出心跳。
 
-使用宿主**实际可用**的后台通知机制将输出交回主 session；Claude Code 有 `Monitor` 时可用 `Monitor(command="npc monitor follow --interval 60", persistent=true)`。Codex 或其它宿主若无推送机制，主 session 使用至多 60 秒的有界等待，并执行 `npc monitor tick` 处理到期事件。仅 `nohup` 写日志不会唤醒 session，不能据此宣称主动监控已工作。需要独立 monitor agent 时按事件启动短诊断任务，并计入真实槽位预算。
+使用宿主**实际可用**的后台通知机制将输出交回主 session；Claude Code 有 `Monitor` 时用 `Monitor(command="npc monitor follow --interval 60")`。Monitor 有时长上限的版本在收到到期通知后立即重新挂接；待处理动作保存在 `monitor.json`，每次输出都包含全部未处理动作，重新挂接不会丢失事项。Codex 或其它宿主若无推送机制，主 session 使用至多 60 秒的有界等待，并执行 `npc monitor tick` 处理到期事件。仅 `nohup` 写日志不会唤醒 session，不能据此宣称主动监控已工作。需要独立 monitor agent 时按事件启动短诊断任务，并计入真实槽位预算。不要另写等待 RESULT 文件或后台日志的临时监控脚本，用下方的 `--done` / `--kind job` 登记代替。
 
 **覆盖所有执行体**：每次派发后立即登记唯一任务 id、原生任务句柄、角色和专属产物。分析、架构、implement、review、fix、测试、headless 子进程都必须登记，不能只登记 coder。同一 agent 的新任务使用新 id；不要把 monitor 自己登记进去。
 
 ```bash
-npc monitor register --id "$JOB_ID" --role "$ROLE" --handle "$AGENT_HANDLE"   --worktree "$WT" --artifact "$RESULT_FILE"
+npc monitor register --id "$JOB_ID" --role "$ROLE" --handle "$AGENT_HANDLE"   --worktree "$WT" --artifact "$RESULT_FILE" --done "test -s '$RESULT_FILE'"
 ```
 
-非编码任务可省略 `--worktree`，登记分析结论、review JSON 或测试结果文件；产物路径可在生成前登记，多个产物重复传 `--artifact`。内部 review/fix 子进程由其持久 npc worker 的句柄负责，不对同一个进程重复登记；角色/阶段与日志路径保存在 scheduler。`monitor.json` 是监控清单；`scheduler.json` 仍由主 session 唯一写入。
+非编码任务可省略 `--worktree`，登记分析结论、review JSON 或测试结果文件；产物路径可在生成前登记，多个产物重复传 `--artifact`。有 RESULT 或结果文件的任务加 `--done`，退出码为 0 时产生 `DONE_SIGNAL`，结果落盘即通知主 session。内部 review/fix 子进程由其持久 npc worker 的句柄负责，不对同一个进程重复登记；角色/阶段与日志路径保存在 scheduler。`monitor.json` 是监控清单；`scheduler.json` 仍由主 session 唯一写入。
+
+远程作业、长测试等**无法询问**的执行体登记为 job：由派发它的 agent 在 RESULT 中回报主机、日志、pid 文件与完成标记，主 session 登记后该 agent 直接返回，不在自身会话里等待。
+
+```bash
+npc monitor register --id "$JOB_ID" --kind job --role bench --handle "ssh:$HOST" \
+  --probe "ssh $HOST 'wc -l < $LOG'" --done "ssh $HOST 'grep -q BENCH_DONE $LOG'" \
+  --alive "ssh $HOST 'kill -0 \$(cat $PIDFILE)'" [--deadline-seconds 14400]
+```
+
+`--probe` 输出随工作推进变化的进度标记（结果行数、已完成条目数、结果文件大小），输出变化计为进展，首次读数只作基线；`--alive` 连续两次失败才产生 `EXITED_SIGNAL`；job 必须提供 `--done`、`--alive`、`--deadline-seconds` 至少其一。命令在登记时的工作目录中以 `sh -c` 执行，单次超时默认 30 秒（`--probe-timeout`），在锁外执行，不阻塞 ack/register。进度标记必须度量工作产物，不能用 agent 转录的 mtime/size。不属于任何 run 的长期任务用 `--owner NAME` 登记到 host 作用域（`~/task_log/_monitor/NAME`），该作用域的所有 monitor 命令都带同一 `--owner`。
 
 **处理事件**：
 
 1. `CHECK_IN`：对所有到期 agent 并行发送宿主原生询问：“最近一个检查周期完成了什么？提供 commit、diff、测试/review 或分析产物；当前阻塞是什么？下一步和预计完成时间？”发送成功后才执行 `npc monitor ack --action-id ID --decision sent`。相同 action id 不重复询问，`sent_at` 非空表示已发；发不出去先核对句柄和原任务，不能伪造 sent。
 2. 收到回复后检查实际证据。`--decision progress --note '证据与结论'` 记录核验；长测试/调研仍合理时 `--decision wait --wait-seconds 600 --note '进程/阶段证据、原因与期限'`，最多等待 900 秒，到期重新询问。ack 和“仍在工作”的口头报告不会重置实际产出时钟。
 3. `no_progress=true` 或 `CONTROL_REQUIRED`：主 session 必须诊断，不只转述警报。检查卡住的进程、依赖、重复 findings 和测试；选择缩小任务、补充信息、调整方案、继续有界等待或接替执行，并用 `--decision intervene --note '证据、已采取动作与下一检查点'` 落账。`CONTROL_REQUIRED` 只有询问确已发送且到期未处理才产生；即使发现新产物，也须核验并给出判断。
-4. 停止/接替前保存 worktree、提交、RESULT 和日志，确认原执行体已退出；未知状态仍占位。核验收单或退出后执行 `npc monitor finish --id ID --note '收单/退出证据'`；接替者使用新 id，并继续原 worktree。monitor 不自行 kill、不改 Git 或业务 state、不替主 session 发布代码。
+4. `STALL`（job 无进展）：检查远端日志、进程与目标系统负载，用 `--decision progress|wait|intervene --note` 落账；判定假死时按第 6 条接替。
+5. `DONE_SIGNAL` / `EXITED_SIGNAL` / `DEADLINE`：monitor 已停止探测该任务，不会自行关闭它。主 session 核验结果或退出原因后执行 `npc monitor finish --id ID --result done|failed --note '证据'` 或 `npc monitor cancel --id ID --note '原因'`；重启作业或需要继续观察时 `--decision intervene --note`（恢复探测；延期同时传 `--deadline-seconds N`），暂不能判定时用有界 `--decision wait`。终态信号不能以 `progress` 处理。
+6. 停止/接替前保存 worktree、提交、RESULT 和日志，确认原执行体已退出；未知状态仍占位。核验收单或退出后执行 `npc monitor finish --id ID --note '收单/退出证据'`；接替者使用新 id，并继续原 worktree。monitor 不自行 kill、不改 Git 或业务 state、不替主 session 发布代码。
 
-文件内容/专属 worktree HEAD 或 diff 变化只是工作证据，不保证有用收敛；即使一直变化，也必须每 10 分钟询问。转录 mtime、心跳、工具调用次数、共享目标 HEAD 不算实际进展；同根因反复修复须主动重排。未跟踪文件需通过专属 `--artifact` 登记。`npc watch --once` 可补充发现宿主任务，核对是否漏登；不能将其它 session 的历史任务加入本 run。
+文件内容/专属 worktree HEAD 或 diff 变化只是工作证据，不保证有用收敛；证据持续变化只把询问间隔放宽到 30 分钟，不取消询问。转录 mtime、心跳、工具调用次数、共享目标 HEAD 不算实际进展；同根因反复修复须主动重排。未跟踪文件需通过专属 `--artifact` 登记。`npc watch --once` 可补充发现宿主任务，核对是否漏登；不能将其它 session 的历史任务加入本 run。
 
-恢复时重新连接唯一后台 monitor（重复 follow 会被拒绝），保留清单、待处理 action id、发送记录和期限。先核验宿主存活任务与 monitor/scheduler 清单是否一致，再续闸；不得重新注册来重置计时。run 完成或中止时核实所有执行体退出、逐项 finish，执行 `npc monitor stop`，follow 会退出。不要因一次扫描没有 agent 就认为 run 已完成。
+恢复时先执行 `npc monitor tick` 补算离线期间到期的截止时间与终态，再用 `npc monitor list --open` 核对未关闭任务，然后重新连接唯一后台 monitor（重复 follow 会被拒绝）；清单、待处理 action id、发送记录和期限都会保留。先核验宿主存活任务与 monitor/scheduler 清单是否一致，再续闸；不得重新注册来重置计时。run 完成或中止时核实所有执行体退出、逐项 finish/cancel，确认 `npc monitor list --open` 为空后执行 `npc monitor stop`，follow 会退出。不要因一次扫描没有 agent 就认为 run 已完成。
 
 ### 恢复闸门（禁止先清空集合）
 
@@ -261,7 +273,8 @@ npc integrate --seq "$SEQ" --prepared
 
 ```bash
 npc state finalize && npc summary render && npc index append
-# 已核验并 finish 所有执行体后停止监控
+# 已核验并 finish/cancel 所有执行体，list --open 为空后停止监控
+npc monitor list --open
 npc monitor stop
 npc cost --since "$RUN_T0"
 ```

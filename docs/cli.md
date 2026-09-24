@@ -2316,6 +2316,7 @@ npc index append
 
 | 版本 | 关键变化 |
 |---|---|
+| **1.9.0** | `npc monitor` 统一后台任务观测：新增 `--kind job` 与 `--probe` / `--done` / `--alive` / `--deadline-seconds`，终态观测产生 `DONE_SIGNAL` / `EXITED_SIGNAL` / `DEADLINE`（任务进入 `signaled`，只由 `finish` / `cancel` 关闭），job 无进展产生 `STALL`；证据持续变化的 agent 询问间隔放宽到 1800 秒；follow 只在新动作时输出并按 `--remind-seconds` 重复提醒未处理动作，不再因自身操作或心跳唤醒主 session；检查命令在锁外执行；新增 `list` / `cancel`、`finish --result`、`ack --deadline-seconds`、host 作用域 `--owner`；决策记录改写入 `monitor.history.jsonl` |
 | **1.8.2** | 隔离发布协议：已审查补丁的一致性改用 `git patch-id --verbatim`（忽略行号偏移与前像 blob id，保留空白与上下文），新增 `[integrate].derived/regenerate` 派生文件声明（不参与比对；仅派生文件冲突或双方都改动时重新生成）；发布失效后复审只审集成增量（`round-N.integration-delta.diff`）；`needs-resolution` 回执带 `reason`/`conflicts`/`files`；测试命令在独立进程组运行、结束或超时整组回收，新增 `[verify].test_timeout`；交互档 blocking 轮数累计达 3 时触发一次 `stale` 决策点；`isolated.transition` 事件归入正确 change 目录并统一本地时区时间戳 |
 | **1.7.1** | `archive run`：`openspec archive` 因 delta 标题与基线 Requirement 冲突静默中止（打印 Aborted 但 exit 0）时，以 change 目录仍存在判 `openspec-archive-failed` 并回传 openspec 输出，不再误报 `git-commit-failed`；`[verify].test_baseline = "strict|diff"`：`npc integrate` 的 verify tests 支持基线 diff（整合前记录 HEAD 失败集合，整合后失败集合 ⊆ 基线即通过），适配存在既有污染失败的仓库；成功输出新增 `tests` 字段与 `pass-baseline-diff` 状态 |
 | **1.7** | 宿主中立化 + 去 plugin 发布：宿主支持列表明确为 Claude Code / Kimi CLI / Qwen Code / Codex / OpenCode（README / INSTALL / usage / playbook 宿主适配表口径统一）；新增 `hosts.py` 宿主抽象与 `[host]` 配置（name/session_dir；探测顺序 config > CLAUDECODE env > generic），init payload 增 `host` 字段、generic 宿主跳过 auto 授权、session 识别按宿主分流（generic 只走 by-cwd hook）；focus/templates 项目上下文 `CLAUDE.md`→`AGENTS.md` fallback、prompt 措辞去工具专名；新增 `playbook list/show/install`（§9d），原 plugin 内容收编进包资源，删除 marketplace/plugin manifest；`doctor` 新增 `host` 检查 |
@@ -2345,12 +2346,44 @@ Breaking change（命令更名 / 参数语义变化 / stdout schema 字段移除
 
 同时修正两处已实现但文档描述滞后的参数漂移：`review run` 补记 `--engine {codex,claude}`（§8a，默认读 `[review].engine`，缺省 `codex`；stdout 增 `engine` 字段，失败 error 码随引擎变化为 `<engine>-exec-failed`）与 `--config PATH`；`notify` 补记 `--timeout`（默认 `5.0`，§8c）。契约版本仍为 `v1.4`。
 
-## 全角色进展监控（1.8.1）
+## 全角色进展监控（1.8.1，1.9.0 扩展）
 
-`npc monitor tick` 初始化/恢复监控；`follow --interval 60` 单实例后台检查，默认询问周期 600 秒、无进展阈值 900 秒、回复期限 300 秒（可用 `--inquiry-seconds`、`--stalled-seconds`、`--grace-seconds` 调整）。主 session 在首个 subagent 前启动，并用宿主通知或有界等待处理事件。
+`npc monitor tick` 初始化/恢复监控并执行一次检查；`follow --interval 60` 单实例后台检查。默认参数：询问周期 600 秒（`--inquiry-seconds`），上一周期内证据有变化的 agent 放宽到 1800 秒（`--progressing-inquiry-seconds`，设为与询问周期相同即恢复 1.8.x 节奏）；无进展阈值 900 秒（`--stalled-seconds`）；回复期限 300 秒（`--grace-seconds`）；未处理动作重复提醒间隔 1800 秒（`--remind-seconds`，仅 follow）。主 session 在首个 subagent 前启动，并用宿主通知或有界等待处理事件。
 
-所有角色显式 `register --id ID --role ROLE --handle HANDLE [--worktree PATH] [--artifact PATH ...]`。每个任务的专属产物内容和隔离 worktree 的 HEAD/diff 是工作证据，心跳/日志活动不算进展；无 Git 产出的分析任务使用专属 artifact。未跟踪文件需显式登记 artifact。文件变化不代表收敛，周期询问不会因此取消。
+### 作用域
 
-`CHECK_IN` 由宿主发送询问，再 `ack --action-id ID --decision sent`。回复后 `--decision progress --note 证据`；合理长任务 `--decision wait --wait-seconds 600 --note 原因`（1–900 秒）；到期未处理进入 `CONTROL_REQUIRED`，主 session 诊断并 `--decision intervene --note 已采取的动作`。相同 action id 幂等展示，不能每个 tick 重发询问；重复 sent 不延长回复期限。监控只维护自己的检查点，不直接发宿主消息、停止进程或修改 Git/业务 state。
+默认作用域是当前 run（`$RUN_DIR/monitor.json`）。`--owner NAME`（NAME 匹配 `[A-Za-z0-9][A-Za-z0-9_.-]{0,127}`）选择 host 作用域 `~/task_log/_monitor/NAME/`，不依赖 run，供跨会话的长期任务使用；同一作用域的所有命令带同一 `--owner`。run 作用域 `stop` 后拒绝再登记；host 作用域在全部任务关闭并 `stop` 后，再次 `register` 会重新启用。决策记录追加写入同目录的 `monitor.history.jsonl`，`monitor.json` 只保存当前状态（1.8.x 行内的 `history` 保持原样）。
 
-核验退出/收单后 `finish --id ID --note 证据`；全部结束后 `stop`，后台 follow 随之退出。恢复保留未完成 action 与计时，缺少转录不等于任务完成。`npc watch` 仍提供只读活动快照，供核对漏登任务；只有真实通知能力或主 session 的有界等待才能驱动干预，单独运行 follow 不等于自治控制。
+### 登记
+
+```
+npc monitor register --id ID --role ROLE --handle HANDLE [--kind agent|job]
+  [--worktree PATH] [--artifact PATH ...]
+  [--probe CMD] [--done CMD] [--alive CMD] [--deadline-seconds N] [--probe-timeout 30]
+```
+
+- `agent`（默认）：可被询问的执行体，参与 CHECK_IN 周期。`job`：远程作业、后台命令等无法询问的执行体，不产生 CHECK_IN，无进展时产生 `STALL`；必须提供 `--done`、`--alive`、`--deadline-seconds` 至少其一。
+- 证据：专属产物内容、隔离 worktree 的 HEAD/diff、`--probe` 命令输出（输出变化计为进展，首次读数为基线；非零退出记为 `observation_error`，不计进展）。心跳、日志活动、转录 mtime 不算进展。
+- 终态检测：`--done` 退出码 0 → `DONE_SIGNAL`；`--alive` 连续两次非零 → `EXITED_SIGNAL`（`--done` 成立时不再判定存活）；超过 `--deadline-seconds` → `DEADLINE`。命令以 `sh -c` 在登记时的工作目录执行，单次超时 `--probe-timeout` 秒，超时视为未知；检查在锁外执行，不阻塞 ack/register。
+- 同 id 同规格重复登记是幂等恢复，不重置计时；规格不同则拒绝，接替任务使用新 id。
+
+### 动作与确认
+
+| 动作 | 触发 | 允许的确认 |
+|---|---|---|
+| `CHECK_IN` | agent 到达询问周期 | 先 `--decision sent`，收到回复后 `progress` / `wait` / `intervene` |
+| `CONTROL_REQUIRED` | 已发送询问超过回复期限 | `progress` / `wait` / `intervene` |
+| `STALL` | job 超过无进展阈值 | `progress` / `wait` / `intervene` |
+| `DONE_SIGNAL` / `EXITED_SIGNAL` / `DEADLINE` | 终态观测；任务进入 `signaled`，停止探测 | `wait`（有界后重新提示）/ `intervene`（恢复探测）；关闭用 `finish` / `cancel` |
+
+`ack --action-id ID --decision D --note 证据 [--wait-seconds 1..900] [--deadline-seconds N]`：除 `sent` 外都要求 note；`wait` 限 1–900 秒；`--deadline-seconds` 以当前时间重设截止时间，`DEADLINE` 以 `intervene` 处理且未给新值时清除截止时间。每个任务同一时刻只有一个待处理动作；终态信号会替换尚未处理的询问（原动作以 `superseded` 记入历史），并覆盖进行中的有界等待。相同 action id 幂等展示，重复 sent 不延长回复期限。
+
+### 关闭与收尾
+
+`finish --id ID --result done|failed --note 证据` / `cancel --id ID --note 原因` 只由主 session 在核验后执行；监控不会自行关闭任务。对已关闭任务重复执行返回 `already_closed: true`。`list [--open]` 输出 `{"ok","stopped","open","tasks":[{"id","kind","role","handle","status","result","pending","progress_age_seconds","deadline_at","marker","observation_error"}],"scope"}`。`stop` 要求没有 `active` / `signaled` 任务。
+
+### 输出
+
+`tick` 与 `follow` 输出 `{"ok","stopped","active","actions":[...]}`，`active` 为未关闭任务数，每个动作含 `id`、`agent_id`、`handle`、`role`、`kind`、`task_kind`、`created_at`、`sent_at`、`no_progress`、`progress_age_seconds`、`observation_error`。follow 只在出现新动作或动作转为 `no_progress` 时输出，未处理动作每 `--remind-seconds` 重复一次；主 session 的 register/ack/finish 不触发输出，空闲时不输出。每行都包含全部未处理动作，宿主后台监视工具到期后重新挂接不会丢失事项。
+
+监控只维护自己的检查点，不直接发宿主消息、停止进程或修改 Git/业务 state。恢复时先 `tick` 补算离线期间到期的终态与截止时间，保留未完成 action 与计时；缺少转录不等于任务完成。`npc watch` 仍提供只读活动快照，供核对漏登任务；只有真实通知能力或主 session 的有界等待才能驱动干预，单独运行 follow 不等于自治控制。

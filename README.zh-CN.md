@@ -10,6 +10,7 @@ agent-spine 把一次自主编码 run 拆成两层，层间以严格契约通信
 
 - **spec 到交付的自主闭环** — 给 harness 一批 OpenSpec change 或一句话目标，它自动完成 plan → implement → review → fix → archive。交互档在决策分叉点停下问人；`--auto` 档全程无人值守，例行决策下沉给 `npc auto-decide`。
 - **完整闭环并行（1.8.1）** — 每个 change 在自己的 git worktree 中完成 implement/review/fix；原生 Codex/Claude Code agent 可接手实现和修复，通过后用 `npc integrate --prepared` 发布到主 session 启动分支。只有发布与归档短暂互斥，共享文件不再自动阻止并行。输入可以是一句话目标（先拆解成 changes）、指定 change 名，或留空（= 全部 active changes）。
+- **后台任务监控（1.9）** — `npc monitor` 以工作产物（专属产物、worktree diff、探针进度标记）观测 sub-agent、远程作业与后台命令；完成、退出、截止时间只产生信号，由主 session 核验后关闭任务；follow 只在出现新的待决策事项时唤醒主 session。
 - **独立 review 闸门** — 每个 change 经过 premium 引擎（`codex exec` 或 `claude -p`，可插拔）驱动的 review→fix 循环，带 blocking 趋势追踪与 stale 检测。廉价执行后端在结构上被禁止给自己的产出盖章（`npc verify routing` 强制拦截）。
 - **coder 多模型路由** — provider 注册表把 implement / fix 路由到任意 Anthropic 兼容端点（Kimi / Qwen / DeepSeek / …）或 `codex exec`。凭据与模型全局定义一次，每个工程只声明用哪个，可按阶段细分。
 - **确定性执行层** — 状态、事件、prompt 模板、review 解析、archive、git 机械动作各是一条 `npc` 子命令：stdout 一行 JSON + 文档化 exit code 契约（`0` 成功 / `1` 业务失败 / `2` 用法错 / `3` 环境错 / `4` 依赖缺失）。
