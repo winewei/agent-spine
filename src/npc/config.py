@@ -48,6 +48,10 @@ TOML 示例：
     write_gate = "verified"    # verified | any
     extraction_model_declared = "gpt-5.4"       # 供 doctor 比对成本分层
 
+    [integrate]                # 隔离发布的派生文件（可省略）
+    derived = ["uv.lock"]      # git glob pathspec；不参与已审查补丁比对
+    regenerate = ["uv lock"]   # 派生文件冲突或双方都改动时在 worktree 内重新生成
+
     [host]                     # 宿主 CLI（可省略；默认 env 探测：CLAUDECODE → claude，否则 generic）
     name = "generic"           # claude | generic | 任意自定义名
     session_dir = ".kimi/sessions/{proj_key}"  # 可选：为非 Claude 宿主补 session 目录模板
@@ -192,6 +196,22 @@ class VerifyConfig:
     # strict：测试命令必须 exit 0；diff：整合后失败集合 ⊆ 整合前基线失败集合即通过
     # （适用于存在既有污染失败、以"零新增失败"判零回归的仓库）。
     test_baseline: str = "strict"
+    # 测试命令超时（秒）；None 不限。超时按进程组整体回收。
+    test_timeout: int | None = None
+
+
+@dataclass(frozen=True)
+class IntegrateConfig:
+    """隔离发布协议的派生文件声明。
+
+    ``derived``：git glob pathspec（如 ``uv.lock``、``**/generated/**``）。命中的文件
+    由 ``regenerate`` 命令从源文件重新生成，不参与已审查补丁的一致性比对；仅这些
+    文件冲突时发布流程取目标分支版本后重新生成，无需人工解决。
+    ``regenerate``：在 change worktree 内依次执行的命令（shlex 切分、shell=False）。
+    """
+
+    derived: tuple[str, ...] = ()
+    regenerate: tuple[str, ...] = ()
 
 
 SUPPORTED_TEST_BASELINE_MODES: tuple[str, ...] = ("strict", "diff")
@@ -252,6 +272,7 @@ class Config:
     review: ReviewEngineConfig = field(default_factory=ReviewEngineConfig)
     coder: CoderConfig = field(default_factory=CoderConfig)
     verify: VerifyConfig = field(default_factory=VerifyConfig)
+    integrate: IntegrateConfig = field(default_factory=IntegrateConfig)
     host: HostConfig = field(default_factory=HostConfig)
     experience: ExperienceConfig = field(default_factory=ExperienceConfig)
     providers: tuple[ProviderConfig, ...] = BUILTIN_PROVIDERS
@@ -407,6 +428,15 @@ def _build(data: dict, source: str) -> Config:
             f"（合法值 = {'/'.join(SUPPORTED_TEST_BASELINE_MODES)}；{source}）"
         )
 
+    integrate_raw = data.get("integrate") or {}
+    if not isinstance(integrate_raw, dict):
+        raise ConfigError(f"[integrate] 节必须是 table（{source}）")
+    derived = _str_list(integrate_raw.get("derived"), "integrate.derived", source)
+    regenerate = _str_list(integrate_raw.get("regenerate"), "integrate.regenerate", source)
+    if bool(regenerate) != bool(derived):
+        # 只声明 derived 时，双方文本合并的派生文件既不审查也不重新生成
+        raise ConfigError(f"integrate.derived 与 integrate.regenerate 必须同时声明（{source}）")
+
     host_raw = data.get("host") or {}
     if not isinstance(host_raw, dict):
         raise ConfigError(f"[host] 节必须是 table（{source}）")
@@ -435,7 +465,9 @@ def _build(data: dict, source: str) -> Config:
             typecheck=_opt_str(verify_raw.get("typecheck"), "verify.typecheck", source),
             build=_opt_str(verify_raw.get("build"), "verify.build", source),
             test_baseline=test_baseline,
+            test_timeout=_opt_int(verify_raw.get("test_timeout"), "verify.test_timeout", source, None),
         ),
+        integrate=IntegrateConfig(derived=derived, regenerate=regenerate),
         host=HostConfig(
             name=_opt_str(host_raw.get("name"), "host.name", source),
             session_dir=_session_dir_template(host_raw.get("session_dir"), source),
@@ -575,6 +607,14 @@ def _opt_str(val: object, name: str, source: str) -> str | None:
     if not isinstance(val, str):
         raise ConfigError(f"{name} 必须是字符串（{source}）")
     return val or None
+
+
+def _str_list(val: object, name: str, source: str) -> tuple[str, ...]:
+    if val is None:
+        return ()
+    if not isinstance(val, list) or not all(isinstance(x, str) and x for x in val):
+        raise ConfigError(f"{name} 必须是非空字符串数组（{source}）")
+    return tuple(val)
 
 
 def _opt_bool(val: object, name: str, source: str, default: bool) -> bool:

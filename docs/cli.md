@@ -1643,7 +1643,7 @@ push 当前分支到远程（对外动作）。不自作主张决定要不要推
 
 每个 change 的实现、review、fix 都在同一个 worktree 中推进。`--handoff` 返回 needs-coder 及 phase/round/worktree/prompt；宿主原生 agent 提交后回传 RESULT/manifest，继续同一命令。已有 implementer 可用 --worktree 接入。不加 --handoff 时使用配置的 headless coder。中断恢复默认不指定 --from，避免重复执行已完成阶段。
 
-`ready-to-integrate` 后运行 `npc integrate --seq N --prepared`：在隔离工作区组合验证，补丁变化要求重新 review，发布时核对启动目标分支及基线，最后快进和归档。禁止 --force/--no-verify-tests 绕过准备协议。目标是主 session 启动分支，不是固定 main；历史锁文件名 .main.lock 保留兼容。
+`ready-to-integrate` 后运行 `npc integrate --seq N --prepared`：在隔离工作区组合验证，补丁身份（1.8.2 起为 `git patch-id --verbatim`，排除 `[integrate].derived`）变化要求对集成增量重新 review，仅派生文件冲突时按 `[integrate].regenerate` 自动重新生成，发布时核对启动目标分支及基线，最后快进和归档。禁止 --force/--no-verify-tests 绕过准备协议。目标是主 session 启动分支，不是固定 main；历史锁文件名 .main.lock 保留兼容。
 
 `npc plan ready` 的输入可增加 `file_policy:"isolated"`：共享文件返回 integration_risks，真实依赖和容量限制仍生效。默认 exclusive 保持旧接口语义。
 
@@ -2316,6 +2316,7 @@ npc index append
 
 | 版本 | 关键变化 |
 |---|---|
+| **1.8.2** | 隔离发布协议：已审查补丁的一致性改用 `git patch-id --verbatim`（忽略行号偏移与前像 blob id，保留空白与上下文），新增 `[integrate].derived/regenerate` 派生文件声明（不参与比对；仅派生文件冲突或双方都改动时重新生成）；发布失效后复审只审集成增量（`round-N.integration-delta.diff`）；`needs-resolution` 回执带 `reason`/`conflicts`/`files`；测试命令在独立进程组运行、结束或超时整组回收，新增 `[verify].test_timeout`；交互档 blocking 轮数累计达 3 时触发一次 `stale` 决策点；`isolated.transition` 事件归入正确 change 目录并统一本地时区时间戳 |
 | **1.7.1** | `archive run`：`openspec archive` 因 delta 标题与基线 Requirement 冲突静默中止（打印 Aborted 但 exit 0）时，以 change 目录仍存在判 `openspec-archive-failed` 并回传 openspec 输出，不再误报 `git-commit-failed`；`[verify].test_baseline = "strict|diff"`：`npc integrate` 的 verify tests 支持基线 diff（整合前记录 HEAD 失败集合，整合后失败集合 ⊆ 基线即通过），适配存在既有污染失败的仓库；成功输出新增 `tests` 字段与 `pass-baseline-diff` 状态 |
 | **1.7** | 宿主中立化 + 去 plugin 发布：宿主支持列表明确为 Claude Code / Kimi CLI / Qwen Code / Codex / OpenCode（README / INSTALL / usage / playbook 宿主适配表口径统一）；新增 `hosts.py` 宿主抽象与 `[host]` 配置（name/session_dir；探测顺序 config > CLAUDECODE env > generic），init payload 增 `host` 字段、generic 宿主跳过 auto 授权、session 识别按宿主分流（generic 只走 by-cwd hook）；focus/templates 项目上下文 `CLAUDE.md`→`AGENTS.md` fallback、prompt 措辞去工具专名；新增 `playbook list/show/install`（§9d），原 plugin 内容收编进包资源，删除 marketplace/plugin manifest；`doctor` 新增 `host` 检查 |
 | **1.6** | Provider 注册表：config 新增 `[providers.*]`（runner/env_file/model/bin，内置 claude/mimo/codex），coder 可路由到任意 Anthropic 兼容端点（kimi/qwen/deepseek/...）与 `codex exec`（coder 的 codex-cli 路径补齐）；配置查找链改为分层深合并（全局定义 provider、项目只写路由）；`--backend` 接受 provider 名；`verify routing` 规则 3 更名 `cheap_exec_only` 并泛化到全部带 env_file 的 provider；`doctor` 新增 `providers` 检查 |

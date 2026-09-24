@@ -7,7 +7,9 @@ tests：用 tmp_path 造假 repo 验 resolve_test_cmd；用假 runner 验 emit/�
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -712,3 +714,39 @@ def test_deps_checks_all_import_aliases_and_ignores_strings(tmp_path):
     assert len(violations) == 3
     assert all(v["rule"] == "forbidden_import" for v in violations)
     assert any("example.py:3" in v["detail"] for v in violations)
+
+
+def test_run_test_cmd_reaps_leaked_children(tmp_path: Path):
+    """命令结束后整组回收：后台派生的子进程不会作为孤儿残留。"""
+    pidfile = tmp_path / "child.pid"
+    script = tmp_path / "leak.py"
+    script.write_text(
+        "import subprocess, sys\n"
+        "p = subprocess.Popen([sys.executable, '-c', 'while True: pass'])\n"
+        f"open({str(pidfile)!r}, 'w').write(str(p.pid))\n"
+        "print('done')\n")
+    proc = _verify.run_test_cmd(tmp_path, f"python3 {script}")
+    assert proc.returncode == 0 and "done" in proc.stdout
+    child = int(pidfile.read_text())
+    for _ in range(50):
+        try:
+            os.kill(child, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.05)
+    else:
+        os.kill(child, 9)
+        raise AssertionError("leaked child still alive")
+
+
+def test_run_test_cmd_timeout_kills_group(tmp_path: Path):
+    proc = _verify.run_test_cmd(tmp_path, "python3 -c 'import time; time.sleep(30)'", timeout=1)
+    assert proc.returncode == _verify.TEST_TIMEOUT_RETURNCODE
+    assert "timed out" in proc.stderr
+
+
+@pytest.mark.parametrize("rc", [_verify.TEST_TIMEOUT_RETURNCODE, -9])
+def test_truncated_run_never_passes_baseline_diff(rc):
+    proc = subprocess.CompletedProcess([], rc, "--- FAIL: TestKnown\nFAIL\tpkg\t0.1s\n", "")
+    judged = _verify.judge_against_baseline(proc, {"pkg::TestKnown"})
+    assert judged["passed"] is False and judged["reason"] == "truncated-run"

@@ -81,7 +81,7 @@ def _emit_run_event(p: _paths.Paths, seq: int, change_id: str | None, payload: d
         _events.append_event(
             entry_base / "events.jsonl",
             p.run_events,
-            {"ts": _io.now_utc_iso(), "change_seq": seq, "change_id": change_id, **payload},
+            {"ts": _io.now_iso(), "change_seq": seq, "change_id": change_id, **payload},
         )
     except OSError:
         pass
@@ -199,15 +199,19 @@ def _run_integrate_locked(
             cfg = _config.Config()
         test_cmd = _verify.resolve_test_cmd(p.repo_root, cfg)
         if test_cmd is not None and cfg.verify.test_baseline == "diff":
-            base_proc = _verify.run_test_cmd(p.repo_root, test_cmd, runner=runner)
+            base_proc = _verify.run_test_cmd(p.repo_root, test_cmd, runner=runner,
+                                              timeout=cfg.verify.test_timeout)
+            # 截断的基线运行不可比：退回 strict 判定
             baseline_failed = (
-                set() if base_proc.returncode == 0
+                None if _verify.truncated(base_proc)
+                else set() if base_proc.returncode == 0
                 else _verify.parse_failed_ids(base_proc.stdout or "", base_proc.stderr or "")
             )
             _emit_run_event(
                 p, seq, change_id,
                 {"event": "integrate.baseline", "head": _head(p.repo_root, runner=runner),
-                 "baseline_failed": len(baseline_failed)},
+                 "baseline_failed": None if baseline_failed is None else len(baseline_failed),
+                 "baseline_truncated": baseline_failed is None},
             )
 
     # 2. cherry-pick
@@ -257,8 +261,9 @@ def _run_integrate_locked(
             except _config.ConfigError:
                 cfg_after = _config.Config()
             cmd = _verify.resolve_test_cmd(p.repo_root, cfg_after)
+            cfg = cfg_after
         if cmd is not None:
-            proc = _verify.run_test_cmd(p.repo_root, cmd, runner=runner)
+            proc = _verify.run_test_cmd(p.repo_root, cmd, runner=runner, timeout=cfg.verify.test_timeout)
             judged = _verify.judge_against_baseline(proc, baseline_failed)
             tests_detail = {k: v for k, v in judged.items() if k != "passed"}
             if not judged["passed"]:

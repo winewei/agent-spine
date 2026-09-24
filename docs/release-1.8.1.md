@@ -39,8 +39,8 @@ npc integrate --seq 1 --prepared
 | needs-coder | 派发或重新连接原生 coder；同一回执不能重复派单 |
 | ready-to-integrate | 调 integrate --prepared |
 | target-busy / target-moved | 保留发布队列，重试 integrate，不重写代码 |
-| needs-review | 在原 worktree 重新审查最终补丁 |
-| needs-resolution / tests-failed | 原 worktree 内诊断、合并/修复、提交，再审查 |
+| needs-review | 在原 worktree 审查集成增量（1.8.2 起；1.8.1 为最终补丁全量） |
+| needs-resolution / tests-failed | 原 worktree 内诊断、合并/修复、提交，再审查集成增量；`reason`/`conflicts`/`files` 给出原因与涉及文件 |
 | needs-recovery | 核验现有 commit/RESULT/工作区，补齐回执 |
 | needs-decision | 主 agent 取证并裁定；不能用 force-archive 绕过独立审查 |
 | archive-failed | 保留已发布证据，解决归档原因后重试 |

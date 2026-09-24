@@ -23,6 +23,11 @@ STALE_THRESHOLD = 3
 # 逐轮零敲碎打（"打地鼠"），第三轮大概率仍不收敛，早一轮把决策权交给人。
 STALE_INTERACTIVE_THRESHOLD = 2
 
+# 交互档的不收敛介入阈值：未收敛 review 轮（blocking>0 且未较上一轮严格下降）每累计
+# 达到该值的整数倍时触发 `stale` 决策点。blocking 在 0 与正数之间反复时 rounds_since_strict_decrease 会被每次
+# 下降清零，单靠它无法识别技术路线层面的不收敛。
+BLOCKING_ROUNDS_INTERACTIVE_THRESHOLD = 3
+
 
 def _next_rounds_since_decrease(trend: list[int], new_value: int) -> int:
     """根据新值更新 rounds_since_strict_decrease 计数。
