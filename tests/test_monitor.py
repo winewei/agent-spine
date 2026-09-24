@@ -450,3 +450,18 @@ def test_probe_timeout_reaps_lingering_children(tmp_path):
     tick(doc, tmp_path, 10)
     assert time.monotonic() - started < 10
     assert "timed out" in row["observation_error"]
+
+
+def test_observation_taken_before_intervene_cannot_reraise_signal(tmp_path):
+    doc = document()
+    row = job(doc, tmp_path, done="test -f DONE")
+    monitor.tick(doc, repo_root=tmp_path, now=100,
+                 observations={"bench": dict(obs(done=True), at=100)})
+    signal = row["pending"]
+    ack(doc, signal, 120, "intervene", "restarted benchmark; old DONE marker removed")
+    monitor.tick(doc, repo_root=tmp_path, now=130,
+                 observations={"bench": dict(obs(done=True), at=110)})
+    assert (row["status"], row["pending"]) == ("active", None)
+    monitor.tick(doc, repo_root=tmp_path, now=140,
+                 observations={"bench": dict(obs(done=True), at=135)})
+    assert row["pending"]["kind"] == "DONE_SIGNAL"

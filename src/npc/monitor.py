@@ -314,7 +314,9 @@ def acknowledge(doc: dict, *, action_id: str, decision: str, note: str,
         elif kind == "DEADLINE" and decision == "intervene":
             row["deadline_at"] = None  # the passed deadline is handled; a new one must be explicit
         if row["status"] == "signaled" and decision == "intervene":
-            row.update(status="active", signal=None, alive_failures=0)
+            # Observations collected before this decision must not re-raise the signal.
+            row.update(status="active", signal=None, alive_failures=0,
+                       observed_at=max(now, row.get("observed_at", now)))
         # Self-reported status/ack never resets the objective evidence clock.
         return
     raise ValueError("找不到待处理 action id（可能已经处理）")
