@@ -13,6 +13,7 @@ metrics 解析、phase/state 装订、git commit 等全部下沉到 CLI；LLM �
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import shutil
 import subprocess
@@ -517,6 +518,49 @@ def _classify_bad_review_output(raw: str, err: json.JSONDecodeError) -> str:
     return f"invalid_json:{err}"
 
 
+def _patch_text(root: Path, base: str, tip: str, derived: list[str]) -> str:
+    excludes = [f":(exclude,glob){g}" for g in derived]
+    return subprocess.run(
+        ["git", "diff", "--no-color", "--no-ext-diff", "--no-renames", base, tip, "--", ".", *excludes],
+        cwd=root, capture_output=True, text=True, check=True).stdout
+
+
+def _integration_delta_section(root: Path, isolation: dict, base: Path | None, round_n: int) -> str | None:
+    """集成增量复审：已 clean 的补丁因目标分支前进而变化时，只审两版补丁之间的差异。
+
+    增量文件无法生成（无产物目录、已审查提交不可达）时返回 None，由调用方退回全量补丁审查。
+    """
+    if base is None:
+        return None
+    reviewed = isolation["reviewed"]
+    derived = list(reviewed.get("derived") or [])
+    path = Path(base) / f"round-{round_n}.integration-delta.diff"
+    try:
+        old = _patch_text(root, reviewed["base"], reviewed["head"], derived)
+        new = _patch_text(root, isolation["base_commit"], "HEAD", derived)
+        delta = "".join(difflib.unified_diff(
+            old.splitlines(keepends=True), new.splitlines(keepends=True),
+            fromfile="reviewed.patch", tofile="current.patch", n=5))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(delta or "(no difference outside derived files)\n")
+    except (subprocess.SubprocessError, OSError):
+        return None
+    derived_note = f" Derived files ({', '.join(derived)}) are regenerated and tested, not reviewed." if derived else ""
+    return ("\n\n## Integration delta review\n"
+            f"The patch `{reviewed['base']}..{reviewed['head']}` passed an earlier review round with zero "
+            f"blocking findings. The current patch `{isolation['base_commit']}..HEAD` differs from it because "
+            "the target branch advanced: merges, conflict resolutions, regenerated files and follow-up commits."
+            f"{derived_note}\n"
+            f"Delta between the reviewed patch and the current patch: {path}\n"
+            f"Target-side changes merged since the review: git diff {reviewed['base']} {isolation['base_commit']} --\n"
+            f"Reproduce: git diff {reviewed['base']} {reviewed['head']} -- ; "
+            f"git diff {isolation['base_commit']} HEAD --\n"
+            "Blocking findings must be defects introduced or exposed by this delta, including "
+            "interactions between this change and newly merged target code and test failures after "
+            "integration. Code identical to the reviewed patch is outside blocking scope; report concerns "
+            "there as advisory only.\n")
+
+
 def _render_focus(
     p: _paths.Paths,
     change_id: str,
@@ -557,7 +601,11 @@ def _render_focus(
             own_commits=own,
         )
     isolation = (entry or {}).get("isolation") or {}
-    if isolation.get("base_commit"):
+    delta = (_integration_delta_section(p.repo_root, isolation, base, round_n)
+             if isolation.get("base_commit") and isolation.get("reviewed") else None)
+    if delta:
+        text += delta
+    elif isolation.get("base_commit"):
         text += ("\n\n## Final isolated patch\n"
                  "Review the complete current patch, including merge/conflict resolutions, "
                  "not only the historical implementation/fix commits. Read the affected code "

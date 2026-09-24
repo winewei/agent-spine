@@ -90,20 +90,102 @@ def test_merge_conflict_leaves_target_and_original_work_intact(run, archive):
     assert archive == []
 
 
-def test_changed_patch_requires_review_even_when_git_merge_succeeds(run, archive):
-    # Independent hunks in one file auto-merge but have different preimages.
+def test_distant_target_edit_in_same_file_keeps_patch_identity(run, archive):
+    # Different preimage blob and shifted line numbers, identical hunk content.
     lines = [f'{i}\n' for i in range(40)]
     commit(run.repo_root, 'registry.txt', ''.join(lines))
-    ours = list(lines); ours[1] = 'ours\n'
-    wp, _ = prepare(run, 1, 'registry.txt', ''.join(ours))
-    theirs = list(lines); theirs[38] = 'theirs\n'
+    ours = list(lines); ours[30] = 'ours\n'
+    prepare(run, 1, 'registry.txt', ''.join(ours))
+    theirs = ['new\n'] + list(lines); theirs[3] = 'theirs\n'
+    commit(run.repo_root, 'registry.txt', ''.join(theirs))
+    out = iso.publish(run, 1)
+    assert out['status'] == 'archived'
+    text = (run.repo_root / 'registry.txt').read_text()
+    assert 'ours' in text and 'theirs' in text
+
+
+def test_changed_hunk_context_requires_delta_review(run, archive):
+    lines = [f'{i}\n' for i in range(40)]
+    commit(run.repo_root, 'registry.txt', ''.join(lines))
+    ours = list(lines); ours[10] = 'ours\n'
+    wp, tip = prepare(run, 1, 'registry.txt', ''.join(ours))
+    reviewed_base = iso.entry(run, 1)['prepared']['base_commit']
+    theirs = list(lines); theirs[12] = 'theirs\n'
     current = commit(run.repo_root, 'registry.txt', ''.join(theirs))
     out = iso.publish(run, 1)
     assert out['status'] == 'needs-review'
     assert iso.head(run.repo_root) == current
-    assert iso.entry(run, 1)['prepared'] is None
+    e = iso.entry(run, 1)
+    assert e['prepared'] is None
+    assert e['isolation']['base_commit'] == current
+    assert e['isolation']['reviewed'] == {'base': reviewed_base, 'head': tip, 'derived': []}
     assert 'ours' in (wp.repo_root / 'registry.txt').read_text()
     assert 'theirs' in (wp.repo_root / 'registry.txt').read_text()
+    text, _, _ = pipeline._render_focus(wp, 'alpha', 1, tip, base=run.run_dir / 'alpha-art', entry=e)
+    assert '## Integration delta review' in text and '## Final isolated patch' not in text
+    delta = (run.run_dir / 'alpha-art' / 'round-1.integration-delta.diff').read_text()
+    assert '+ theirs' in delta and '- 12' in delta
+
+
+def _derived_config(p, regenerate):
+    cfg = p.repo_root / '.npc' / 'config.toml'
+    cfg.parent.mkdir(exist_ok=True)
+    cfg.write_text('[integrate]\nderived = ["gen.lock"]\n'
+                   f'regenerate = [{json.dumps(regenerate)}]\n')
+    iso.git(p.repo_root, 'add', '.npc/config.toml')
+    iso.git(p.repo_root, 'commit', '-qm', 'npc config')
+
+
+REGEN = "python3 -c \"import pathlib; p=pathlib.Path('gen.lock'); p.write_text(''.join(sorted(open(f).read() for f in sorted(pathlib.Path('.').glob('src*.txt')))))\""
+
+
+def test_derived_only_conflict_is_regenerated_without_review(run, archive):
+    _derived_config(run, REGEN)
+    commit(run.repo_root, 'gen.lock', 'seed\n')
+    wp = iso.workspace(run, 1)
+    commit(wp.repo_root, 'src-a.txt', 'a\n')
+    prepare(run, 1, 'gen.lock', 'a\n')
+    commit(run.repo_root, 'src-b.txt', 'b\n')
+    commit(run.repo_root, 'gen.lock', 'b\n')
+    out = iso.publish(run, 1)
+    assert out['status'] == 'archived'
+    assert (run.repo_root / 'gen.lock').read_text() == 'a\nb\n'
+
+
+def test_source_conflict_is_not_auto_resolved(run, archive):
+    _derived_config(run, REGEN)
+    commit(run.repo_root, 'gen.lock', 'seed\n')
+    wp, tip = prepare(run, 1, 'README.md', 'ours\n')
+    commit(wp.repo_root, 'gen.lock', 'ours\n')
+    rec = iso.entry(run, 1)['prepared']
+    rec.update(head=iso.head(wp.repo_root))
+    iso.update(run, 1, prepared={k: v for k, v in rec.items() if k != 'patch_sha256'} | {
+        'patch_id': iso.identity(wp.repo_root, rec['base_commit'], rec['head'], ['gen.lock']),
+        'derived': ['gen.lock']})
+    commit(run.repo_root, 'README.md', 'theirs\n')
+    commit(run.repo_root, 'gen.lock', 'theirs\n')
+    before = iso.head(wp.repo_root)
+    out = iso.publish(run, 1)
+    assert out['status'] == 'needs-resolution'
+    assert out['reason'] == 'merge-conflict'
+    assert sorted(out['conflicts']) == ['README.md', 'gen.lock']
+    assert iso.head(wp.repo_root) == before
+    iso.clean(wp.repo_root)
+    assert iso.entry(run, 1)['isolation']['reviewed']['head'] == before
+
+
+def test_regenerate_touching_sources_aborts_merge(run, archive):
+    _derived_config(run, "python3 -c \"open('gen.lock','w').write('x\\n'); open('README.md','a').write('drift\\n')\"")
+    commit(run.repo_root, 'gen.lock', 'seed\n')
+    commit(iso.workspace(run, 1).repo_root, 'src-a.txt', 'a\n')
+    wp, tip = prepare(run, 1, 'gen.lock', 'ours\n')
+    commit(run.repo_root, 'gen.lock', 'theirs\n')
+    out = iso.publish(run, 1)
+    assert out['status'] == 'needs-resolution'
+    assert out['reason'] == 'regenerate-touched-sources'
+    assert out['files'] == ['README.md']
+    assert iso.head(wp.repo_root) == tip
+    iso.clean(wp.repo_root)
 
 
 def test_tests_run_without_target_lock_and_reject_concurrent_target_advance(run, archive, monkeypatch):
@@ -349,3 +431,169 @@ def test_old_run_without_recorded_branch_can_use_legacy_but_not_isolated(run):
     target.check(run)
     with pytest.raises(ValueError, match='no recorded target branch'):
         iso.workspace(run, 1)
+
+
+def test_regenerate_created_files_are_removed_on_abort(run, archive):
+    _derived_config(run, "python3 -c \"open('gen.lock','w').write('x\\n'); open('stray.txt','w').write('s\\n')\"")
+    commit(run.repo_root, 'gen.lock', 'seed\n')
+    commit(iso.workspace(run, 1).repo_root, 'src-a.txt', 'a\n')
+    wp, tip = prepare(run, 1, 'gen.lock', 'ours\n')
+    commit(run.repo_root, 'gen.lock', 'theirs\n')
+    out = iso.publish(run, 1)
+    assert out['reason'] == 'regenerate-touched-sources'
+    assert out['files'] == ['stray.txt']
+    assert 'abort_incomplete' not in out
+    assert not (wp.repo_root / 'stray.txt').exists()
+    assert iso.head(wp.repo_root) == tip
+    iso.clean(wp.repo_root)
+
+
+def test_regenerate_that_does_not_rebuild_conflict_aborts(run, archive):
+    _derived_config(run, "true")
+    commit(run.repo_root, 'gen.lock', 'seed\n')
+    commit(iso.workspace(run, 1).repo_root, 'src-a.txt', 'a\n')
+    wp, tip = prepare(run, 1, 'gen.lock', 'ours\n')
+    commit(run.repo_root, 'gen.lock', 'theirs\n')
+    out = iso.publish(run, 1)
+    assert out['status'] == 'needs-resolution'
+    assert out['reason'] == 'regenerate-incomplete'
+    assert out['files'] == ['gen.lock']
+    assert iso.head(wp.repo_root) == tip
+    iso.clean(wp.repo_root)
+
+
+def test_derived_file_deleted_by_target_is_resolved(run, archive):
+    _derived_config(run, REGEN)
+    commit(run.repo_root, 'gen.lock', 'seed\n')
+    wp = iso.workspace(run, 1)
+    commit(wp.repo_root, 'src-a.txt', 'a\n')
+    prepare(run, 1, 'gen.lock', 'a\n')
+    iso.git(run.repo_root, 'rm', '-q', 'gen.lock')
+    iso.git(run.repo_root, 'commit', '-qm', 'drop lock')
+    out = iso.publish(run, 1)
+    assert out['status'] == 'archived'
+    assert (run.repo_root / 'gen.lock').read_text() == 'a\n'
+
+
+def test_delta_section_falls_back_to_full_patch_without_artifact_dir(run, archive):
+    wp, tip = prepare(run, 1)
+    e = iso.entry(run, 1)
+    e['isolation']['reviewed'] = {'base': e['isolation']['base_commit'], 'head': tip, 'derived': []}
+    text, _, _ = pipeline._render_focus(wp, 'alpha', 1, tip, base=None, entry=e)
+    assert '## Final isolated patch' in text and '## Integration delta review' not in text
+    e['isolation']['reviewed']['head'] = '0' * 40
+    text, _, _ = pipeline._render_focus(wp, 'alpha', 1, tip, base=run.run_dir / 'x', entry=e)
+    assert '## Final isolated patch' in text
+
+
+def test_new_format_receipt_publishes_with_pinned_derived(run, archive):
+    _derived_config(run, REGEN)
+    wp, tip = prepare(run, 1)
+    rec = iso.entry(run, 1)['prepared']
+    rec.pop('patch_sha256')
+    rec.update(patch_id=iso.identity(wp.repo_root, rec['base_commit'], tip, ['gen.lock']), derived=['gen.lock'])
+    iso.update(run, 1, prepared=rec)
+    commit(run.repo_root, 'other.txt', 'x\n')
+    assert iso.publish(run, 1)['status'] == 'archived'
+
+
+def test_legacy_receipt_of_derived_only_change_keeps_identity_check(run, archive):
+    _derived_config(run, REGEN)
+    commit(run.repo_root, 'gen.lock', 'seed\n')
+    wp, tip = prepare(run, 1, 'gen.lock', 'ours\n')
+    receipt = iso.entry(run, 1)['prepared']
+    assert iso.receipt_derived(wp.repo_root, receipt, ('gen.lock',)) == ()
+    assert iso.receipt_identity(wp.repo_root, receipt, ()) != ''
+    commit(run.repo_root, 'gen.lock', 'theirs\n')
+    out = iso.publish(run, 1)
+    assert out['status'] == 'needs-resolution' and out['reason'] == 'merge-conflict'
+
+
+def test_both_sides_derived_edit_requires_regeneration(run, archive):
+    _derived_config(run, "true")
+    commit(run.repo_root, 'gen.lock', ''.join(f'{i}\n' for i in range(30)))
+    wp = iso.workspace(run, 1)
+    commit(wp.repo_root, 'src-a.txt', 'a\n')
+    ours = [f'{i}\n' for i in range(30)]; ours[0] = 'ours\n'
+    wp, tip = prepare(run, 1, 'gen.lock', ''.join(ours))
+    theirs = [f'{i}\n' for i in range(30)]; theirs[25] = 'theirs\n'
+    commit(run.repo_root, 'gen.lock', ''.join(theirs))
+    out = iso.publish(run, 1)
+    assert out['reason'] == 'regenerate-incomplete' and out['files'] == ['gen.lock']
+    assert iso.head(wp.repo_root) == tip
+    iso.clean(wp.repo_root)
+
+
+def test_ignored_artifacts_from_regeneration_are_removed_on_abort(run, archive):
+    (run.repo_root / '.gitignore').write_text('dist/\n')
+    iso.git(run.repo_root, 'add', '.gitignore')
+    iso.git(run.repo_root, 'commit', '-qm', 'ignore')
+    _derived_config(run, "python3 -c \"import os; os.makedirs('dist', exist_ok=True); open('dist/out','w').write('x'); exit(1)\"")
+    commit(run.repo_root, 'gen.lock', 'seed\n')
+    commit(iso.workspace(run, 1).repo_root, 'src-a.txt', 'a\n')
+    wp, tip = prepare(run, 1, 'gen.lock', 'ours\n')
+    commit(run.repo_root, 'gen.lock', 'theirs\n')
+    out = iso.publish(run, 1)
+    assert out['reason'] == 'regenerate-failed'
+    assert not (wp.repo_root / 'dist').exists()
+
+
+def test_hook_rewriting_files_reports_exact_paths(run, archive):
+    lines = [f'{i}\n' for i in range(40)]
+    commit(run.repo_root, 'registry.txt', ''.join(lines))
+    wp, tip = prepare(run, 1, 'a.md', 'a\n')
+    commit(run.repo_root, 'other.txt', 'x\n')
+    hooks = Path(iso.git(wp.repo_root, 'rev-parse', '--path-format=absolute', '--git-path', 'hooks'))
+    hooks.mkdir(parents=True, exist_ok=True)
+    hook = hooks / 'pre-commit'
+    hook.write_text('#!/bin/sh\necho drift >> registry.txt\n')
+    hook.chmod(0o755)
+    try:
+        out = iso.publish(run, 1)
+    finally:
+        hook.unlink()
+    assert out['status'] == 'needs-resolution'
+    assert out['reason'] == 'hook-modified-worktree'
+    assert out['files'] == ['registry.txt']
+
+
+def test_abort_keeps_preexisting_ignored_files_when_listing_expands(run, archive):
+    (run.repo_root / '.gitignore').write_text('dist/\n')
+    iso.git(run.repo_root, 'add', '.gitignore')
+    iso.git(run.repo_root, 'commit', '-qm', 'ignore')
+    _derived_config(run, "python3 -c 'exit(1)'")
+    commit(run.repo_root, 'gen.lock', 'seed\n')
+    wp = iso.workspace(run, 1)
+    commit(wp.repo_root, 'src-a.txt', 'a\n')
+    (wp.repo_root / 'dist').mkdir()
+    (wp.repo_root / 'dist' / 'app.bin').write_text('built\n')
+    wp, tip = prepare(run, 1, 'gen.lock', 'ours\n')
+    # The target starts tracking a file inside the ignored directory.
+    (run.repo_root / 'dist').mkdir()
+    (run.repo_root / 'dist' / 'manifest.json').write_text('{}\n')
+    iso.git(run.repo_root, 'add', '-f', 'dist/manifest.json')
+    iso.git(run.repo_root, 'commit', '-qm', 'track manifest')
+    commit(run.repo_root, 'gen.lock', 'theirs\n')
+    out = iso.publish(run, 1)
+    assert out['reason'] == 'regenerate-failed'
+    assert (wp.repo_root / 'dist' / 'app.bin').read_text() == 'built\n'
+    assert iso.head(wp.repo_root) == tip
+
+
+def test_target_file_colliding_with_ignored_local_file_is_not_clobbered(run, archive):
+    (run.repo_root / '.gitignore').write_text('dist/\n')
+    iso.git(run.repo_root, 'add', '.gitignore')
+    iso.git(run.repo_root, 'commit', '-qm', 'ignore')
+    wp, tip = prepare(run, 1)
+    (wp.repo_root / 'dist').mkdir()
+    (wp.repo_root / 'dist' / 'app.bin').write_text('PRECIOUS\n')
+    (run.repo_root / 'dist').mkdir()
+    (run.repo_root / 'dist' / 'app.bin').write_text('tracked\n')
+    iso.git(run.repo_root, 'add', '-f', 'dist/app.bin')
+    iso.git(run.repo_root, 'commit', '-qm', 'track app.bin')
+    out = iso.publish(run, 1)
+    assert out['status'] == 'needs-resolution'
+    assert out['reason'] == 'merge-would-overwrite-ignored'
+    assert out['files'] == ['dist/app.bin']
+    assert (wp.repo_root / 'dist' / 'app.bin').read_text() == 'PRECIOUS\n'
+    assert iso.head(wp.repo_root) == tip

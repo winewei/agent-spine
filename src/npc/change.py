@@ -24,7 +24,7 @@ import argparse
 from pathlib import Path
 
 from . import _io, auto_decide as _auto, coder as _coder, locks as _locks, paths as _paths, pipeline as _pipeline, state as _state, telemetry as _telemetry
-from .trend import STALE_INTERACTIVE_THRESHOLD
+from .trend import BLOCKING_ROUNDS_INTERACTIVE_THRESHOLD, STALE_INTERACTIVE_THRESHOLD
 
 DEFAULT_MAX_ROUNDS = 20
 
@@ -382,11 +382,17 @@ def run_change(
                 phase = "archive"
                 continue
             trigger: str | None = None
-            # 交互档提前一轮介入：rsd >= 2 即视作 stale 决策点（auto 档仍等 rsd >= 3）
+            # 交互档提前一轮介入：rsd >= 2 即视作 stale 决策点（auto 档仍等 rsd >= 3）；
+            # 未收敛轮（blocking>0 且未较上一轮严格下降）每累计达到阈值的整数倍时介入一次，
+            # 覆盖 0/正数反复的不收敛；逐轮严格下降的趋势不计入
+            trend = res.get("blocking_trend") or []
+            blocking_rounds = sum(1 for i, b in enumerate(trend) if b > 0 and (i == 0 or b >= trend[i - 1]))
             if res.get("stale") or (
                 not auto
-                and int(res.get("rounds_since_strict_decrease") or 0)
-                >= STALE_INTERACTIVE_THRESHOLD
+                and (
+                    int(res.get("rounds_since_strict_decrease") or 0) >= STALE_INTERACTIVE_THRESHOLD
+                    or (blocking_rounds and blocking_rounds % BLOCKING_ROUNDS_INTERACTIVE_THRESHOLD == 0)
+                )
             ):
                 trigger = "stale"
             elif round_n + 1 > max_rounds:

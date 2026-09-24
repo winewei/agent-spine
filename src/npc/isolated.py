@@ -1,10 +1,15 @@
-"""Isolated change lifecycle (1.8.1).
+"""Isolated change lifecycle (1.8.2).
 
 The change lock protects its worktree/receipts, not main. A prepared patch is
-reviewed at an immutable commit. Integration preserves that patch byte-for-byte
-or requests another review, tests the combined tree outside the main lock, then
-publishes only if main still has the captured base. Worktrees are retained for
-recovery; no reset, forced checkout, or automatic conflict resolution is used.
+reviewed at an immutable commit. Integration preserves that patch's identity
+(``git patch-id --verbatim``: whitespace-sensitive, independent of line offsets
+and preimage blob ids, excluding declared derived files) or requests a review of
+the integration delta, tests the combined tree outside the main lock, then
+publishes only if main still has the captured base. Conflicts are resolved
+automatically only when confined to derived files that ``[integrate].regenerate``
+rebuilds. Worktrees are retained for recovery; the only reset/checkout operations
+are ``merge --abort`` of a merge started here and taking the target's version of
+conflicted derived files. The target worktree is only fast-forwarded.
 """
 from __future__ import annotations
 
@@ -12,6 +17,7 @@ import argparse
 from dataclasses import replace
 import hashlib
 from pathlib import Path
+import shlex
 import subprocess
 
 from . import change, config, git_chain, locks, paths, pipeline, state, target, verify
@@ -98,17 +104,193 @@ def workspace(p: paths.Paths, seq: int, supplied: str | None = None) -> paths.Pa
 
 
 def patch(root: Path, base: str, tip: str) -> str:
-    # No abbreviated object names; identical patches imply identical affected
-    # file preimages/postimages, including modes, deletions and binary content.
+    # Legacy (<=1.8.1) receipt digest input; kept to validate receipts prepared
+    # before patch identities were introduced.
     return git(root, "diff", "--binary", "--full-index", "--no-ext-diff", "--no-renames", base, tip, "--")
 
 
+def pathspecs(derived, *, exclude: bool = False) -> list[str]:
+    magic = "exclude,glob" if exclude else "glob"
+    return [f":({magic}){pattern}" for pattern in derived]
+
+
+def names(root: Path, *args: str) -> list[str]:
+    return [line for line in git(root, *args).splitlines() if line]
+
+
+def identity(root: Path, base: str, tip: str, derived=()) -> str:
+    """Patch identity of base..tip, excluding derived files.
+
+    Hunk content (including context and whitespace), file modes, deletions and
+    binary data are covered; hunk line numbers and preimage blob ids are not,
+    so unrelated target edits elsewhere in a touched file keep the identity.
+    """
+    diff = subprocess.run(
+        ["git", "diff", "--binary", "--no-color", "--no-ext-diff", "--no-renames", base, tip,
+         "--", ".", *pathspecs(derived, exclude=True)],
+        cwd=root, capture_output=True, check=True).stdout
+    out = subprocess.run(["git", "patch-id", "--verbatim"], cwd=root, input=diff,
+                         capture_output=True, check=True).stdout.decode()
+    return out.split()[0] if out.strip() else ""
+
+
+def receipt_derived(root: Path, receipt: dict, configured) -> tuple[str, ...]:
+    """Derived set for a receipt: pinned at preparation, or (1.8.1 receipts) the current
+    config unless the patch consists only of derived files."""
+    if "derived" in receipt:
+        return tuple(receipt["derived"])
+    derived = tuple(configured)
+    if derived and not identity(root, receipt["base_commit"], receipt["head"], derived):
+        return ()
+    return derived
+
+
+def receipt_identity(root: Path, receipt: dict, derived=()) -> str:
+    if "patch_id" not in receipt:
+        digest = hashlib.sha256(patch(root, receipt["base_commit"], receipt["head"]).encode()).hexdigest()
+        if digest != receipt.get("patch_sha256"):
+            raise ValueError("prepared patch receipt mismatch")
+    elif tuple(receipt.get("derived") or ()) == tuple(derived):
+        return receipt["patch_id"]
+    return identity(root, receipt["base_commit"], receipt["head"], derived)
+
+
+def load(p: paths.Paths, config_path: Path | None = None) -> config.Config:
+    return config.load_config(p.config_root or p.repo_root, override_path=config_path)
+
+
+def untracked(root: Path, *spec: str) -> set[str]:
+    return set(names(root, "ls-files", "--others", "--exclude-standard", *(("--", *spec) if spec else ())))
+
+
+def worktree_files(root: Path) -> set[str]:
+    """Untracked and ignored files, listed individually (never directory-collapsed)."""
+    return set(names(root, "ls-files", "--others", "--exclude-standard")) | set(
+        names(root, "ls-files", "--others", "--ignored", "--exclude-standard"))
+
+
+def abort_merge(root: Path, reason: str, files_before: set[str], **fields) -> dict:
+    """Abort the merge started by :func:`merge_target` and restore the pre-merge worktree.
+
+    Tracked edits are staged first so ``merge --abort`` (reset --merge) restores them
+    too. Only files absent from the pre-merge snapshot are removed, then directories
+    left empty by those removals; pre-existing untracked or ignored content is kept.
+    """
+    subprocess.run(["git", "add", "-u"], cwd=root, capture_output=True)
+    subprocess.run(["git", "merge", "--abort"], cwd=root, capture_output=True)
+    for name in worktree_files(root) - files_before:
+        path = root / name
+        if not (path.is_symlink() or path.is_file()):
+            continue
+        path.unlink(missing_ok=True)
+        parent = path.parent
+        while parent != root:
+            try:
+                parent.rmdir()
+            except OSError:
+                break
+            parent = parent.parent
+    try:
+        clean(root)
+    except ValueError as exc:
+        fields["abort_incomplete"] = str(exc)
+    return {"ok": False, "reason": reason, **fields}
+
+
+def merge_target(root: Path, base: str, integrate: config.IntegrateConfig) -> dict:
+    """Merge the target commit into the (clean) change worktree.
+
+    Conflicts confined to derived files take the target version (or the target's
+    deletion) and are rebuilt by the regenerate commands; derived files edited on
+    both sides are rebuilt as well. Regeneration must rewrite every conflicted
+    derived file the target still has and must not touch other files. Any other
+    outcome aborts the merge, leaving the previous HEAD.
+    """
+    if ancestor(root, base):
+        return {"ok": True, "regenerated": [], "conflicts": []}
+    before = head(root)
+    derived = integrate.derived
+    both = set()
+    if integrate.regenerate and derived:
+        ours = names(root, "diff", "--name-only", "--no-renames", f"{base}...{before}", "--", *pathspecs(derived))
+        theirs = names(root, "diff", "--name-only", "--no-renames", f"{before}...{base}", "--", *pathspecs(derived))
+        both = set(ours) & set(theirs)
+    snapshot = worktree_files(root)
+    # Git overwrites ignored files silently when the target adds a tracked file at the
+    # same path; refuse before merging so local content is never clobbered.
+    incoming = set(names(root, "diff", "--name-only", "--no-renames", "--diff-filter=A", f"{before}...{base}"))
+    if incoming & snapshot:
+        return {"ok": False, "reason": "merge-would-overwrite-ignored", "files": sorted(incoming & snapshot)}
+
+    def abort(reason: str, **fields) -> dict:
+        return abort_merge(root, reason, snapshot, **fields)
+
+    proc = subprocess.run(["git", "merge", "--no-edit", "--no-commit", "--no-ff", base],
+                          cwd=root, capture_output=True, text=True)
+    try:
+        conflicts = names(root, "diff", "--name-only", "--diff-filter=U")
+        if proc.returncode and not conflicts:
+            return abort("merge-failed", detail=(proc.stderr or proc.stdout)[-1500:])
+        required: set[str] = set()
+        if conflicts:
+            derived_conflicts = (names(root, "diff", "--name-only", "--diff-filter=U", "--", *pathspecs(derived))
+                                 if integrate.regenerate and derived else [])
+            if set(derived_conflicts) != set(conflicts):
+                return abort("merge-conflict", conflicts=conflicts,
+                                   detail=(proc.stdout + proc.stderr)[-1500:])
+            for name in conflicts:
+                stages = {line.split()[2] for line in names(root, "ls-files", "-u", "--", name)}
+                if "3" in stages:
+                    git(root, "checkout", "--theirs", "--", name)
+                    git(root, "add", "--", name)
+                    required.add(name)
+                else:  # deleted on the target side
+                    git(root, "rm", "-q", "--", name)
+        # Derived files edited on both sides were auto-merged textually; regeneration must rewrite them.
+        required |= both
+        targets = sorted(set(conflicts) | both)
+        if targets:
+            for cmd in integrate.regenerate:
+                run = subprocess.run(shlex.split(cmd), cwd=root, capture_output=True, text=True)
+                if run.returncode:
+                    return abort("regenerate-failed", conflicts=conflicts, command=cmd,
+                                       detail=(run.stdout + run.stderr)[-1500:])
+            touched = set(names(root, "diff", "--name-only")) | untracked(root)
+            rebuilt = set(names(root, "diff", "--name-only", "--", *pathspecs(derived))) | untracked(
+                root, *pathspecs(derived))
+            if touched - rebuilt:
+                return abort("regenerate-touched-sources", conflicts=conflicts,
+                                   files=sorted(touched - rebuilt))
+            if required - rebuilt:
+                return abort("regenerate-incomplete", conflicts=conflicts,
+                                   files=sorted(required - rebuilt))
+            if rebuilt:
+                git(root, "add", "--", *sorted(rebuilt))
+        # ``git commit`` concludes the merge; it runs pre-commit (not pre-merge-commit) hooks.
+        git(root, "commit", "--no-edit")
+    except ValueError as exc:
+        return abort("merge-failed", detail=str(exc)[-1500:])
+    dirty = git(root, "status", "--porcelain")
+    if dirty:
+        # A hook rewrote files after the merge commit was created; keep both for the agent.
+        files = set(names(root, "diff", "--name-only", "HEAD")) | untracked(root)
+        return {"ok": False, "reason": "hook-modified-worktree", "conflicts": conflicts, "files": sorted(files)}
+    return {"ok": True, "regenerated": targets, "conflicts": conflicts}
+
+
+def mark_reviewed(p: paths.Paths, seq: int, receipt: dict, derived, **isolation) -> None:
+    """Record the last clean-reviewed patch so the next review covers only the integration delta."""
+    e = entry(p, seq)
+    reviewed = {"base": receipt["base_commit"], "head": receipt["head"], "derived": list(derived)}
+    update(p, seq, isolation={**e["isolation"], **isolation, "reviewed": reviewed})
+
+
 def validate_tests(p: paths.Paths, *, config_path: Path | None = None) -> dict:
-    cfg = config.load_config(p.config_root or p.repo_root, override_path=config_path)
+    cfg = load(p, config_path)
     cmd = verify.resolve_test_cmd(p.repo_root, cfg)
     if cmd is None:
         return {"ok": True, "tests": "skipped", "reason": "no-test-command"}
-    proc = verify.run_test_cmd(p.repo_root, cmd)
+    proc = verify.run_test_cmd(p.repo_root, cmd, timeout=cfg.verify.test_timeout)
     return {"ok": proc.returncode == 0, "tests": "pass" if proc.returncode == 0 else "fail",
             "cmd": cmd, "tail": verify._tail(proc.stdout or "", proc.stderr or "", lines=30)[-3000:]}
 
@@ -231,9 +413,13 @@ def run(p: paths.Paths, seq: int, *, worktree: str | None = None,
     if head(wp.repo_root) != tip:
         raise ValueError("HEAD changed during validation")
     base = e["isolation"]["base_commit"]
+    derived = list(load(wp, config_path).integrate.derived)
+    patch_id = identity(wp.repo_root, base, tip, derived)
+    if derived and not patch_id and identity(wp.repo_root, base, tip):
+        # A change consisting only of derived files keeps them under the identity check.
+        derived, patch_id = [], identity(wp.repo_root, base, tip)
     receipt = {"head": tip, "base_commit": base, "review_round": reviewed["round"],
-               "patch_sha256": hashlib.sha256(patch(wp.repo_root, base, tip).encode()).hexdigest(),
-               "tests": tests}
+               "patch_id": patch_id, "derived": derived, "tests": tests}
     update(p, seq, status="ready-to-integrate", prepared=receipt)
     return result(seq, "ready-to-integrate", worktree=str(wp.repo_root), **receipt)
 
@@ -256,6 +442,9 @@ def publish(p: paths.Paths, seq: int) -> dict:
     clean(wp.repo_root)
     config_path = e["isolation"].get("config_path")
     config_options = {"config_path": Path(config_path)} if config_path else {}
+    integrate_cfg = load(wp, Path(config_path) if config_path else None).integrate
+    derived = receipt_derived(wp.repo_root, receipt, integrate_cfg.derived)
+    integrate_cfg = config.IntegrateConfig(derived=derived, regenerate=integrate_cfg.regenerate if derived else ())
     published = e.get("publication") or {}
     # Recover a crash after fast-forward but before state/archive recording.
     already = published.get("head") and ancestor(p.repo_root, published["head"])
@@ -266,21 +455,22 @@ def publish(p: paths.Paths, seq: int) -> dict:
             allowed = {receipt["head"], candidate.get("head")}
             if head(wp.repo_root) not in allowed:
                 return result(seq, "needs-review", reason="worktree-changed")
-            expected = patch(wp.repo_root, receipt["base_commit"], receipt["head"])
-            if hashlib.sha256(expected.encode()).hexdigest() != receipt["patch_sha256"]:
-                raise ValueError("prepared patch receipt mismatch")
-            proc = subprocess.run(["git", "merge", "--no-edit", base], cwd=wp.repo_root,
-                                  capture_output=True, text=True)
-            if proc.returncode:
-                # Abort only the merge started here, retaining all earlier work.
-                subprocess.run(["git", "merge", "--abort"], cwd=wp.repo_root, capture_output=True)
-                return result(seq, "needs-resolution", reason="merge-conflict",
-                              worktree=str(wp.repo_root), detail=proc.stderr[-1500:])
+            expected = receipt_identity(wp.repo_root, receipt, derived)
+            merged = merge_target(wp.repo_root, base, integrate_cfg)
+            if not merged.pop("ok"):
+                # The merge started here was aborted; all earlier work is retained.
+                mark_reviewed(p, seq, receipt, derived)
+                return result(seq, "needs-resolution", worktree=str(wp.repo_root), **merged)
             tip = head(wp.repo_root)
-            if patch(wp.repo_root, base, tip) != expected:
-                iso = {**e["isolation"], "base_commit": base}
-                update(p, seq, isolation=iso, prepared=None, candidate=None, status="needs-review")
-                return result(seq, "needs-review", reason="patch-changed", worktree=str(wp.repo_root))
+            if merged["regenerated"]:
+                from .integrate import _emit_run_event
+                _emit_run_event(p, seq, e["change_id"], {"event": "integrate.regenerated",
+                               "files": merged["regenerated"], "conflicts": merged["conflicts"]})
+            if identity(wp.repo_root, base, tip, derived) != expected:
+                mark_reviewed(p, seq, receipt, derived, base_commit=base)
+                update(p, seq, prepared=None, candidate=None, status="needs-review")
+                return result(seq, "needs-review", reason="patch-changed", worktree=str(wp.repo_root),
+                              regenerated=merged["regenerated"])
             # Persist the candidate before tests: failures retain a resumable HEAD.
             candidate = {"base": base, "head": tip}
             if tip == receipt["head"] and receipt.get("tests", {}).get("ok"):
@@ -296,6 +486,7 @@ def publish(p: paths.Paths, seq: int) -> dict:
             candidate["tests"] = tests
             update(p, seq, candidate=candidate)
             if not tests["ok"]:
+                mark_reviewed(p, seq, receipt, derived)
                 return result(seq, "tests-failed", validation=tests, worktree=str(wp.repo_root))
     target_lock = locks.try_acquire(locks.main_lock_path(p.task_log_dir), owner=f"publish seq={seq}")
     if target_lock is None:
@@ -334,10 +525,15 @@ def _cli(p: paths.Paths, args: argparse.Namespace, action) -> None:
     except (ValueError, OSError, config.ConfigError, subprocess.SubprocessError) as exc:
         out = result(args.seq, "error", reason=str(exc))
     out["duration_ms"] = int((time.monotonic() - started) * 1000)
+    try:
+        out.setdefault("change_id", entry(p, args.seq).get("change_id"))
+    except (ValueError, OSError):
+        pass
     from .integrate import _emit_run_event
     _emit_run_event(p, args.seq, out.get("change_id"),
                    {"event": "isolated.transition", "status": out.get("status"),
-                    "reason": out.get("reason"), "duration_ms": out["duration_ms"]})
+                    "reason": out.get("reason"), "duration_ms": out["duration_ms"],
+                    **{k: out[k] for k in ("conflicts", "files", "regenerated") if out.get(k)}})
     _io.emit(out)
     if not out.get("ok"):
         sys.exit(5 if out.get("status") == "needs-decision" else 1)

@@ -28,9 +28,13 @@ import argparse
 import ast
 import hashlib
 import json
+import os
 import re
 import shlex
+import signal
 import subprocess
+import tempfile
+import time
 from pathlib import Path
 
 from . import _io
@@ -174,11 +178,70 @@ def parse_failed_ids(stdout: str, stderr: str = "") -> set[str]:
     return ids
 
 
-def run_test_cmd(repo_root: Path, cmd: str, runner=subprocess.run) -> subprocess.CompletedProcess:
-    """以 shlex.split + shell=False 在 repo_root 执行测试命令（杜绝注入）。"""
-    return runner(
-        shlex.split(cmd), shell=False, cwd=str(repo_root), capture_output=True, text=True,
-    )
+TEST_TIMEOUT_RETURNCODE = 124
+
+
+def _kill_group(pgid: int) -> None:
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def run_test_cmd(
+    repo_root: Path, cmd: str, runner=subprocess.run, timeout: int | None = None,
+) -> subprocess.CompletedProcess:
+    """以 shlex.split + shell=False 在 repo_root 执行测试命令（杜绝注入）。
+
+    默认路径（POSIX）在独立进程组中运行，命令结束或超时后整组 SIGKILL，回收测试
+    派生的残留子进程；输出落临时文件，残留进程持有输出句柄时也不会阻塞等待。
+    注入非默认 ``runner`` 时直接委托，不做进程组回收与超时（测试用）；
+    非 POSIX 平台退回 ``subprocess.run`` 的超时语义。
+    """
+    argv = shlex.split(cmd)
+    if runner is not subprocess.run:
+        return runner(argv, shell=False, cwd=str(repo_root), capture_output=True, text=True)
+    if not hasattr(os, "waitid") or not hasattr(os, "killpg"):
+        try:
+            return subprocess.run(argv, cwd=str(repo_root), capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            def text(v) -> str:
+                return v.decode(errors="replace") if isinstance(v, bytes) else (v or "")
+            return subprocess.CompletedProcess(
+                argv, TEST_TIMEOUT_RETURNCODE, text(exc.stdout),
+                f"{text(exc.stderr)}\n[npc] test command timed out after {timeout}s\n")
+    with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+        proc = subprocess.Popen(argv, cwd=str(repo_root), stdout=out, stderr=err,
+                                stdin=subprocess.DEVNULL, start_new_session=True)
+        # WNOWAIT 等待不回收 leader：其 pid 在整组回收前不会被复用为他人的进程组号
+        timed_out = False
+        try:
+            if timeout is None:
+                os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOWAIT)
+            else:
+                deadline = time.monotonic() + timeout
+                while os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOWAIT | os.WNOHANG) is None:
+                    if time.monotonic() >= deadline:
+                        timed_out = True
+                        break
+                    time.sleep(0.1)
+        finally:
+            _kill_group(proc.pid)
+            returncode = proc.wait()
+        note = ""
+        if timed_out:
+            returncode = TEST_TIMEOUT_RETURNCODE
+            note = f"\n[npc] test command timed out after {timeout}s; process group killed\n"
+        out.seek(0)
+        err.seek(0)
+        stdout = out.read().decode(errors="replace")
+        stderr = err.read().decode(errors="replace") + note
+    return subprocess.CompletedProcess(argv, returncode, stdout, stderr)
+
+
+def truncated(proc: subprocess.CompletedProcess) -> bool:
+    """超时或被信号终止的运行：输出不完整，其失败集合不可作为判定或基线依据。"""
+    return proc.returncode == TEST_TIMEOUT_RETURNCODE or proc.returncode < 0
 
 
 def judge_against_baseline(
@@ -193,6 +256,9 @@ def judge_against_baseline(
     """
     if baseline_failed is None:
         return {"passed": proc.returncode == 0, "mode": "strict", "failed": None, "new_failures": []}
+    if truncated(proc):
+        return {"passed": False, "mode": "diff", "failed": None, "new_failures": [],
+                "reason": "truncated-run"}
     if proc.returncode == 0:
         return {"passed": True, "mode": "diff", "failed": 0, "new_failures": []}
     failed = parse_failed_ids(proc.stdout or "", proc.stderr or "")
@@ -232,14 +298,7 @@ def run_tests(args: argparse.Namespace, runner=subprocess.run) -> None:
 
     # 不裸信可写的 cfg.verify.test：用 shlex.split → argv 列表 + shell=False 执行，
     # 杜绝命令注入（``; rm -rf`` 等元字符不会被 shell 解释）。
-    argv = shlex.split(cmd)
-    proc = runner(
-        argv,
-        shell=False,
-        cwd=str(repo_root),
-        capture_output=True,
-        text=True,
-    )
+    proc = run_test_cmd(repo_root, cmd, runner=runner, timeout=cfg.verify.test_timeout)
     passed = proc.returncode == 0
     _io.emit(
         {

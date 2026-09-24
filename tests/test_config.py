@@ -429,3 +429,29 @@ def test_experience_rejects_non_bool_enabled(tmp_path):
 def test_experience_section_must_be_table(tmp_path):
     with pytest.raises(_config.ConfigError, match=r"\[experience\] 节必须是 table"):
         _write_exp_cfg(tmp_path, 'experience = "on"\n')
+
+
+def test_integrate_and_test_timeout_parsed(tmp_path: Path):
+    cfg_dir = tmp_path / ".npc"
+    cfg_dir.mkdir()
+    (cfg_dir / "config.toml").write_text(
+        '[verify]\ntest_timeout = 600\n'
+        '[integrate]\nderived = ["uv.lock", "**/generated/**"]\nregenerate = ["uv lock"]\n')
+    cfg = _config.load_config(tmp_path, home=tmp_path / "home")
+    assert cfg.verify.test_timeout == 600
+    assert cfg.integrate.derived == ("uv.lock", "**/generated/**")
+    assert cfg.integrate.regenerate == ("uv lock",)
+
+
+@pytest.mark.parametrize("body", [
+    '[integrate]\nregenerate = ["uv lock"]\n',
+    '[integrate]\nderived = ["uv.lock"]\n',
+    '[integrate]\nderived = "uv.lock"\n',
+    '[integrate]\nderived = [""]\n',
+])
+def test_integrate_config_rejects_invalid(tmp_path: Path, body: str):
+    cfg_dir = tmp_path / ".npc"
+    cfg_dir.mkdir()
+    (cfg_dir / "config.toml").write_text(body)
+    with pytest.raises(_config.ConfigError):
+        _config.load_config(tmp_path, home=tmp_path / "home")

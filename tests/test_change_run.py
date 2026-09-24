@@ -478,3 +478,68 @@ def test_change_exposes_persisted_recall_metadata(env_setup, make_args, capsys, 
     _patch(monkeypatch, implement=Script([OK_IMPL]), review=Script([review_result(0)]), archive=Script([dict(OK_ARCHIVE)]))
     result = _change.run_change(env_setup, 1)
     assert {key: result[key] for key in meta} == meta
+
+
+def test_interactive_oscillating_blocking_triggers_once_at_threshold(env_setup, make_args, capsys, monkeypatch):
+    """blocking 在 0/正数间反复时 rsd 被清零；累计第 3 个未收敛轮触发决策点。"""
+    p = env_setup
+    _bootstrap_run(make_args, capsys, "add-foo")
+    trend_review = dict(_review_rsd(1, 0), blocking_trend=[2, 1, 0, 1, 0, 1])
+    _patch(
+        monkeypatch,
+        implement=Script([OK_IMPL]),
+        review=Script([trend_review]),
+        fix=Script([]),
+        archive=Script([]),
+    )
+
+    out = _change.run_change(p, 1)
+    assert out["status"] == "needs-decision"
+    assert out["trigger"] == "stale"
+
+
+def test_interactive_blocking_rounds_below_threshold_continue(env_setup, make_args, capsys, monkeypatch):
+    p = env_setup
+    _bootstrap_run(make_args, capsys, "add-foo")
+    fix = Script([{"ok": True}])
+    _patch(
+        monkeypatch,
+        implement=Script([OK_IMPL]),
+        review=Script([dict(_review_rsd(1, 0), blocking_trend=[2, 0, 1]), review_result(0)]),
+        fix=fix,
+        archive=Script([dict(OK_ARCHIVE)]),
+    )
+
+    out = _change.run_change(p, 1)
+    assert out["status"] == "archived"
+    assert len(fix.calls) == 1
+
+
+def test_interactive_blocking_rounds_trigger_again_at_next_multiple(env_setup, make_args, capsys, monkeypatch):
+    p = env_setup
+    _bootstrap_run(make_args, capsys, "add-foo")
+    _patch(
+        monkeypatch,
+        implement=Script([OK_IMPL]),
+        review=Script([dict(_review_rsd(1, 0), blocking_trend=[2, 1, 0, 1, 1, 0, 1, 0, 1, 0, 1])]),
+        fix=Script([]),
+        archive=Script([]),
+    )
+    out = _change.run_change(p, 1)
+    assert out["status"] == "needs-decision" and out["trigger"] == "stale"
+
+
+def test_interactive_strictly_decreasing_trend_does_not_trigger(env_setup, make_args, capsys, monkeypatch):
+    p = env_setup
+    _bootstrap_run(make_args, capsys, "add-foo")
+    fix = Script([{"ok": True}])
+    _patch(
+        monkeypatch,
+        implement=Script([OK_IMPL]),
+        review=Script([dict(_review_rsd(3, 0), blocking_trend=[5, 4, 3]), review_result(0)]),
+        fix=fix,
+        archive=Script([dict(OK_ARCHIVE)]),
+    )
+    out = _change.run_change(p, 1)
+    assert out["status"] == "archived"
+    assert len(fix.calls) == 1

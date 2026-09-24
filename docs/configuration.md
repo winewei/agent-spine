@@ -118,6 +118,37 @@ npc verify routing                                          # 期望 {"ok":true,
 
 ---
 
+## 隔离发布配置（`[integrate]` / `[verify].test_timeout`，v1.8.2，可选）
+
+锁文件、生成代码等由源文件派生、多个 change 普遍会改动的文件，声明后不参与已审查补丁的一致性比对；仅这些文件冲突，或本 change 与目标分支都改动了它们时，发布流程在 change worktree 内取目标分支版本并执行重新生成命令。重新生成改动了非派生文件时中止合并，返回 `needs-resolution`（`reason=regenerate-touched-sources`）。
+
+```toml
+[integrate]
+derived = ["uv.lock", "apps/web/src/api/generated/**"]   # git glob pathspec
+regenerate = ["uv lock", "npm run gen:api"]             # 按序执行，shlex 切分，shell=False
+
+[verify]
+test_timeout = 1800   # 秒；超时返回码 124
+```
+
+`test_timeout` 同时作用于 `npc verify tests`、`npc integrate` 与隔离发布的测试。POSIX 平台上测试命令在独立进程组运行，结束或超时后整组回收；其它平台仅终止直接子进程。
+
+`derived` 与 `regenerate` 必须同时声明；派生文件的正确性由组合树测试验证，不进入 review 范围。只包含派生文件改动的 change 不启用排除，其补丁仍按全量参与比对。
+
+发布失败时 `needs-resolution` 回执的 `reason`：
+
+| reason | 含义 |
+|---|---|
+| `merge-conflict` | 存在非派生文件冲突（或未声明 `[integrate]`），`conflicts` 列出冲突文件 |
+| `merge-failed` | 合并或冲突处理的 git 操作失败，`detail` 给出输出 |
+| `regenerate-failed` | 重新生成命令非零退出，`command` / `detail` 给出命令与输出 |
+| `regenerate-touched-sources` | 重新生成改动了非派生文件，`files` 列出这些文件 |
+| `regenerate-incomplete` | 冲突或双方都改动的派生文件未被重新生成改写，`files` 列出这些文件。重新生成结果恰好与目标版本（或文本合并结果）一致时同样返回该原因，此时由 agent 核对后提交；该判定按保守方向处理，避免本 change 对派生文件的改动被静默丢弃 |
+| `hook-modified-worktree` | 合并提交已生成，但提交 hook 改写的文件未提交，`files` 列出这些文件 |
+| `merge-would-overwrite-ignored` | 目标分支新增的受跟踪文件与 change worktree 中被忽略的本地文件同路径，合并会覆盖本地内容；未执行合并，`files` 列出这些路径 |
+
+合并中止后若 worktree 未恢复干净，回执附带 `abort_incomplete`。
+
 ## 宿主配置（`[host]`，v1.7）
 
 npc 默认自动探测宿主：`CLAUDECODE` env 存在 → `claude`（完整能力），否则 `generic`（session 识别退化为 by-cwd hook、`--auto` 不写授权文件）。需要显式指定或为非 Claude 宿主补 session 目录时：
