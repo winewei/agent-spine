@@ -2,6 +2,7 @@
 import argparse
 import json
 import subprocess
+import time
 
 import pytest
 
@@ -423,3 +424,29 @@ def test_run_scope_rejects_register_after_stop(computed_paths, capsys):
     with pytest.raises(SystemExit):
         run("register", "--id", "late", "--role", "review", "--handle", "native")
     assert "新 run" in json.loads(capsys.readouterr().out)["message"]
+
+
+def test_stale_observation_from_concurrent_tick_is_ignored(tmp_path):
+    doc = document()
+    row = job(doc, tmp_path, probe="echo x")
+    monitor.tick(doc, repo_root=tmp_path, now=100,
+                 observations={"bench": dict(obs({"probe": "new"}), at=90)})
+    monitor.tick(doc, repo_root=tmp_path, now=110,
+                 observations={"bench": dict(obs({"probe": "old"}), at=80)})
+    assert row["evidence"]["probe"] == "new" and row["observed_at"] == 90
+
+
+def test_signaled_task_does_not_turn_no_progress(tmp_path):
+    doc = document()
+    job(doc, tmp_path, probe="echo x", done="true")
+    assert not tick(doc, tmp_path, 10)["actions"][0]["no_progress"]
+    assert not tick(doc, tmp_path, 5000)["actions"][0]["no_progress"]
+
+
+def test_probe_timeout_reaps_lingering_children(tmp_path):
+    doc = document()
+    row = job(doc, tmp_path, probe="(sleep 30; echo late) & sleep 30", probe_timeout=1)
+    started = time.monotonic()
+    tick(doc, tmp_path, 10)
+    assert time.monotonic() - started < 10
+    assert "timed out" in row["observation_error"]

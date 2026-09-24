@@ -15,11 +15,12 @@ from contextlib import contextmanager
 import fcntl
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 import time
 
-from . import _io, paths
+from . import _io, paths, verify
 from .task import TASK_ID_RE, _atomic_write_json
 
 KINDS = ("agent", "job")
@@ -69,8 +70,16 @@ def _short(value) -> str:
 
 
 def _run(command: str, cwd: str | None, timeout: int) -> subprocess.CompletedProcess:
-    return subprocess.run(["/bin/sh", "-c", command], cwd=cwd, stdin=subprocess.DEVNULL,
-                          capture_output=True, timeout=timeout, check=False)
+    """Run a check command; the whole process group is reaped so a lingering ssh
+    child can neither outlive the timeout nor hold the output open."""
+    argv = ["/bin/sh", "-c", command]
+    if not hasattr(os, "waitid") or not hasattr(os, "killpg"):
+        return subprocess.run(argv, cwd=cwd, stdin=subprocess.DEVNULL, capture_output=True,
+                              text=True, timeout=timeout, check=False)
+    proc, timed_out = verify.run_in_group(argv, cwd, timeout)
+    if timed_out:
+        raise subprocess.TimeoutExpired(command, timeout)
+    return proc
 
 
 def evidence(agent: dict, repo_root: Path | None, *, probe: bool = True) -> tuple[dict, str | None]:
@@ -103,7 +112,7 @@ def evidence(agent: dict, repo_root: Path | None, *, probe: bool = True) -> tupl
                     agent.get("probe_timeout") or DEFAULT_PROBE_TIMEOUT)
         if proc.returncode != 0:
             raise ObservationError(f"probe exit {proc.returncode}: {_short(proc.stderr)}")
-        result["probe"] = hashlib.sha256(proc.stdout).hexdigest()
+        result["probe"] = hashlib.sha256(proc.stdout.encode()).hexdigest()
         marker = _short(proc.stdout)[:MARKER_CHARS]
     return result, marker
 
@@ -171,6 +180,11 @@ def _has_progress_evidence(row: dict) -> bool:
 
 
 def _apply(doc: dict, agent_id: str, row: dict, obs: dict, now: float) -> None:
+    # A concurrent tick may already have applied a newer observation.
+    started = obs.get("at", now)
+    if started < row.get("observed_at", started):
+        return
+    row["observed_at"] = started
     if obs["evidence"] is not None:
         stored = row["evidence"]
         # Deletion/unavailability alone is not progress; the first probe reading is a baseline.
@@ -258,8 +272,10 @@ def tick(doc: dict, *, now: float, repo_root: Path | None, observations: dict | 
                     and now - row["inquiry_at"] >= stalled_seconds):
                 _action(doc, agent_id, row, "STALL", now)
         if row["pending"]:
+            # Signaled tasks are no longer probed, so their evidence clock is frozen.
+            quiet = row["status"] == "active" and now - row["progress_at"] >= stalled_seconds
             actions.append(dict(row["pending"], task_kind=row.get("kind", "agent"),
-                                no_progress=now - row["progress_at"] >= stalled_seconds,
+                                no_progress=quiet,
                                 progress_age_seconds=max(0, int(now - row["progress_at"])),
                                 observation_error=row.get("observation_error")))
     return dict(ok=True, stopped=False, active=active, actions=actions)
@@ -385,7 +401,8 @@ def _tick(directory: Path, repo_root: Path | None, args: argparse.Namespace) -> 
     with checkpoint(directory) as doc:
         rows = {} if doc["stopped"] else {
             k: dict(v) for k, v in doc["agents"].items() if v["status"] == "active"}
-    observations = {k: observe(v, repo_root) for k, v in rows.items()}
+    started = time.time()
+    observations = {k: dict(observe(v, repo_root), at=started) for k, v in rows.items()}
     with checkpoint(directory) as doc:
         return tick(doc, now=time.time(), repo_root=repo_root, observations=observations,
                     inquiry_seconds=args.inquiry_seconds,

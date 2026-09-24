@@ -2364,7 +2364,7 @@ npc monitor register --id ID --role ROLE --handle HANDLE [--kind agent|job]
 
 - `agent`（默认）：可被询问的执行体，参与 CHECK_IN 周期。`job`：远程作业、后台命令等无法询问的执行体，不产生 CHECK_IN，无进展时产生 `STALL`；必须提供 `--done`、`--alive`、`--deadline-seconds` 至少其一。
 - 证据：专属产物内容、隔离 worktree 的 HEAD/diff、`--probe` 命令输出（输出变化计为进展，首次读数为基线；非零退出记为 `observation_error`，不计进展）。心跳、日志活动、转录 mtime 不算进展。
-- 终态检测：`--done` 退出码 0 → `DONE_SIGNAL`；`--alive` 连续两次非零 → `EXITED_SIGNAL`（`--done` 成立时不再判定存活）；超过 `--deadline-seconds` → `DEADLINE`。命令以 `sh -c` 在登记时的工作目录执行，单次超时 `--probe-timeout` 秒，超时视为未知；检查在锁外执行，不阻塞 ack/register。
+- 终态检测：`--done` 退出码 0 → `DONE_SIGNAL`；`--alive` 连续两次非零 → `EXITED_SIGNAL`（`--done` 成立时不再判定存活）；超过 `--deadline-seconds` → `DEADLINE`。命令以 `sh -c` 在登记时的工作目录执行，单次超时 `--probe-timeout` 秒，在独立进程组中运行，结束或超时后整组终止，超时视为未知；检查在锁外执行，并发 tick 产生的较旧观测不会覆盖较新观测，不阻塞 ack/register。
 - 同 id 同规格重复登记是幂等恢复，不重置计时；规格不同则拒绝，接替任务使用新 id。
 
 ### 动作与确认
