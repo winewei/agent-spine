@@ -1,5 +1,26 @@
 # agent-spine 方案设计
 
+## 0. 当前架构（2.0，先读这一节）
+
+本文件是设计决策记录，按时间追加。**§1–§10 是 v0.x 起步时把 `/new-plan-changes` 下沉为 `npc` 的原始方案**（v1/v2 skill 对照、P0–P6 路线图等），保留作历史，不再描述当前架构；§11 起是逐版本的演进决策。当前架构与契约以下列为准：
+
+```
+外部启动方（可选：Ganglion / CI / 人）  job · worker · attempt · lease · 进程生命周期
+        │  EngineeringJob（--job）         ▲ status --external / result.json
+        ▼                                  │
+ 智能层：宿主 agent 执行 spine-run playbook（规划、调度、诊断、工程判断）
+        │  一行 JSON + 退出码
+        ▼
+ 确定性执行层：npc（state / 回执 / 隔离 worktree / 独立 review / 整合 / 结果契约）
+        │
+ 本地目标分支上的已验证提交（delivery=local；推送 / PR 归启动方）
+```
+
+- 工程执行契约（job / run_id / 状态 / 结果 / 检查点 / 事件 / 交付边界）：[runtime-contract.md](runtime-contract.md)
+- 2.0 的动机、架构审计与迁移：[release-2.0.0.md](release-2.0.0.md)
+- 隔离 worktree 生命周期与整合协议：[release-1.8.1.md](release-1.8.1.md)
+- 不变量：[principles.md](principles.md)
+
 ## 1. 项目目标
 
 为 Claude Code 的 skill 系统提供"工程化下沉"的命令行工具集，把 skill.md 中确定性的 bash + jq + 模板渲染逻辑迁移到 Python 实现，达成：
@@ -427,3 +448,19 @@ v1.4 的账目：review-fix 循环体活在 skill 里，每 change 主 session �
 **作用域**：默认绑定 run；`--owner` 选择 `~/task_log/_monitor/<owner>/`，供不属于任何 run 的长期任务使用。会话中断后，新会话以同一作用域执行 `tick` 补算离线期间到期的终态，再用 `list --open` 核对未关闭任务。
 
 **不做**：不唤醒已结束的会话；不提供常驻守护进程、MCP 服务或数据库；不向宿主 TUI 注入输入。
+
+## 2.0.0：工程执行运行时契约
+
+[契约](runtime-contract.md) · [发布说明与审计](release-2.0.0.md)。spine 成为宿主中立的工程执行运行时：接收一个 EngineeringJob，跑完 spec→经验证交付的完整生命周期，返回持久的结构化 EngineeringResult。**不是分布式调度器**：job/worker/attempt/lease、环境准备与进程生命周期归外部启动方（如 Ganglion）。
+
+**身份分离**：`job_id` / `attempt_id` 由启动方给出、只作关联；`run_id` 由 spine 在 run.json 一次性生成并在续跑、压缩、重 init 与新 attempt 间保持不变；`run_ts` / `proj_key` 退回本地存储细节。job 索引（`jobs/<hash>.json`）把 job 映射到唯一 run；索引与 run 元数据不一致时报错，绝不猜。
+
+**绑定规则拒绝而不是猜**：同 job 新 attempt 续用同一 run；job_id 相同但工作内容（goal / repository / delivery 指纹）不同、job 已结束、仓库里有别的未完成 run、目标分支不符——一律结构化报错。`--fresh` 是显式的 supersede。
+
+**结果是投影，不是第二个状态机**：result / checkpoint / external status 都是 run.json + state 的纯函数；finalize 与 `run abort` 原子写 result.json，重复渲染字节一致。状态只认 npc 记录的回执：强制归档（final review 仍有 blocking）、缺 review 证据、测试失败、目标覆盖缺口都进 issues，绝不报告为 completed。目标覆盖由编排 agent 以 `finalize --goal-complete|--goal-gap` 结构化裁定。
+
+**入口保持宿主 agent 架构**：启动方可先 `npc run start --job`（waiting-for-agent），再在宿主内 `/spine-run --job FILE`；playbook 的智能层不变，npc 只做确定性初始化、身份绑定、终态与结果契约。
+
+**交付边界**：本版只有 `local` 后端——已验证提交快进到本地目标分支，result 给出 ref 与 commit，推送 / PR / MR 由启动方完成。同步语义是在整合边界 sync-to-latest-target（把最新目标合入 change worktree，校验补丁身份，变化则只复审集成增量），而不是持续 rebase 所有工作者。远程后端将沿用同一边界（目标 tip → 远程 ref，ff-only 发布 → 非强制 push），在能干净实现前不做。
+
+**不做**：worker 注册、全局队列、分布式认领、租约/fencing、心跳、控制面、网络 API、进程监管、跨机实时状态复制。

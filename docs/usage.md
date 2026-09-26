@@ -88,6 +88,26 @@ harness 会：
 
 中断后再次跑 `spine-run`（同工程）会自动检测 `needs_resume` 并从断点（next_seq / next_phase）接着跑，不会重复已 archived 的 change。
 
+## 无人值守：由外部启动方调用（2.0，可选）
+
+本地使用不需要任何额外东西。需要让外部 worker（Ganglion、CI、脚本）无人值守地跑一个工程 job 时，启动方负责准备仓库（clone、checkout 目标分支、安装工具与凭据）并管理 agent 进程，spine 只负责工程生命周期。job 文件（EngineeringJob v1）：
+
+```json
+{"schema_version": 1, "job_id": "job-123", "attempt_id": "attempt-1",
+ "goal": "Add per-IP rate limiting to authentication endpoints",
+ "repository": {"root": "/workspace/project", "target_ref": "main"},
+ "mode": "auto", "limits": {"max_parallel": 4}}
+```
+
+```bash
+npc run start --job /jobs/job-123.json                  # 可选：先绑定，拿到 run_id（waiting-for-agent）
+claude '/spine-run --job /jobs/job-123.json'            # 其它宿主：以 --job 执行 spine-run playbook
+npc status --external --job-id job-123 --repo /workspace/project
+npc result show --job-id job-123 --repo /workspace/project   # exit 0 ⇔ 结果已发布
+```
+
+进程中断后，用新的 `attempt_id` 重新拉起即可续跑同一 run（run_id 不变）；结果只看 `result.json`，不需要让 agent 另写 DELIVERY.md。完整契约见 [runtime-contract.md](runtime-contract.md)。
+
 ## 切 review 引擎到 claude（或自定义后端）
 
 见 [configuration.md — Review 引擎配置](configuration.md#review-引擎配置)。常见：用 `.npc/config.toml` 把 `engine` 切到 `claude`，`bin` + `extra_args` 路由到经 `--settings` 配置的 qwen / deepseek 后端。

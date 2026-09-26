@@ -457,6 +457,34 @@ def test_blocked_run_reopens_only_for_a_new_attempt(tmp_path, repo, home, capsys
     assert code == 1 and out["state"] == "running"
 
 
+def test_run_blocked_before_planning_is_planned_by_the_next_attempt(tmp_path, repo, home, capsys, monkeypatch):
+    job = write_job(tmp_path, repo)
+    # Step 0 of the playbook fails (missing review engine) before any plan exists.
+    code, out = npc(capsys, "run", "abort", "--job", str(job), "--blocked", "--reason", "codex missing",
+                    cwd=tmp_path, monkeypatch=monkeypatch)
+    assert code == 0 and out["status"] == "blocked"
+    code, shown = npc(capsys, "result", "show", "--job-id", "job-123", "--repo", str(repo))
+    assert shown["result"]["status"] == "blocked" and shown["result"]["reason"] == "codex missing"
+    job2 = write_job(tmp_path, repo, "job2.json", attempt_id="attempt-2")
+    code, init = npc(capsys, "init", "--job", str(job2), cwd=repo, monkeypatch=monkeypatch)
+    assert code == 0 and init["run_id"] == out["run_id"] and not init["needs_resume"]
+    code, ext = npc(capsys, "status", "--external")
+    assert ext["state"] == "planning" and not ext["final"]
+    code, planned = npc(capsys, "state", "init-run", "--plan-order", '["alpha"]')
+    assert code == 0 and planned["run_id"] == out["run_id"]
+
+
+def test_corrupt_state_is_reported_not_raised(tmp_path, repo, home, capsys, monkeypatch):
+    code, init = npc(capsys, "init", "--job", str(write_job(tmp_path, repo)), cwd=repo, monkeypatch=monkeypatch)
+    npc(capsys, "state", "init-run", "--plan-order", '["alpha"]')
+    run_paths(repo, home, init["run_ts"]).state_json.write_text("{truncated")
+    for argv in (("status", "--external"), ("result", "show"), ("run", "checkpoint")):
+        code, out = npc(capsys, *argv)
+        assert code == 3 and out["error"] == "state-corrupt", argv
+    code, out = npc(capsys, "init", "--job", str(write_job(tmp_path, repo)))
+    assert code == 3 and out["error"] == "state-corrupt"
+
+
 def test_aborted_run_cannot_be_turned_into_blocked_or_completed_run_aborted(tmp_path, repo, home, capsys,
                                                                              monkeypatch):
     npc(capsys, "init", "--job", str(write_job(tmp_path, repo)), cwd=repo, monkeypatch=monkeypatch)

@@ -1,4 +1,6 @@
-# npc CLI 契约 v1.4
+# npc CLI 契约 v2.0
+
+> 2.0 新增的机器契约（EngineeringJob / run_id / 外部状态 / EngineeringResult / 检查点 / 事件关联）见本文 §9 与 [runtime-contract.md](runtime-contract.md)；既有命令只增字段、不改语义。
 
 本文件定义 `npc` 命令行工具的稳定对外接口。所有命令默认：
 
@@ -58,9 +60,11 @@
 
 ## 1. 初始化与续跑
 
-### `npc init [--auto] [--fresh] [--shell-exports]`
+### `npc init [--auto] [--fresh] [--job FILE] [--shell-exports]`
 
 初始化本次 run 的运行环境。
+
+2.0：输出新增 `run_id`（稳定工程执行身份，run.json 一次生成、续跑不变）、`job`（绑定的 EngineeringJob 摘要或 null）、`job_run_created`、`result_path`。`--job FILE` 按 job 绑定/续用唯一 run（规则见 §9 与 runtime-contract §3）；新 run 的 `run_ts` 同一分钟内冲突时加 `-2` 后缀。
 
 **做什么**：
 
@@ -231,9 +235,9 @@ $ npc state get '.plan_order | length'
 
 ---
 
-### `npc state finalize`
+### `npc state finalize [--goal-complete | --goal-gap TEXT ...]`
 
-收尾：根据所有 progress[].status 自动判定顶层 status。
+收尾：根据所有 progress[].status 自动判定顶层 status。2.0：同时记录 `finished_at`、目标分支终点提交与（可选）目标覆盖裁定，并原子写出 `<run_dir>/result.json`（EngineeringResult）；stdout 追加 `result_status` / `result`。
 
 **做什么**：
 
@@ -2401,3 +2405,23 @@ monitor: 3 open, 2 pending | *#12 CHECK_IN impl-003 -> agent:a1b2; #9 DONE_SIGNA
 逐项为 `#<action id> <kind> <task id>`：`*` 前缀表示本次新增；`-> HANDLE` 仅出现在 `CHECK_IN` / `CONTROL_REQUIRED` 且询问尚未发送时，表示下一步向该句柄发询问；已发送则为 `asked`；`idle Nm` 对应 `no_progress=true`；`probe-error` 对应非空 `observation_error`。无动作时为 `monitor: N open, 0 pending`，停止后为 `monitor stopped`。
 
 监控只维护自己的检查点，不直接发宿主消息、停止进程或修改 Git/业务 state。恢复时先 `tick` 补算离线期间到期的终态与截止时间，保留未完成 action 与计时；缺少转录不等于任务完成。`npc watch` 仍提供只读活动快照，供核对漏登任务；只有真实通知能力或主 session 的有界等待才能驱动干预，单独运行 follow 不等于自治控制。
+
+## 9. 执行契约（2.0）
+
+面向外部启动方（Ganglion / CI / 脚本）的机器契约，完整字段语义、状态取值与错误码见 [runtime-contract.md](runtime-contract.md)。以下命令都遵循本文件的 stdout 单行 JSON + exit code 约定。
+
+**run 定位参数**（`status` / `result *` / `run abort` / `run checkpoint` 通用）：`--job-id ID`（经 `jobs/` 索引）、`--run-id ID`、`--repo PATH`（默认 cwd 所在仓库）；都不给时定位 active run。索引与 run 元数据不一致时报错（`job-index-*` / `run-metadata-missing`，exit 3），绝不猜测。
+
+| 命令 | 作用 | stdout 要点 | exit |
+|---|---|---|---|
+| `npc job validate --job FILE` | 只校验 EngineeringJob，无副作用 | `{"ok","job","fingerprint"}` | 0 / 2 |
+| `npc run start --job FILE [--fresh]` | 启动方侧绑定：创建或续用 job 的 run，记录 attempt；幂等 | `{"ok","run_id","run_ts","job_id","attempt_id","created","new_attempt","reopened","state","run_dir","state_json","result_path"}` | 0 / 1 / 2 / 3 |
+| `npc init --job FILE` | agent 侧绑定（spine-run Step 1），并完成常规 init | 见 §1 | 同上 |
+| `npc status --external [--detail]` | 归一化执行状态 | `{"ok","schema_version","job_id","attempt_id","run_id","run_ts","state","final","resumable","reason","goal","mode","changes":{"total","by_phase"},"pending_decisions","updated_at","result"}` | 0 / 1 / 3 |
+| `npc result show` | 输出已发布结果；未终态 exit 1 `result-pending` | `{"ok":true,"path","result":{EngineeringResult}}` | 0 / 1 / 3 |
+| `npc result wait [--timeout 3600] [--interval 5]` | 薄轮询，直到结果发布或超时（`timeout`） | 同 show | 0 / 1 |
+| `npc result render` | 从权威 state 重渲染终态结果（字节幂等，内容不变不重写） | `{"ok","path","status"}` | 0 / 1 |
+| `npc run abort --reason TEXT [--blocked] [--job FILE]` | 以 `aborted`（终态）或 `blocked`（下一 attempt 可重开）终止并写结果 | `{"ok","status","run_id","job_id","attempt_id","result"}` | 0 / 1 / 2 / 3 |
+| `npc run checkpoint` | 由权威 state 派生检查点，原子写 `checkpoint.json` | `{"ok","path","run_id","job_id","state","completed","remaining"}` | 0 / 3 |
+
+`npc status`（非 external）、`npc status --brief`、`npc resume detect`、`npc state init-run`、`npc index append` 的输出都新增 `run_id`。`run.events.jsonl` 每行补 `run_id` / `job_id` / `attempt_id`（事件自带同名字段优先），新增生命周期事件 `run.created` / `run.attempt` / `run.reopened` / `run.finished`。

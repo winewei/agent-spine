@@ -195,7 +195,14 @@ def change_view(entry: dict, *, detail: bool = False) -> dict:
 
 def _load(p: _paths.Paths) -> tuple[dict, dict | None]:
     meta = _paths.read_run_meta(p.run_dir) or {}
-    state = _state.read_state(p.state_json) if p.state_json.is_file() else None
+    if not p.state_json.is_file():
+        return meta, None
+    try:
+        state = _state.read_state(p.state_json)
+    except (OSError, json.JSONDecodeError) as e:
+        raise _job.JobError("state-corrupt", f"unreadable state {p.state_json}: {e}", exit_code=3) from e
+    if not isinstance(state, dict):
+        raise _job.JobError("state-corrupt", f"state is not a JSON object: {p.state_json}", exit_code=3)
     return meta, state
 
 
@@ -363,11 +370,17 @@ def reopen(p: _paths.Paths, *, attempt_id: str) -> None:
         for key in ("status_reason", "finished_at", "target_final_commit"):
             st.pop(key, None)
 
-    _state.update_state(p.state_json, p.state_md, mutate)
+    stamp = int(time.time())
+    reopened = _state.update_state(p.state_json, p.state_md, mutate)
     # The blocked result described the previous attempt; it must not outlive the reopen.
     path = result_path(p)
     if path.is_file():
-        os.replace(path, p.run_dir / f"result.blocked-{int(time.time())}.json")
+        os.replace(path, p.run_dir / f"result.blocked-{stamp}.json")
+    if not reopened.get("progress") and not reopened.get("plan_order"):
+        # Blocked before planning: the placeholder state holds no engineering work.
+        # Return the run to "unplanned" so the new attempt plans it from scratch.
+        os.replace(p.state_json, p.run_dir / f"state.blocked-{stamp}.json")
+        p.state_md.unlink(missing_ok=True)
 
 
 def _dag(p: _paths.Paths) -> dict:
@@ -514,20 +527,32 @@ def _resolve_or_emit(args: argparse.Namespace) -> _paths.Paths | None:
 # ============================================================
 
 
+def _guarded(handler):
+    """Structured JSON errors (never tracebacks) for corrupt state found while projecting."""
+    import functools
+
+    @functools.wraps(handler)
+    def wrapper(args: argparse.Namespace) -> None:
+        try:
+            handler(args)
+        except _job.JobError as e:
+            e.emit()
+
+    return wrapper
+
+
 def _final_result(p: _paths.Paths) -> dict | None:
     """The published result; a terminal run without one (e.g. finalized by 1.x) is rendered now."""
     doc = read_result(p)
     if doc is not None:
         return doc
-    try:
-        state = _state.read_state(p.state_json)
-    except (OSError, json.JSONDecodeError):
-        return None
-    if state.get("status") in TERMINAL_STATE_STATUSES:
+    _, state = _load(p)
+    if state and state.get("status") in TERMINAL_STATE_STATUSES:
         return publish_result(p)
     return None
 
 
+@_guarded
 def cli_show(args: argparse.Namespace) -> None:
     import sys
     p = _resolve_or_emit(args)
@@ -543,6 +568,7 @@ def cli_show(args: argparse.Namespace) -> None:
     _io.emit({"ok": True, "path": str(result_path(p)), "result": doc})
 
 
+@_guarded
 def cli_wait(args: argparse.Namespace) -> None:
     """Thin observer: poll for the published result until ``--timeout``."""
     import sys
@@ -564,6 +590,7 @@ def cli_wait(args: argparse.Namespace) -> None:
         time.sleep(min(interval, max(0.0, deadline - time.monotonic())))
 
 
+@_guarded
 def cli_render(args: argparse.Namespace) -> None:
     p = _resolve_or_emit(args)
     if p is None:
@@ -576,27 +603,20 @@ def cli_render(args: argparse.Namespace) -> None:
     _io.emit({"ok": True, "path": str(result_path(p)), "status": doc["status"]})
 
 
+@_guarded
 def cli_status(args: argparse.Namespace) -> None:
     p = _resolve_or_emit(args)
     if p is None:
         return
-    try:
-        out = external_status(p, detail=bool(getattr(args, "detail", False)))
-    except (OSError, json.JSONDecodeError) as e:
-        _io.emit_error("state-corrupt", str(e), exit_code=3)
-        return
-    _io.emit({"ok": True, **out})
+    _io.emit({"ok": True, **external_status(p, detail=bool(getattr(args, "detail", False)))})
 
 
+@_guarded
 def cli_checkpoint(args: argparse.Namespace) -> None:
     p = _resolve_or_emit(args)
     if p is None:
         return
-    try:
-        doc = build_checkpoint(p)
-    except (OSError, json.JSONDecodeError) as e:
-        _io.emit_error("state-corrupt", str(e), exit_code=3)
-        return
+    doc = build_checkpoint(p)
     path = checkpoint_path(p)
     _atomic_write(path, _dump(doc))
     _io.emit({"ok": True, "path": str(path), "run_id": doc["run_id"], "job_id": doc["job_id"],
