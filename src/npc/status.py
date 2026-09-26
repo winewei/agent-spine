@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import argparse
 
-from . import _io, paths as _paths, state as _state
+from . import _io, job as _job, paths as _paths, state as _state
 
 
 # 终态：进入这些状态的 change 不再是"当前"处理对象。
@@ -72,6 +72,7 @@ def summarize_status(state: dict) -> dict:
 
     return {
         "run_ts": state.get("run_ts"),
+        "run_id": state.get("run_id"),
         "top_status": state.get("status"),
         "total": len(progress),
         "by_status": by_status,
@@ -117,6 +118,7 @@ def brief_status(state: dict, notes: list[dict]) -> dict:
     ]
     return {
         "run_ts": summary["run_ts"],
+        "run_id": summary["run_id"],
         "goal": state.get("goal"),
         "mode": state.get("mode"),
         "top_status": summary["top_status"],
@@ -139,11 +141,25 @@ def run(args: argparse.Namespace) -> None:
     next_action——主 session 在任何 compaction 或续跑后以此单命令重建盘面。
     无 active run / 定位失败 / state 文件缺失 → exit 3（env_missing）。
     """
+    if getattr(args, "external", False):
+        from . import result as _result
+
+        _result.cli_status(args)
+        return
+
     try:
-        p = _paths.load_paths(args)
+        if any(getattr(args, k, None) for k in ("job_id", "run_id", "repo")):
+            from . import result as _result
+
+            p = _result.resolve(args)
+        else:
+            p = _paths.load_paths(args)
         state = _state.read_state(p.state_json)
     except (_paths.PathsError, FileNotFoundError) as e:
         _io.emit_error("env_missing", str(e), exit_code=3)
+        return
+    except _job.JobError as e:
+        e.emit()
         return
 
     if getattr(args, "brief", False):

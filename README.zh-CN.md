@@ -42,7 +42,7 @@ agent-spine 把一次自主编码 run 拆成两层，层间以严格契约通信
 ```bash
 # 1) 直接从 GitHub 远程安装 npc 命令（无需 clone）
 uv tool install --force --from git+https://github.com/winewei/agent-spine.git npc
-npc --version          # npc 1.9.1
+npc --version          # npc 2.0.0
 
 # 2) 把 playbooks 物化到你的宿主 CLI（三选一）
 npc playbook install --host claude    # Claude Code：commands/skills/agents 目录

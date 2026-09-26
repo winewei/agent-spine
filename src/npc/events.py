@@ -50,12 +50,43 @@ def _events_file(progress_entry: dict) -> Path:
     return Path(base) / "events.jsonl"
 
 
+def correlation(run_events_file: Path) -> dict:
+    """Correlation ids of the run owning ``run_events_file`` (2.0 event envelope).
+
+    Read from the sibling run.json on every call: each npc invocation is a short
+    process, and an attempt rebinding must be visible to the next event. Runs
+    without these fields (1.x) simply get none.
+    """
+    try:
+        meta = json.loads((run_events_file.parent / _paths.RUN_JSON_FILENAME).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(meta, dict):
+        return {}
+    job = meta.get("job") if isinstance(meta.get("job"), dict) else {}
+    ids = {"run_id": meta.get("run_id"), "job_id": job.get("job_id"), "attempt_id": job.get("attempt_id")}
+    return {k: v for k, v in ids.items() if v}
+
+
+def _stamp(run_events_file: Path, event: dict) -> dict:
+    return {**event, **{k: v for k, v in correlation(run_events_file).items() if k not in event}}
+
+
+def append_run_event(run_events_file: Path, event: dict) -> None:
+    """Append one run-level (not change-scoped) event to run.events.jsonl."""
+    line = json.dumps(_stamp(run_events_file, event), ensure_ascii=False, separators=(",", ":")) + "\n"
+    run_events_file.parent.mkdir(parents=True, exist_ok=True)
+    with run_events_file.open("a", encoding="utf-8") as f:
+        f.write(line)
+
+
 def append_event(per_change_file: Path, run_events_file: Path, event: dict) -> None:
     """双流追加同一行事件。
 
     per-change_file 与 run_events_file 都是 append-only jsonl；每行一个紧凑 JSON。
+    2.0：行内补 run_id / job_id / attempt_id 关联字段（事件自带的同名字段优先）。
     """
-    line = json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n"
+    line = json.dumps(_stamp(run_events_file, event), ensure_ascii=False, separators=(",", ":")) + "\n"
     per_change_file.parent.mkdir(parents=True, exist_ok=True)
     run_events_file.parent.mkdir(parents=True, exist_ok=True)
     with per_change_file.open("a", encoding="utf-8") as f:

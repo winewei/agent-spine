@@ -32,7 +32,7 @@ metadata:
 | monitor 输出里出现需要判断的动作，或要登记 job | `npc playbook show spine-run --section monitor` |
 | 发布回执不是 `archived` | `npc playbook show spine-run --section publish` |
 | 续跑、compaction 之后、接手他人 session | `npc playbook show spine-run --section recovery` |
-| 全部终态或中止，进入收尾 | `npc playbook show spine-run --section finish` |
+| 全部终态或中止，进入收尾（含 `npc run abort`） | `npc playbook show spine-run --section finish` |
 
 回执遵循“结果留盘、context 只放指针”：npc 命令只回一行，正文留在 `$RUN_DIR` 下的文件里，需要时才读。monitor 的 follow 输出是一行纯文本，完整结构用 `npc monitor list --open` 按需取。
 
@@ -43,6 +43,7 @@ metadata:
 | 一句话目标（如 `给认证模块加限流`） | Step 2.0-B：先拆解成 openspec changes，再进流水线 |
 | 一个/多个已存在的 change 名（kebab-case） | Step 2.0-A：只跑这些 change |
 | 空 | Step 2.0-C：跑全部 in-progress changes（等价旧 `new-plan-changes-v4` 的默认行为） |
+| `--job FILE`（EngineeringJob JSON，外部启动方给出） | 目标取 `job.goal` 走 Step 2.0-B；`mode` / `limits.max_parallel` 取自 job；身份与结果契约见 docs/runtime-contract.md |
 
 ## 参数
 
@@ -54,6 +55,7 @@ metadata:
 | `--serial` | off | 并发预算设为 1，仍使用隔离闭环；`--serial-waves` 为同义旧名 |
 | `--no-architect` | off | 跳过语义裁定，直接用机械候选波次 |
 | `--webhook URL` / `--webhook-format` | env / raw | 进度外呼（`npc notify`，永不阻塞） |
+| `--job FILE` | off | 绑定外部 job（job_id/attempt_id 只作关联，不是调度权）；同 job 的新 attempt 续用同一 run |
 
 **`--auto` 的硬规则（fire-and-forget）**：绝不调用 AskUserQuestion；机械失败由 npc 返回证据，工程分叉由主 agent 根据代码与测试自主决定，一路跑到底。范围决策 → 拆出来的全部 change 一次跑完；plan 确认 → 不进 plan 模式，直接 `init-run`；执行中例行决策 → 优先检查现有产物、失败证据和根因，`npc auto-decide` 只是建议，不以降低审查标准代替收敛。唯一例外：硬依赖缺失（exit 4）或需要人类凭据/外部授权时停下说明。
 
@@ -63,18 +65,18 @@ metadata:
 
 ## Step 0 — 前置检查（缺依赖立即停）
 
-- `npc --version` ≥ 1.9.1；缺或版本过低 → 提示从发布 tag 安装（`uv tool install --reinstall --from git+https://github.com/winewei/agent-spine@v<版本> npc`）并停止；开发期验证用仓库内 `uv run npc`，不要用 `--from .` 本地目录安装。
+- `npc --version` ≥ 2.0.0；缺或版本过低 → 提示从发布 tag 安装（`uv tool install --reinstall --from git+https://github.com/winewei/agent-spine@v<版本> npc`）并停止；开发期验证用仓库内 `uv run npc`，不要用 `--from .` 本地目录安装。
 - `npc doctor` 通过；配置的 review engine 及其可执行程序/凭据必须可用（默认 codex）。缺失时在初始化前停止；不能声明“跳 review”后仍调用 `change run --from review`，也不能静默免审归档。`experience` 项为 warn 只记一行降级；经验层由 `npc agent prompt render` / `npc archive run` 自动处理，主 session 不读经验正文，也绝不把经验给 review。
 - `openspec` 可用（`openspec list --json` 是计划入口）。
 - git 仓库且启动工作区 clean、位于命名分支。`npc init` 记录该分支的完整 ref 与启动提交，它是本次 run 的整合目标，绝不默认 checkout main/master；续跑保留原目标，不能偷偷重绑定。
 - worktree 隔离可用：Claude Code 宿主要求 `worktree.baseRef=head`，否则报错退出；其它宿主用 `git worktree add`（基于 HEAD）。宿主既无 sub-agent 并发也无后台执行时按 `--serial` 走 Step 3S。
 
-任一硬依赖缺失：用一句话告诉用户缺什么、怎么装，**不要继续**。用宿主任务列表建一个贯穿全程的清单（init / plan / 每个 change 一项 / 收尾），实时更新。
+任一硬依赖缺失：用一句话告诉用户缺什么、怎么装，**不要继续**。有 `--job` 时先落结构化终态再停：`npc run abort --job "$JOB" --blocked --reason "<缺什么>"`（启动方据此修环境后以新 attempt 重开同一 run）。用宿主任务列表建一个贯穿全程的清单（init / plan / 每个 change 一项 / 收尾），实时更新。
 
 ## Step 1 — 初始化 / 重定向
 
 ```bash
-INIT=$(npc init ${AUTO:+--auto} ${FRESH:+--fresh}) || exit $?
+INIT=$(npc init ${AUTO:+--auto} ${FRESH:+--fresh} ${JOB:+--job "$JOB"}) || exit $?
 RUN_DIR=$(printf '%s\n' "$INIT" | jq -er '.run_dir') || exit 1
 RUN_TS=$(printf '%s\n' "$INIT" | jq -er '.run_ts') || exit 1
 STATE_JSON=$(printf '%s\n' "$INIT" | jq -er '.state_json') || exit 1
@@ -85,6 +87,7 @@ fi
 export RUN_DIR RUN_TS STATE_JSON RUN_T0
 ```
 
+- `--job`：init 输出的 `.job` 给出 goal / mode / `limits.max_parallel`（覆盖默认 MAX_PARALLEL）与 `run_id`。init 报 `job-mismatch` / `job-already-finished` / `run-conflict` / `attempt-finished` / `target-mismatch` 时如实汇报并停止，不要 `--fresh` 绕过——那是启动方的决定。
 - `state_drift.total_drifted > 0` → `npc state repair --auto`。
 - `needs_resume=true`、经历过 context compaction、或接手他人 session → 读 `--section recovery` 并完成恢复闸门后才可跳过 Step 2 进入 Step 3；`npc resume detect` 的单个 `next_phase` 不能代表并行盘面。恢复时禁止使用 `--fresh`。
 - 宿主每次调用使用独立 shell 时，从已保存的 `$RUN_DIR/run.json` 重新读取路径变量并 export，不能假定前一调用的 shell 变量仍存在。
@@ -228,6 +231,7 @@ npc integrate --seq "$SEQ" --prepared
 - 同一并发预算覆盖 implement/review/fix；排队不是运行。不要派等待型 agent 占槽。
 - 中断保留 worktree、commit、RESULT、review 与测试回执；恢复前核对旧进程，不重复执行已完成阶段。
 - 只有发布/归档短临界区占目标工作区锁；绝不手动删除活锁，绝不 force 绕过验证。
-- 用户可随时转向或中止。auto 档自主处理工程决策；真正缺凭据或授权时才请求输入，不能假装成功。
+- 用户可随时转向或中止。auto 档自主处理工程决策；真正缺凭据或授权时才请求输入，不能假装成功。无人值守（`--job`）时改为 `npc run abort --blocked --reason …` 落结构化终态后停止。
+- 进程生命周期（tmux / launchd / 容器 / 重试 / 租约）归外部启动方；spine 只负责工程生命周期，不自行重启、不认领别的 job。
 - 用户授权优先；工具权限由宿主控制。commit 禁 AI 署名 trailer，禁 `--no-verify`。
 - 全程用宿主任务列表反映真实推进，汇报产物与证据，而不只汇报进程存活。

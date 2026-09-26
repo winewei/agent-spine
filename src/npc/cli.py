@@ -49,6 +49,13 @@ def _make_handler(module_name: str, func_name: str) -> Callable[[argparse.Namesp
     return handler
 
 
+def _add_run_selector(parser: argparse.ArgumentParser) -> None:
+    """2.0 external run lookup: by job, by run identity, or by repository."""
+    parser.add_argument("--job-id", default=None, help="按外部 job_id 定位 run（经 job 索引）")
+    parser.add_argument("--run-id", default=None, help="按 run_id 定位 run")
+    parser.add_argument("--repo", default=None, help="工程根（默认 cwd 所在 git 仓库）")
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="npc",
@@ -86,7 +93,12 @@ stdout（默认 JSON 模式）:
   {"repo_root", "proj_key", "task_log_dir", "run_ts", "run_dir", "state_json",
    "state_md", "index_file", "schema_path", "run_events", "run_json",
    "active_json", "session_id", "transcript_path", "session_source",
-   "needs_resume": bool, "resume_state_json": str|null, "mode", "fresh"}
+   "needs_resume": bool, "resume_state_json": str|null, "mode", "fresh",
+   "run_id", "job": {...}|null, "job_run_created": bool, "result_path"}
+
+--job FILE（2.0）：校验 EngineeringJob，并把它绑定到唯一 run：同 job（任意 attempt）
+续用同一 run；job_id 相同但内容不同 / job 已结束 / 本仓库有别的未完成 run → 结构化
+报错（exit 1/2/3），不静默改绑。--fresh 让该 job 另起新 run（旧 run 标 superseded）。
 
 stdout（--shell-exports，已 Deprecated 0.2）:
   一系列 export NPC_XXX='...' 行（stderr 打 deprecation warning）
@@ -98,6 +110,12 @@ exit code:
     )
     p_init.add_argument("--auto", action="store_true", help="标记 auto 模式")
     p_init.add_argument("--fresh", action="store_true", help="忽略 in-progress 旧 run")
+    p_init.add_argument(
+        "--job",
+        default=None,
+        metavar="FILE",
+        help="2.0：EngineeringJob JSON（docs/runtime-contract.md）；绑定/续用该 job 的 run",
+    )
     p_init.add_argument(
         "--shell-exports",
         action="store_true",
@@ -272,16 +290,24 @@ exit code:
 部分 archived 但有 failed/skipped-auto -> completed-with-issues；
 任何 needs-user-decision -> 不动 status，报错。
 
+2.0：同时记录 finished_at / 目标分支终点提交，并原子写出结构化
+EngineeringResult（<run_dir>/result.json，契约见 docs/runtime-contract.md）。
+
 stdout（成功）:
   {"ok": true, "final_status": "<str>", "archived": <int>, "failed": <int>,
-   "skipped": <int>, "total": <int>}
+   "skipped": <int>, "total": <int>, "result_status": "<str>", "result": "<path>"}
 
 exit code:
   0  成功
-  1  存在 needs-user-decision，不能 finalize
+  1  存在 needs-user-decision / 非终态 change，不能 finalize
+  2  --goal-complete 与 --goal-gap 同时给出
   3  环境错（STATE_JSON 不存在）
 """,
     )
+    p_state_fin.add_argument("--goal-complete", action="store_true",
+                             help="2.0：编排者裁定组合结果已覆盖原始目标")
+    p_state_fin.add_argument("--goal-gap", action="append", default=[], metavar="TEXT",
+                             help="2.0：记录一条目标覆盖缺口（可重复；与 --goal-complete 互斥）")
     p_state_fin.set_defaults(
         handler=_make_handler("state", "finalize"), _cmd_path="state finalize"
     )
@@ -1628,6 +1654,10 @@ exit code:
         action="store_true",
         help="重定向契约（v1.5）：收掉 changes 全列表，带出 pending_decisions / 未消费 notes / next_action",
     )
+    p_status.add_argument("--external", action="store_true",
+                          help="2.0：外部执行状态契约（归一化 state + 关联 id）")
+    p_status.add_argument("--detail", action="store_true", help="--external 时附带逐 change 细节")
+    _add_run_selector(p_status)
     p_status.set_defaults(handler=_make_handler("status", "run"), _cmd_path="status")
     p_cost = sub.add_parser(
         "cost",
@@ -2082,6 +2112,96 @@ exit code:
     p_ad.set_defaults(handler=_make_handler("auto_decide", "cli"), _cmd_path="auto-decide")
 
     # ===== summary =====
+    # ===== 2.0 execution contract: run / job / result =====
+    p_run = sub.add_parser("run", help="2.0 执行契约：run start / abort / checkpoint")
+    sub_run = p_run.add_subparsers(dest="run_cmd", required=True)
+    p_run_start = sub_run.add_parser(
+        "start",
+        help="启动方侧：校验 EngineeringJob 并绑定 run（不需要 agent 宿主）",
+        formatter_class=_EPILOG_FMT,
+        epilog="""\
+在 job.repository.root 内创建（或按 job_id 续用）唯一 run，记录 attempt；run 状态为
+waiting-for-agent，直到宿主内的 /spine-run --job FILE（npc init --job）接手。幂等。
+
+stdout:
+  {"ok": true, "run_id", "run_ts", "job_id", "attempt_id", "created": bool,
+   "new_attempt": bool, "reopened": bool, "state", "task_log_dir", "run_dir",
+   "state_json", "result_path"}
+
+exit code:
+  0  成功
+  1  job-mismatch / job-already-finished / run-conflict / job-busy
+  2  invalid-job / unsupported-schema-version / unsupported-delivery
+  3  仓库 / 目标分支 / 元数据问题（repository-* / target-* / job-index-* / run-metadata-*）
+""",
+    )
+    p_run_start.add_argument("--job", required=True, metavar="FILE")
+    p_run_start.add_argument("--fresh", action="store_true",
+                             help="该 job 另起新 run（旧 run 未结束则标 aborted/superseded）")
+    p_run_start.set_defaults(handler=_make_handler("job", "cli_start"), _cmd_path="run start")
+
+    p_run_abort = sub_run.add_parser(
+        "abort",
+        help="终止 run：aborted（终态）或 --blocked（等外部输入，下个 attempt 可重开）",
+        formatter_class=_EPILOG_FMT,
+        epilog="""\
+写入顶层 status + 原因，并原子写出 EngineeringResult。已 completed 的 run 拒绝。
+
+stdout:
+  {"ok": true, "status": "aborted|blocked", "run_id", "job_id", "attempt_id", "result"}
+
+exit code: 0 成功；1 run 已结束；2 用法错；3 未定位到 run
+""",
+    )
+    p_run_abort.add_argument("--reason", required=True)
+    p_run_abort.add_argument("--blocked", action="store_true")
+    p_run_abort.add_argument("--job", default=None, metavar="FILE",
+                             help="按 EngineeringJob 定位（未绑定则先绑定再终止）")
+    _add_run_selector(p_run_abort)
+    p_run_abort.set_defaults(handler=_make_handler("result", "cli_abort"), _cmd_path="run abort")
+
+    p_run_ckpt = sub_run.add_parser(
+        "checkpoint",
+        help="从权威 state 派生工程检查点，原子写 <run_dir>/checkpoint.json",
+        formatter_class=_EPILOG_FMT,
+        epilog="""\
+stdout:
+  {"ok": true, "path", "run_id", "job_id", "state", "completed": <int>, "remaining": <int>}
+""",
+    )
+    _add_run_selector(p_run_ckpt)
+    p_run_ckpt.set_defaults(handler=_make_handler("result", "cli_checkpoint"), _cmd_path="run checkpoint")
+
+    p_job = sub.add_parser("job", help="2.0 EngineeringJob 契约")
+    sub_job = p_job.add_subparsers(dest="job_cmd", required=True)
+    p_job_val = sub_job.add_parser("validate", help="只校验 job 文件，不产生副作用")
+    p_job_val.add_argument("--job", required=True, metavar="FILE")
+    p_job_val.set_defaults(handler=_make_handler("job", "cli_validate"), _cmd_path="job validate")
+
+    p_result = sub.add_parser("result", help="2.0 EngineeringResult 读取")
+    sub_result = p_result.add_subparsers(dest="result_cmd", required=True)
+    p_res_show = sub_result.add_parser(
+        "show",
+        help="输出已发布的结构化结果；run 未终态 → exit 1 result-pending",
+        formatter_class=_EPILOG_FMT,
+        epilog="""\
+stdout（终态）: {"ok": true, "path", "result": {EngineeringResult}}
+stdout（未终态）: {"ok": false, "error": "result-pending", "state", "run_id", "job_id", ...}
+
+exit code: 0 结果已发布；1 未终态 / 未找到 job；3 未定位到 run
+""",
+    )
+    _add_run_selector(p_res_show)
+    p_res_show.set_defaults(handler=_make_handler("result", "cli_show"), _cmd_path="result show")
+    p_res_wait = sub_result.add_parser("wait", help="轮询直到结果发布或超时（薄观察者）")
+    _add_run_selector(p_res_wait)
+    p_res_wait.add_argument("--timeout", type=float, default=3600.0, help="秒；超时 exit 1")
+    p_res_wait.add_argument("--interval", type=float, default=5.0)
+    p_res_wait.set_defaults(handler=_make_handler("result", "cli_wait"), _cmd_path="result wait")
+    p_res_render = sub_result.add_parser("render", help="从权威 state 重新渲染终态结果（幂等）")
+    _add_run_selector(p_res_render)
+    p_res_render.set_defaults(handler=_make_handler("result", "cli_render"), _cmd_path="result render")
+
     p_sum = sub.add_parser("summary", help="run-summary.md 渲染")
     sub_sum = p_sum.add_subparsers(dest="summary_cmd", required=True)
     p_sum_render = sub_sum.add_parser(

@@ -2,6 +2,8 @@
 
 按需读取：`needs_resume=true`、经历过 context compaction、或接手他人 session 时，在任何新派发之前读本节。
 
+有 `--job` 时用同一个 job 文件重跑 `npc init --job "$JOB"`：它按 job_id 找回同一 run（run_id 不变，新 attempt 会被记录），绝不另起一个。
+
 先暂停所有新派发和目标工作区写入，读取 `npc status --brief`、完整 `$STATE_JSON`、`$RUN_DIR/scheduler.json`（若存在）和 run.events.jsonl，并重新加载原 DAG 与 v4-waves.json。`npc resume detect` 只供每个 change 的 phase 定位参考，不能据此直接跳进空盘面。
 
 1. 从 state 的 `plan_order`、`isolation.worktree`、`pending_coder`、`prepared`、`publication` 与 scheduler checkpoint 重建任务盘面，核对宿主任务句柄。保存的 worktree/receipt 是恢复依据，不重建、不 stash 后丢弃。

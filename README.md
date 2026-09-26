@@ -42,7 +42,7 @@ agent-spine splits an autonomous coding run into two layers with a strict contra
 ```bash
 # 1) Install the npc command straight from GitHub (no clone needed)
 uv tool install --force --from git+https://github.com/winewei/agent-spine.git npc
-npc --version          # npc 1.9.1
+npc --version          # npc 2.0.0
 
 # 2) Materialize playbooks into your host CLI (pick one)
 npc playbook install --host claude    # Claude Code: commands/skills/agents dirs

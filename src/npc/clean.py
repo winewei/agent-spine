@@ -29,7 +29,7 @@ DEFAULT_KEEP_DAYS = 14
 
 # run_ts 格式：YYYY-MM-DD-HHMM（与 paths.make_run_ts 一致）。
 # 安全护栏：只有匹配此格式的目录才会被 clean 当作 run 候选。
-RUN_TS_RE = re.compile(r"\d{4}-\d{2}-\d{2}-\d{4}")
+RUN_TS_RE = re.compile(r"\d{4}-\d{2}-\d{2}-\d{4}(?:-\d+)?")
 
 # 可清理的顶层 status 集合。in-progress 永不在此集合。
 _REMOVABLE_TOP_STATUS = frozenset({"completed", "completed-with-issues", "aborted"})

@@ -36,7 +36,9 @@ VALID_PROGRESS_STATUS = {
     "integrated",
 }
 
-VALID_TOP_STATUS = {"in-progress", "completed", "completed-with-issues", "aborted"}
+# ``blocked`` (2.0): the run stopped for external input (credentials, human
+# decision); the next attempt of the same job may reopen it. ``aborted`` is final.
+VALID_TOP_STATUS = {"in-progress", "completed", "completed-with-issues", "aborted", "blocked"}
 
 
 # ----------------------------- 读写核心 -----------------------------
@@ -315,6 +317,64 @@ def _git_head(repo_root: Path) -> str:
 # ----------------------------- CLI handlers -----------------------------
 
 
+def build_initial_state(p: _paths.Paths, plan_order: list[str], goal: str | None) -> dict:
+    """The state document ``state init-run`` creates (also used to record a
+    terminal status for a run stopped before it was planned)."""
+    p.task_log_dir.mkdir(parents=True, exist_ok=True)
+    p.run_dir.mkdir(parents=True, exist_ok=True)
+    meta = _paths.read_run_meta(p.run_dir) or {}
+    job = meta.get("job") if isinstance(meta.get("job"), dict) else {}
+    goal = goal or job.get("goal")
+
+    # session 信息从环境读取（init 命令已写入）
+    cc_session = {
+        "session_id": os.environ.get("NPC_SESSION_ID") or None,
+        "transcript_path": os.environ.get("NPC_TRANSCRIPT_PATH") or None,
+        "source": os.environ.get("NPC_SESSION_SOURCE") or "unknown",
+    }
+
+    # NPC_MODE (0.1 env path) wins; otherwise the mode npc init recorded in run.json.
+    mode = os.environ.get("NPC_MODE") or meta.get("mode") or "interactive"
+    fresh = os.environ.get("NPC_FRESH", "false") == "true"
+
+    progress = [
+        {
+            "seq": i + 1,
+            "change_id": cid,
+            "status": "pending",
+            "blocking_trend": [],
+            "categories_seen": [],
+            "rounds_since_strict_decrease": 0,
+            "phases": {},
+        }
+        for i, cid in enumerate(plan_order)
+    ]
+
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "run_ts": p.run_ts,
+        # 2.0: stable engineering-run identity (minted in run.json by npc init).
+        "run_id": meta.get("run_id"),
+        "started_at": _io.now_iso(),
+        "last_updated_at": _io.now_iso(),
+        "mode": mode,
+        "fresh": fresh,
+        "goal": goal,
+        "status": "in-progress",
+        "project_root": str(p.repo_root),
+        "proj_key": p.proj_key,
+        "git_head_at_start": _git_head(p.repo_root),
+        **(_target.metadata(p) or _target.capture(p.repo_root)),
+        "cc_session": cc_session,
+        "plan_order": plan_order,
+        # 本 run 首次召回时的经验库快照指纹（由 agent.prompt_render 回填）。
+        # 用于把 review 复发率与经验版本关联——跨 run 对比若不锁版本，比的是两个
+        # 不同的经验库。init 阶段不发网络请求，故此处只落占位。
+        "policy_snapshot_id": None,
+        "progress": progress,
+    }
+
+
 def init_run(args: argparse.Namespace) -> None:
     """state init-run：首次创建 STATE_JSON / STATE_MD / RUN_EVENTS。"""
     try:
@@ -339,60 +399,13 @@ def init_run(args: argparse.Namespace) -> None:
         )
         return
 
-    p.task_log_dir.mkdir(parents=True, exist_ok=True)
-    p.run_dir.mkdir(parents=True, exist_ok=True)
-
-    # session 信息从环境读取（init 命令已写入）
-    cc_session = {
-        "session_id": os.environ.get("NPC_SESSION_ID") or None,
-        "transcript_path": os.environ.get("NPC_TRANSCRIPT_PATH") or None,
-        "source": os.environ.get("NPC_SESSION_SOURCE") or "unknown",
-    }
-
-    mode = os.environ.get("NPC_MODE", "interactive")
-    fresh = os.environ.get("NPC_FRESH", "false") == "true"
-
-    progress = [
-        {
-            "seq": i + 1,
-            "change_id": cid,
-            "status": "pending",
-            "blocking_trend": [],
-            "categories_seen": [],
-            "rounds_since_strict_decrease": 0,
-            "phases": {},
-        }
-        for i, cid in enumerate(plan_order)
-    ]
-
     goal = (getattr(args, "goal", None) or "").strip() or None
-
-    state = {
-        "schema_version": SCHEMA_VERSION,
-        "run_ts": p.run_ts,
-        "started_at": _io.now_iso(),
-        "last_updated_at": _io.now_iso(),
-        "mode": mode,
-        "fresh": fresh,
-        "goal": goal,
-        "status": "in-progress",
-        "project_root": str(p.repo_root),
-        "proj_key": p.proj_key,
-        "git_head_at_start": _git_head(p.repo_root),
-        **(_target.metadata(p) or _target.capture(p.repo_root)),
-        "cc_session": cc_session,
-        "plan_order": plan_order,
-        # 本 run 首次召回时的经验库快照指纹（由 agent.prompt_render 回填）。
-        # 用于把 review 复发率与经验版本关联——跨 run 对比若不锁版本，比的是两个
-        # 不同的经验库。init 阶段不发网络请求，故此处只落占位。
-        "policy_snapshot_id": None,
-        "progress": progress,
-    }
-
+    state = build_initial_state(p, plan_order, goal)
     write_state(p.state_json, p.state_md, state)
     p.run_events.touch(exist_ok=True)
 
-    _io.emit({"ok": True, "state_json": str(p.state_json), "total_changes": len(plan_order)})
+    _io.emit({"ok": True, "state_json": str(p.state_json), "total_changes": len(plan_order),
+              "run_id": state.get("run_id")})
 
 
 def get(args: argparse.Namespace) -> None:
@@ -527,12 +540,22 @@ def set_progress(args: argparse.Namespace) -> None:
 
 
 def finalize(args: argparse.Namespace) -> None:
-    """state finalize：判定顶层 status。"""
+    """state finalize：判定顶层 status，并落盘结构化 EngineeringResult（2.0）。
+
+    ``--goal-complete`` / ``--goal-gap TEXT``（可重复）记录编排者对原始目标覆盖度
+    的结构化裁定；不传则保留已有裁定（或保持未评估）。
+    """
     try:
         p = _paths.load_paths(args)
         state = read_state(p.state_json)
     except (_paths.PathsError, FileNotFoundError) as e:
         _io.emit_error("env_missing", str(e), exit_code=3)
+        return
+
+    gaps = [g.strip() for g in (getattr(args, "goal_gap", None) or []) if g and g.strip()]
+    goal_complete = bool(getattr(args, "goal_complete", False))
+    if goal_complete and gaps:
+        _io.emit_error("invalid_args", "--goal-complete 与 --goal-gap 互斥", exit_code=2)
         return
 
     progress = state.get("progress") or []
@@ -566,8 +589,20 @@ def finalize(args: argparse.Namespace) -> None:
         )
         return
 
-    state["status"] = final
-    write_state(p.state_json, p.state_md, state)
+    from . import result as _result
+
+    now = _io.now_iso()
+
+    def mutate(st: dict) -> None:
+        st["status"] = final
+        st.setdefault("finished_at", now)
+        st["target_final_commit"] = _result.target_tip(p, st)
+        if goal_complete or gaps:
+            st["goal_coverage"] = {"assessed": True, "complete": not gaps, "gaps": gaps,
+                                   "assessed_at": now}
+
+    update_state(p.state_json, p.state_md, mutate)
+    doc = _result.publish_result(p)
 
     _io.emit(
         {
@@ -577,6 +612,8 @@ def finalize(args: argparse.Namespace) -> None:
             "failed": counts["failed"],
             "skipped": counts["skipped"],
             "total": counts["total"],
+            "result_status": doc["status"],
+            "result": str(_result.result_path(p)),
         }
     )
 
