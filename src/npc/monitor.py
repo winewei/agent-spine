@@ -18,6 +18,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import time
 
 from . import _io, paths, verify
@@ -358,23 +359,64 @@ def listing(doc: dict, *, now: float, open_only: bool) -> dict:
                 open=sum(1 for r in doc["agents"].values() if r["status"] in OPEN), tasks=tasks)
 
 
+# Actions whose next step is a message to the task's handle.
+ASK_KINDS = frozenset({"CHECK_IN", "CONTROL_REQUIRED"})
+
+
+def render_line(result: dict, fresh: frozenset | set = frozenset()) -> str:
+    """One plain-text line for the host's context; ``list --open`` holds the detail.
+
+    Every pending action stays on the line (the host needs its id to ack), but
+    only the fields a decision needs: id, kind, task, and the handle when the
+    next step is to ask. ``*`` marks actions that are new since the last line.
+    """
+    if result.get("stopped"):
+        return "monitor stopped"
+    actions = result.get("actions") or []
+    head = f"monitor: {result.get('active', 0)} open, {len(actions)} pending"
+    if not actions:
+        return head
+    items = []
+    for a in actions:
+        text = f"{'*' if a['id'] in fresh else ''}#{a['id']} {a['kind']} {a['agent_id']}"
+        if a["kind"] in ASK_KINDS:
+            text += " asked" if a.get("sent_at") is not None else f" -> {a['handle']}"
+        if a.get("no_progress"):
+            text += f" idle {a.get('progress_age_seconds', 0) // 60}m"
+        if a.get("observation_error"):
+            text += " probe-error"
+        items.append(text)
+    return f"{head} | {'; '.join(items)} | detail: npc monitor list --open"
+
+
+def _output(result: dict, fmt: str, fresh: frozenset | set = frozenset()) -> None:
+    if fmt == "line":
+        sys.stdout.write(render_line(result, fresh) + "\n")
+        sys.stdout.flush()
+    else:
+        _io.emit(result)
+
+
 class Emitter:
     """Decide which follow snapshots reach the host.
 
     Only new actions (or an action turning no_progress) wake the host; its own
     acks, registrations and closures never do. Unresolved actions are repeated
-    every ``remind_seconds``; an idle monitor stays silent.
+    every ``remind_seconds``; an idle monitor stays silent. ``fresh`` holds the
+    ids that caused the latest wake-up.
     """
 
     def __init__(self, remind_seconds: int):
         self.remind_seconds = remind_seconds
         self.seen: set = set()
+        self.fresh: frozenset = frozenset()
         self.last_emit: float | None = None
 
     def __call__(self, result: dict, now: float) -> bool:
         items = {(a["id"], a["kind"], a["no_progress"]) for a in result["actions"]}
         fresh = items - self.seen
         self.seen = items
+        self.fresh = frozenset(item[0] for item in fresh)
         due = (bool(items) and self.last_emit is not None
                and now - self.last_emit >= self.remind_seconds)
         if result["stopped"] or fresh or due:
@@ -428,12 +470,12 @@ def run(args: argparse.Namespace) -> None:
                 while True:
                     result = _tick(directory, repo_root, args)
                     if emit(result, time.monotonic()):
-                        _io.emit(result)
+                        _output(result, args.format, emit.fresh)
                     if result["stopped"]:
                         return
                     time.sleep(args.interval)
         elif command == "tick":
-            _io.emit(_tick(directory, repo_root, args))
+            _output(_tick(directory, repo_root, args), args.format)
         else:
             _io.emit(dict(_execute(directory, repo_root, scope, args, command), scope=scope))
     except (paths.PathsError, OSError, ValueError, subprocess.TimeoutExpired) as exc:
@@ -498,6 +540,9 @@ def add_parser(sub) -> None:
                            help="上一询问周期内证据有变化的 agent 的询问间隔")
             p.add_argument("--stalled-seconds", type=_positive, default=900)
             p.add_argument("--grace-seconds", type=_positive, default=300)
+            p.add_argument("--format", choices=["line", "json"],
+                           default="json",
+                           help="json：完整结构（默认，stdout 契约）；line：一行纯文本，供宿主 context 使用")
         if name == "follow":
             p.add_argument("--interval", type=_positive, default=60)
             p.add_argument("--remind-seconds", type=_positive, default=1800,

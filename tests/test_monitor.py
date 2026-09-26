@@ -465,3 +465,58 @@ def test_observation_taken_before_intervene_cannot_reraise_signal(tmp_path):
     monitor.tick(doc, repo_root=tmp_path, now=140,
                  observations={"bench": dict(obs(done=True), at=135)})
     assert row["pending"]["kind"] == "DONE_SIGNAL"
+
+
+# ---------------------------------------------------------------- 1.9.1: one-line output
+
+def test_line_render_keeps_every_pending_action_in_one_line(tmp_path):
+    doc = document()
+    add(doc, tmp_path, "coder")
+    add(doc, tmp_path, "reviewer", "review")
+    first = tick(doc, tmp_path, 600)["actions"]
+    ack(doc, first[1], 600)
+    result = tick(doc, tmp_path, 1600)  # coder idle; reviewer's reply deadline passed
+    coder, reviewer = result["actions"]
+    line = monitor.render_line(result, fresh={reviewer["id"]})
+    assert "\n" not in line
+    assert line == ("monitor: 2 open, 2 pending | "
+                    f"#{coder['id']} CHECK_IN coder -> host:coder idle 26m; "
+                    f"*#{reviewer['id']} CONTROL_REQUIRED reviewer -> host:reviewer idle 26m"
+                    " | detail: npc monitor list --open")
+    # The full structure stays available on demand and is several times longer.
+    assert len(line) * 2 < len(json.dumps(result))
+
+
+def test_line_render_marks_sent_inquiries_errors_and_terminal_states():
+    def action(**kw):
+        return dict(dict(id="4", kind="CHECK_IN", agent_id="coder", handle="host:coder",
+                         sent_at=None, no_progress=False, progress_age_seconds=0,
+                         observation_error=None), **kw)
+    def snap(*actions, stopped=False):
+        return dict(ok=True, stopped=stopped, active=len(actions), actions=list(actions))
+    assert monitor.render_line(snap(action(sent_at=5))) == \
+        "monitor: 1 open, 1 pending | #4 CHECK_IN coder asked | detail: npc monitor list --open"
+    assert "#4 STALL bench idle 15m probe-error |" in monitor.render_line(snap(action(
+        kind="STALL", agent_id="bench", no_progress=True, progress_age_seconds=900,
+        observation_error="exit 1")))
+    assert "#4 DONE_SIGNAL coder |" in monitor.render_line(snap(action(kind="DONE_SIGNAL")))
+    assert monitor.render_line(snap()) == "monitor: 0 open, 0 pending"
+    assert monitor.render_line(snap(stopped=True)) == "monitor stopped"
+
+
+def test_emitter_reports_fresh_ids():
+    emit = monitor.Emitter(remind_seconds=1800)
+    a1 = dict(id="1", kind="CHECK_IN", no_progress=False)
+    a2 = dict(id="2", kind="STALL", no_progress=True)
+    emit(dict(stopped=False, actions=[a1]), 0)
+    assert emit.fresh == {"1"}
+    emit(dict(stopped=False, actions=[a1, a2]), 60)
+    assert emit.fresh == {"2"}
+
+
+def test_format_defaults_to_json_contract():
+    parser = _build_parser()
+    assert parser.parse_args(["monitor", "follow"]).format == "json"
+    assert parser.parse_args(["monitor", "tick"]).format == "json"
+    assert parser.parse_args(["monitor", "follow", "--format", "line"]).format == "line"
+    assert parser.parse_args(["monitor", "tick", "--format", "line"]).format == "line"

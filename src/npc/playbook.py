@@ -5,8 +5,12 @@ agents 内容以宿主中立措辞收编到包资源 ``src/npc/playbooks/``，np
 物：任何 agent CLI 宿主通过 ``npc playbook`` 取用：
 
 - ``npc playbook list``：枚举全部 playbook（JSON）
-- ``npc playbook show <name>``：**raw markdown 到 stdout**（唯一的非 JSON stdout
-  例外，方便任意宿主把 playbook 直接拉进 context）
+- ``npc playbook show <name> [--section S]``：**raw markdown 到 stdout**（唯一的非
+  JSON stdout 例外，方便任意宿主把 playbook 直接拉进 context）
+
+按需分节（1.9.1）：``<file 去后缀>/<section>.md`` 下的文件是低频分支（恢复、
+发布回执、monitor 事件……）。它们不安装进宿主、不常驻 context，由常驻正文在
+触发条件出现时用 ``--section`` 取用，内容始终与已安装的 npc 版本一致。
 - ``npc playbook install --host claude|codex | --dest DIR``：物化到宿主的
   命令/技能目录（写盘副作用；结果 JSON 列出写入路径）
 
@@ -105,6 +109,27 @@ def read_text(pb: Playbook) -> str:
     return _root().joinpath(pb.file).read_text(encoding="utf-8")
 
 
+def _section_dir(pb: Playbook):
+    return _root().joinpath(pb.file.rsplit(".", 1)[0])
+
+
+def sections(pb: Playbook) -> list[str]:
+    """按需分节名（排序）；没有分节目录返回空列表。"""
+    d = _section_dir(pb)
+    if not d.is_dir():
+        return []
+    return sorted(f.name[:-3] for f in d.iterdir() if f.name.endswith(".md"))
+
+
+def read_section(pb: Playbook, section: str) -> str:
+    names = sections(pb)
+    if section not in names:
+        raise PlaybookError(
+            f"{pb.name} 无分节 {section!r}（可选：{', '.join(names) or '无'}）"
+        )
+    return _section_dir(pb).joinpath(f"{section}.md").read_text(encoding="utf-8")
+
+
 def list_playbooks() -> list[dict]:
     out = []
     for pb in PLAYBOOKS:
@@ -115,6 +140,9 @@ def list_playbooks() -> list[dict]:
                 "kind": pb.kind,
                 "summary": pb.summary,
                 "bytes": len(text.encode("utf-8")),
+                "sections": {
+                    s: len(read_section(pb, s).encode("utf-8")) for s in sections(pb)
+                },
             }
         )
     return out
@@ -194,15 +222,17 @@ def cli_list(args: argparse.Namespace) -> None:
 
 
 def cli_show(args: argparse.Namespace) -> None:
+    section = getattr(args, "section", None)
     try:
         pb = get(args.name)
+        text = read_section(pb, section) if section else read_text(pb)
     except PlaybookError as e:
         _io.emit_error("invalid_args", str(e), exit_code=2)
         return
     # 唯一的 raw stdout 例外：playbook 正文直接进宿主 context，不包 JSON
     import sys
 
-    sys.stdout.write(read_text(pb))
+    sys.stdout.write(text)
 
 
 def cli_install(args: argparse.Namespace) -> None:

@@ -16,12 +16,25 @@ metadata:
 > | `TodoWrite` | 同名工具 | 宿主的任务清单机制；没有则维护一份 markdown 清单 |
 > | `EnterPlanMode` / `ExitPlanMode` | plan 模式审批门 | 打印计划全文，请用户确认后继续（`--auto` 档两边都跳过） |
 > | 后台执行隔离内环（Step 3b） | Bash 工具 `run_in_background: true`，完成通知回主 session | `nohup … > <log> 2>&1 &` 记 PID 轮询；两者都没有则前台串行执行——正确但丧失流水化收益，等价于 `--serial` |
+> | 后台 monitor 通知 | `Monitor` 工具 | 至多 60 秒有界等待 + `npc monitor tick --format line` |
 
 # spine-run
 
 你负责把软件需求推进到可验证的交付。**npc 负责 Git、状态、回执和验证等机械动作，agent 负责工程判断。** 默认分派独立任务；主 session 可以按需读规格、源码、review 和日志，诊断根因、调整任务、处理冲突或直接做小修复，随后交独立 reviewer。避免重复搬运材料，不禁止理解材料。
 
-本 playbook 是 `new-plan-changes-v4` 与旧 `spine-run` 的合并版：前者的 DAG 波次 + worktree 并行 + 流水化内环是唯一执行引擎；后者的"自由目标 → 拆解 changes"作为入口保留。`new-plan-changes-v4` 已并入本 playbook，不再单独使用。
+## 本 playbook 怎么用（上下文预算）
+
+本 playbook 只在启动时调用一次。Step 0–2 只执行一次，之后主 session 常驻的只有 **Step 3 调度循环**：收单 → 补位 → 发布，直到全部 change 终态。低频分支不放进常驻正文，出现对应情况时再取对应分节，读完照做：
+
+| 触发 | 读取 |
+|---|---|
+| 多个 change 需要分析依赖（Step 2） | `npc playbook show spine-run --section plan` |
+| monitor 输出里出现需要判断的动作，或要登记 job | `npc playbook show spine-run --section monitor` |
+| 发布回执不是 `archived` | `npc playbook show spine-run --section publish` |
+| 续跑、compaction 之后、接手他人 session | `npc playbook show spine-run --section recovery` |
+| 全部终态或中止，进入收尾 | `npc playbook show spine-run --section finish` |
+
+回执遵循“结果留盘、context 只放指针”：npc 命令只回一行，正文留在 `$RUN_DIR` 下的文件里，需要时才读。monitor 的 follow 输出是一行纯文本，完整结构用 `npc monitor list --open` 按需取。
 
 ## 输入（`/spine-run` 后的参数）
 
@@ -42,42 +55,21 @@ metadata:
 | `--no-architect` | off | 跳过语义裁定，直接用机械候选波次 |
 | `--webhook URL` / `--webhook-format` | env / raw | 进度外呼（`npc notify`，永不阻塞） |
 
-**`--auto` 的硬规则（fire-and-forget）**：auto 档下你**绝不调用 AskUserQuestion**，机械失败由 npc 返回证据；工程分叉由主 agent 根据代码与测试自主决定，一路跑到底：
+**`--auto` 的硬规则（fire-and-forget）**：绝不调用 AskUserQuestion；机械失败由 npc 返回证据，工程分叉由主 agent 根据代码与测试自主决定，一路跑到底。范围决策 → 拆出来的全部 change 一次跑完；plan 确认 → 不进 plan 模式，直接 `init-run`；执行中例行决策 → 优先检查现有产物、失败证据和根因，`npc auto-decide` 只是建议，不以降低审查标准代替收敛。唯一例外：硬依赖缺失（exit 4）或需要人类凭据/外部授权时停下说明。
 
-- **范围决策**（目标拆成 N 个依赖递进的 change → 这轮跑哪些）→ **跑完整依赖链**：拆出来的全部 change 一次跑完，不挑子集、不问。
-- **plan 确认** → 不进 plan 模式，直接 `init-run`。
-- **执行中例行决策**：优先检查现有产物、失败证据和根因；调整实现、任务边界、执行体或剩余计划。`npc auto-decide` 是建议，不以降低审查标准代替收敛。
-- 唯一例外：硬依赖缺失（exit 4）或需要人类凭据/外部授权时，停下说明——这不是"决策"，是无法自主完成的客观阻塞。
-
----
-
-## 成本感知路由（模型分层，见 docs/principles.md 不变量 1 & 4）
-
-| 层 | 角色 | 跑在哪 |
-|---|---|---|
-| **执行层** | coder（implement / fix 写代码） | 由 npc 的 provider 注册表决定：默认 `claude`；在全局 `[providers.*]` 注册 deepseek / kimi / qwen / mimo 等 Anthropic 兼容端点后，用 `[coder].backend` 或 `[coder.phase].implement/fix` 路由（见 docs/configuration.md） |
-| **premium 层（决策 + 分析/验证）** | 主 session 编排、DAG 架构师裁定、`npc review run`、`/spine-analyze` | 恒 Claude / codex |
-
-原生交接路径的 implement/fix 使用宿主 agent 与其工具；headless 路径使用 `[coder]` / `[coder.phase]` 配置起子进程。按任务质量与成本选择执行体，不能因为工具只能调 CLI 就强迫丢弃原生修复上下文。
-
-**硬规则**：第三方廉价 provider **只许执行，绝不用于决策与分析/验证**。review 恒留 codex/Claude——`npc verify routing` 在代码层强制（review 与 coder 不同源）。
+**成本路由硬规则**（docs/principles.md 不变量 1 & 4）：coder（implement/fix）可以由 npc provider 注册表路由到廉价 Anthropic 兼容端点（`[coder].backend` / `[coder.phase]`）；主 session 编排、架构裁定、`npc review run`、`/spine-analyze` 恒用 Claude / codex。第三方廉价 provider **只许执行，绝不用于决策与分析/验证**，`npc verify routing` 在代码层强制。原生交接路径的 implement/fix 使用宿主 agent 与其工具，不能因为工具只能调 CLI 就强迫丢弃原生修复上下文。
 
 ---
 
 ## Step 0 — 前置检查（缺依赖立即停）
 
-- `npc --version` ≥ 1.9.0；缺或版本过低 → 提示从发布 tag 安装（`uv tool install --reinstall --from git+https://github.com/winewei/agent-spine@v<版本> npc`）并停止；开发期验证用仓库内 `uv run npc`，不要用 `--from .` 本地目录安装
-- `npc doctor` 通过；配置的 review engine 及其可执行程序/凭据必须可用（默认 codex）。缺失时在初始化前停止并提示安装或配置可用的 reviewer；不能声明“跳 review”后仍调用 `change run --from review`，也不能静默免审归档。
-- 经验层（可选，1.8）：`npc doctor` 的 `experience` 项为 warn 时只记一行降级、不阻塞——它是旁路增强。项目 `[experience].enabled=true` 时 `npc agent prompt render` 自动召回注入、`npc archive run` 自动提交轨迹，本 playbook 不需要额外步骤；主 session 只看回执里的 `experience_injected` / `experience.ok` 标量，不读经验正文，也绝不把经验给 review
-- `openspec` 可用（`openspec list --json` 是计划入口）
-- git 仓库且启动工作区 clean、位于命名分支。`npc init` 记录该分支的完整 ref 与启动提交；它是本次 run 的整合目标，可能是 feature/release 分支，绝不默认 checkout main/master。续跑保留原目标；切换分支或改写历史时先核对，不能偷偷重绑定。
-- worktree 隔离可用：Claude Code 宿主要求 `worktree.baseRef=head`（`.claude/settings.json` 或 `~/.claude/settings.json`），否则报错退出、不静默退化；其它宿主用 Bash `git worktree add`（基于 HEAD）等价实现。宿主既无 sub-agent 并发也无后台执行时，自动按 `--serial` 走 Step 3S
+- `npc --version` ≥ 1.9.1；缺或版本过低 → 提示从发布 tag 安装（`uv tool install --reinstall --from git+https://github.com/winewei/agent-spine@v<版本> npc`）并停止；开发期验证用仓库内 `uv run npc`，不要用 `--from .` 本地目录安装。
+- `npc doctor` 通过；配置的 review engine 及其可执行程序/凭据必须可用（默认 codex）。缺失时在初始化前停止；不能声明“跳 review”后仍调用 `change run --from review`，也不能静默免审归档。`experience` 项为 warn 只记一行降级；经验层由 `npc agent prompt render` / `npc archive run` 自动处理，主 session 不读经验正文，也绝不把经验给 review。
+- `openspec` 可用（`openspec list --json` 是计划入口）。
+- git 仓库且启动工作区 clean、位于命名分支。`npc init` 记录该分支的完整 ref 与启动提交，它是本次 run 的整合目标，绝不默认 checkout main/master；续跑保留原目标，不能偷偷重绑定。
+- worktree 隔离可用：Claude Code 宿主要求 `worktree.baseRef=head`，否则报错退出；其它宿主用 `git worktree add`（基于 HEAD）。宿主既无 sub-agent 并发也无后台执行时按 `--serial` 走 Step 3S。
 
-任一硬依赖缺失：用一句话告诉用户缺什么、怎么装，**不要继续**。
-
-用 **TodoWrite** 建一个贯穿全程的任务列表（init / plan / 每个 change 一项 / 收尾），实时更新。
-
----
+任一硬依赖缺失：用一句话告诉用户缺什么、怎么装，**不要继续**。用宿主任务列表建一个贯穿全程的清单（init / plan / 每个 change 一项 / 收尾），实时更新。
 
 ## Step 1 — 初始化 / 重定向
 
@@ -94,56 +86,26 @@ export RUN_DIR RUN_TS STATE_JSON RUN_T0
 ```
 
 - `state_drift.total_drifted > 0` → `npc state repair --auto`。
-- `needs_resume=true`、经历过 context compaction、或接手他人 session → 先执行下方“恢复闸门”，完成后才可跳过 Step 2 进入 Step 3；`npc resume detect` 的单个 `next_phase` 不能代表并行盘面。
-- 上述变量必须保留给后续 shell 调用；宿主每次调用使用独立 shell 时，从已保存的 `$RUN_DIR/run.json` 重新读取路径变量并 export，不能假定前一调用的 shell 变量仍存在。恢复时禁止使用 `--fresh`。
+- `needs_resume=true`、经历过 context compaction、或接手他人 session → 读 `--section recovery` 并完成恢复闸门后才可跳过 Step 2 进入 Step 3；`npc resume detect` 的单个 `next_phase` 不能代表并行盘面。恢复时禁止使用 `--fresh`。
+- 宿主每次调用使用独立 shell 时，从已保存的 `$RUN_DIR/run.json` 重新读取路径变量并 export，不能假定前一调用的 shell 变量仍存在。
 
 ### 启动 monitor（计划分析之前，整个 run 只启动一个）
 
-初始化路径后立即执行 `npc monitor tick`，创建或恢复 `$RUN_DIR/monitor.json`，随后启动 `npc monitor follow --interval 60`。它是确定性后台监控，不占常驻 LLM 编码槽位。默认询问节奏：最近 10 分钟没有新证据的 agent 每 10 分钟询问一次，证据持续变化的 agent 放宽到每 30 分钟一次；15 分钟无产出标记停滞；已发送询问给 5 分钟回复期限。follow 只在出现新动作（或动作转为无进展）时输出一行，未处理动作每 30 分钟重复提醒；主 session 自己的 register/ack/finish 不会触发输出，空闲时不输出心跳。
+初始化后立即执行 `npc monitor tick`，创建或恢复 `$RUN_DIR/monitor.json`，随后在后台启动 `npc monitor follow --interval 60 --format line`（Claude Code 用 `Monitor(command="npc monitor follow --interval 60 --format line")`，到期后立即重新挂接）。它是确定性后台监控，不占 LLM 槽位；只在出现新动作时输出**一行**，例如：
 
-使用宿主**实际可用**的后台通知机制将输出交回主 session；Claude Code 有 `Monitor` 时用 `Monitor(command="npc monitor follow --interval 60")`。Monitor 有时长上限的版本在收到到期通知后立即重新挂接；待处理动作保存在 `monitor.json`，每次输出都包含全部未处理动作，重新挂接不会丢失事项。Codex 或其它宿主若无推送机制，主 session 使用至多 60 秒的有界等待，并执行 `npc monitor tick` 处理到期事件。仅 `nohup` 写日志不会唤醒 session，不能据此宣称主动监控已工作。需要独立 monitor agent 时按事件启动短诊断任务，并计入真实槽位预算。不要另写等待 RESULT 文件或后台日志的临时监控脚本，用下方的 `--done` / `--kind job` 登记代替。
+```
+monitor: 3 open, 2 pending | *#12 CHECK_IN impl-003 -> agent:a1b2; #9 DONE_SIGNAL review-002 | detail: npc monitor list --open
+```
 
-**覆盖所有执行体**：每次派发后立即登记唯一任务 id、原生任务句柄、角色和专属产物。分析、架构、implement、review、fix、测试、headless 子进程都必须登记，不能只登记 coder。同一 agent 的新任务使用新 id；不要把 monitor 自己登记进去。
+每行都包含全部未处理动作的 id，足以 ack；`*` 是本次新增。只有这一行进 context，需要判断时再读 `--section monitor`。无推送机制的宿主用至多 60 秒有界等待 + `npc monitor tick --format line`；仅 `nohup` 写日志不会唤醒 session，不能据此宣称主动监控已工作。不要另写等待 RESULT 文件或日志的临时监控脚本。
+
+**覆盖所有执行体**：每次派发后立即登记唯一任务 id、原生任务句柄、角色和专属产物。分析、架构、implement、review、fix、测试、headless 子进程都必须登记；同一 agent 的新任务使用新 id；不要把 monitor 自己登记进去。远程作业、长测试登记为 `--kind job`（见 `--section monitor`）。
 
 ```bash
 npc monitor register --id "$JOB_ID" --role "$ROLE" --handle "$AGENT_HANDLE"   --worktree "$WT" --artifact "$RESULT_FILE" --done "test -s '$RESULT_FILE'"
 ```
 
-非编码任务可省略 `--worktree`，登记分析结论、review JSON 或测试结果文件；产物路径可在生成前登记，多个产物重复传 `--artifact`。有 RESULT 或结果文件的任务加 `--done`，退出码为 0 时产生 `DONE_SIGNAL`，结果落盘即通知主 session。内部 review/fix 子进程由其持久 npc worker 的句柄负责，不对同一个进程重复登记；角色/阶段与日志路径保存在 scheduler。`monitor.json` 是监控清单；`scheduler.json` 仍由主 session 唯一写入。
-
-远程作业、长测试等**无法询问**的执行体登记为 job：由派发它的 agent 在 RESULT 中回报主机、日志、pid 文件与完成标记，主 session 登记后该 agent 直接返回，不在自身会话里等待。
-
-```bash
-npc monitor register --id "$JOB_ID" --kind job --role bench --handle "ssh:$HOST" \
-  --probe "ssh $HOST 'wc -l < $LOG'" --done "ssh $HOST 'grep -q BENCH_DONE $LOG'" \
-  --alive "ssh $HOST 'kill -0 \$(cat $PIDFILE)'" [--deadline-seconds 14400]
-```
-
-`--probe` 输出随工作推进变化的进度标记（结果行数、已完成条目数、结果文件大小），输出变化计为进展，首次读数只作基线；`--alive` 连续两次失败才产生 `EXITED_SIGNAL`；job 必须提供 `--done`、`--alive`、`--deadline-seconds` 至少其一。命令在登记时的工作目录中以 `sh -c` 执行，单次超时默认 30 秒（`--probe-timeout`），在锁外执行，不阻塞 ack/register。进度标记必须度量工作产物，不能用 agent 转录的 mtime/size。不属于任何 run 的长期任务用 `--owner NAME` 登记到 host 作用域（`~/task_log/_monitor/NAME`），该作用域的所有 monitor 命令都带同一 `--owner`。
-
-**处理事件**：
-
-1. `CHECK_IN`：对所有到期 agent 并行发送宿主原生询问：“最近一个检查周期完成了什么？提供 commit、diff、测试/review 或分析产物；当前阻塞是什么？下一步和预计完成时间？”发送成功后才执行 `npc monitor ack --action-id ID --decision sent`。相同 action id 不重复询问，`sent_at` 非空表示已发；发不出去先核对句柄和原任务，不能伪造 sent。
-2. 收到回复后检查实际证据。`--decision progress --note '证据与结论'` 记录核验；长测试/调研仍合理时 `--decision wait --wait-seconds 600 --note '进程/阶段证据、原因与期限'`，最多等待 900 秒，到期重新询问。ack 和“仍在工作”的口头报告不会重置实际产出时钟。
-3. `no_progress=true` 或 `CONTROL_REQUIRED`：主 session 必须诊断，不只转述警报。检查卡住的进程、依赖、重复 findings 和测试；选择缩小任务、补充信息、调整方案、继续有界等待或接替执行，并用 `--decision intervene --note '证据、已采取动作与下一检查点'` 落账。`CONTROL_REQUIRED` 只有询问确已发送且到期未处理才产生；即使发现新产物，也须核验并给出判断。
-4. `STALL`（job 无进展）：检查远端日志、进程与目标系统负载，用 `--decision progress|wait|intervene --note` 落账；判定假死时按第 6 条接替。
-5. `DONE_SIGNAL` / `EXITED_SIGNAL` / `DEADLINE`：monitor 已停止探测该任务，不会自行关闭它。主 session 核验结果或退出原因后执行 `npc monitor finish --id ID --result done|failed --note '证据'` 或 `npc monitor cancel --id ID --note '原因'`；重启作业或需要继续观察时 `--decision intervene --note`（恢复探测；延期同时传 `--deadline-seconds N`），暂不能判定时用有界 `--decision wait`。终态信号不能以 `progress` 处理。
-6. 停止/接替前保存 worktree、提交、RESULT 和日志，确认原执行体已退出；未知状态仍占位。核验收单或退出后执行 `npc monitor finish --id ID --note '收单/退出证据'`；接替者使用新 id，并继续原 worktree。monitor 不自行 kill、不改 Git 或业务 state、不替主 session 发布代码。
-
-文件内容/专属 worktree HEAD 或 diff 变化只是工作证据，不保证有用收敛；证据持续变化只把询问间隔放宽到 30 分钟，不取消询问。转录 mtime、心跳、工具调用次数、共享目标 HEAD 不算实际进展；同根因反复修复须主动重排。未跟踪文件需通过专属 `--artifact` 登记。`npc watch --once` 可补充发现宿主任务，核对是否漏登；不能将其它 session 的历史任务加入本 run。
-
-恢复时先执行 `npc monitor tick` 补算离线期间到期的截止时间与终态，再用 `npc monitor list --open` 核对未关闭任务，然后重新连接唯一后台 monitor（重复 follow 会被拒绝）；清单、待处理 action id、发送记录和期限都会保留。先核验宿主存活任务与 monitor/scheduler 清单是否一致，再续闸；不得重新注册来重置计时。run 完成或中止时核实所有执行体退出、逐项 finish/cancel，确认 `npc monitor list --open` 为空后执行 `npc monitor stop`，follow 会退出。不要因一次扫描没有 agent 就认为 run 已完成。
-
-### 恢复闸门（禁止先清空集合）
-
-先暂停所有新派发和目标工作区写入，读取 `npc status --brief`、完整 `$STATE_JSON`、`$RUN_DIR/scheduler.json`（若存在）和 run.events.jsonl，并重新加载原 DAG 与 v4-waves.json。`npc resume detect` 只供每个 change 的 phase 定位参考，不能据此直接跳进空盘面。
-
-1. 从 state 的 `plan_order`、`isolation.worktree`、`pending_coder`、`prepared`、`publication` 与 scheduler checkpoint 重建任务盘面，核对宿主任务句柄。保存的 worktree/receipt 是恢复依据，不重建、不 stash 后丢弃。
-2. 原任务仍运行时重新连接，不能再派同一任务。转录 mtime 只能说明活动，不能证明业务推进；用新增提交、阶段迁移、测试/审查产物核对推进。未知状态先保留占位，核实后再补位。
-3. `prepared` 存在 → 重试 `npc integrate --prepared --seq N`；已快进但未归档时会续归档，不重跑 implement/fix。`pending_coder` 存在 → 接回原原生 agent 或核验其 RESULT/manifest；相同 handoff 回执不是新的任务。
-4. `npc change run --isolated --seq N` 自动恢复阶段：已完成 fix 不重复执行，已完成 review 按 blocking 进入 fix 或准备发布。存在未装订的提交或脏 worktree 时保留现场，主 agent 按需检查并补齐回执，不丢弃产物从头来。
-5. 老版本已整合的 change 可沿用兼容命令完成；新隔离协议必须有可核验的启动目标。旧 run 没记录分支时，不能从当前 checkout 猜原目标。不要混用旧内环和新隔离内环来处理同一 change。
-6. FINISHED 只包含确证的终态。DONE 必须有目标分支上的整合证据，不能只看 implement 完成。恢复后检查容量并续闸。
+非编码任务可省略 `--worktree`，登记分析结论、review JSON 或测试结果文件；有结果文件的任务加 `--done`，结果落盘即产生 `DONE_SIGNAL`。内部 review/fix 子进程由其持久 npc worker 的句柄负责，不重复登记。`monitor.json` 是监控清单；`scheduler.json` 仍由主 session 唯一写入。
 
 ---
 
@@ -153,25 +115,19 @@ npc monitor register --id "$JOB_ID" --kind job --role bench --handle "ssh:$HOST"
 
 **A. 已存在的 change 名** → `openspec list --json` 确认每个都存在且 in-progress，NODES = 参数列表。
 
-**B. 自由目标 → 拆解**（复杂目标可交给 architect 类 sub-agent；主 session 按需读规格并对拆解负责）：
-1. 把目标拆成若干**单一职责**的 change（每个 change 一件可独立 implement+review+archive 的事；过大就再拆），显式给出 change 间依赖。
-2. 为每个 change 起 kebab-case 名，逐个 `openspec new change "<name>"` 生成脚手架，补齐 implement 所需 artifact（参照工程内 openspec schema：proposal / specs / design / tasks），全部 `openspec validate <id> --strict` 通过后一次 commit。
-3. NODES = 新建的全部 change。交互档把清单与每个 change 一句话意图列给用户确认；auto 档不确认。
+**B. 自由目标 → 拆解**（复杂目标可交给 architect 类 sub-agent；主 session 对拆解负责）：把目标拆成若干**单一职责**、可独立 implement+review+archive 的 change，显式给出依赖；逐个 `openspec new change "<name>"` 生成脚手架并补齐 artifact（proposal / specs / design / tasks），全部 `openspec validate <id> --strict` 通过后一次 commit。NODES = 新建的全部 change；交互档把清单与每个 change 一句话意图列给用户确认。
 
-**C. 空输入** → NODES = `openspec list --json` 的全部 in-progress change。交互档若 NODES 为空则 AskUserQuestion 问要做什么并转 B；auto 档 NODES 为空直接结束并说明。
+**C. 空输入** → NODES = `openspec list --json` 的全部 in-progress change。交互档若为空则 AskUserQuestion 问要做什么并转 B；auto 档为空直接结束并说明。
 
 ### 2.1 真实依赖与整合风险
 
-`|NODES| == 1` 时不派分析 agent：令 `CID` 为唯一 change、`FINAL_WAVES = [[CID]]`，但必须先写入 Step 3 要读取的 DAG 文件，再进入 2.2：
+`|NODES| == 1` 时不派分析 agent：令 `CID` 为唯一 change、`FINAL_WAVES = [[CID]]`，先写入 Step 3 要读取的 DAG 文件，再进入 2.2：
 
 ```bash
 jq -n --arg cid "$CID" '{nodes:[$cid],edges:[],files:{},tie_break:{}}' > "$RUN_DIR/v3-dag-extract.json"
 ```
 
-多个 change 时按复杂度选择分析深度；已有可信 DAG 时增量核对，不固定重派分析团队：
-
-1. 简单变更由主 session 直接核对 DAG；复杂目标才 spawn `dag-analyst`（Explore，只读）：按需读变更文档 → 抽 nodes/edges/files（目录级条目用 Grep 展开）→ 跑 `npc plan waves` → 写 `<run_dir>/v3-dag-extract.json` → 回一行 RESULT。校验 nodes 完整、candidate.waves 展平=NODES；失败重发一次，再失败 `--auto` 才降级自抽（记 `dag_extract_fallback`），交互档真停。
-2. 仅在耦合复杂或证据冲突时 spawn 架构审查（可并行，只读；`--no-architect` 跳过）：A=senior-system-architect 查语义耦合（共享状态/时序/不变量），B=senior-code-developer 查落地冲突（真实文件/import/构建）。输出具体依赖对及理由：真正需要上游代码/契约的关系放入 edges；必须先后执行的语义约束放入 ordering_edges。共享注册表、同文件不同修改只列为整合风险，不能自动升级成依赖。主 agent 核对证据后裁定，得 FINAL_WAVES 展示计划。
+多个 change 时读 `--section plan`，按其中的分析深度规则产出 `v3-dag-extract.json`（nodes / edges / files / ordering_edges）与 FINAL_WAVES。
 
 ### 2.2 落地
 
@@ -182,7 +138,7 @@ DAG="$RUN_DIR/v3-dag-extract.json"
 jq '.edges = (((.edges // []) + (.ordering_edges // [])) | unique)' "$DAG" > "$DAG.tmp" && mv "$DAG.tmp" "$DAG"
 ```
 
-先打印 Wave Plan Summary（波次、拆分理由、降级/提级）。交互档此时 ExitPlanMode 并等待批准；若用户调整计划，返回 2.1 重算并重新确认，**批准前不能执行 `state init-run`**。`--auto` 跳过审批。仅在计划获批（或 auto 档确定）后执行：
+先打印 Wave Plan Summary（波次、拆分理由、降级/提级）。交互档此时 ExitPlanMode 并等待批准；用户调整计划则返回 2.1 重算并重新确认，**批准前不能执行 `state init-run`**。`--auto` 跳过审批。计划获批（或 auto 档确定）后：
 
 ```bash
 npc state init-run --plan-order "$(jq -nc --argjson w "$FINAL_WAVES" '$w|add')" --goal "<用户的原始目标一句话>"
@@ -193,15 +149,15 @@ echo "$FINAL_WAVES" > "$RUN_DIR/v4-waves.json"
 
 ---
 
-## Step 3 — 每个 worktree 承载完整开发闭环
+## Step 3 — 调度循环（常驻部分）
 
-**生命周期**：implement → 独立 review → fix → 再 review，全部在同一个 change worktree 内进行。通过后进入发布队列；组合测试也在 worktree 内，最后才短暂持有目标工作区锁进行快进与 archive。多个 change 的 review/fix 可以同时推进，不能只并行 implement。
+**生命周期**：implement → 独立 review → fix → 再 review，全部在同一个 change worktree 内进行；通过后进入发布队列，组合测试也在 worktree 内，最后才短暂持有目标工作区锁快进与 archive。多个 change 的 review/fix 可以同时推进，不能只并行 implement。
 
-**容量**：MAX_PARALLEL 默认 4，`--serial` 设为 1。implement、原生 fixer、headless review/fix 共享预算。原生 agent 返回交接后要释放/关闭其执行槽位，再启动该 change 的 reviewer；不要在等待 agent 内嵌 reviewer 子进程却把它算作免费容量。另有独立 provider 额度时可以明确调整预算，但不能把同一套 4 槽计算两遍。
+**容量**：MAX_PARALLEL 默认 4，`--serial` 为 1；implement、原生 fixer、headless review/fix 共享预算。原生 agent 返回交接后要释放其执行槽位，再启动该 change 的 reviewer；不要把等待型 agent 算作免费容量。
 
-集合：ACTIVE 包含正在 implement/review/fix 的 change（INNER 为其中的内环子集）；PENDING 是已验证待发布项；DONE 是已发布到启动分支的项；FINISHED 是 archived/skipped/failed。任何失败未明确裁定前不算终态，尤其锁竞争、目标推进、待解决冲突、待人工/agent 决策。
+**集合**：ACTIVE = 正在 implement/review/fix（INNER 为其中的内环子集）；PENDING = 已验证待发布；DONE = 已发布到启动分支；FINISHED = archived/skipped/failed。任何失败未明确裁定前不算终态，尤其锁竞争、目标推进、待解决冲突、待人工/agent 决策。
 
-检查点保留每个 CID 的 SEQ、worktree、任务句柄、阶段、RESULT、manifest 和待执行动作。spawn 前记 launching，获得句柄后立即更新；收单先保存完整产物再改集合。主 session 是 scheduler checkpoint 的唯一写入者：
+**检查点**：保留每个 CID 的 SEQ、worktree、任务句柄、阶段、RESULT、manifest 和待执行动作。spawn 前记 launching，获得句柄后立即更新；收单先保存完整产物再改集合。主 session 是 scheduler checkpoint 的唯一写入者：
 
 ```bash
 jq -n --arg run_ts "$RUN_TS" --argjson done "$DONE" --argjson finished "$FINISHED" \
@@ -221,7 +177,7 @@ READY=$(jq -c --argjson done "$DONE" --argjson active "$ACTIVE" --argjson pendin
         | npc plan ready | jq -r '.ready[]')
 ```
 
-`integration_risks` 提示文件重叠，不阻止隔离开发；`dep-pending` 仍是硬依赖。ACTIVE∪PENDING 只排除重复派单。不得删除真实依赖来填槽；若长期低利用率，检查依赖依据、任务切分和整合热点并主动重排。共享注册表可以由 agent 合并不同注册项，只有反复冲突且收益明确时再改成分片结构。
+`integration_risks` 提示文件重叠，不阻止隔离开发；`dep-pending` 仍是硬依赖。ACTIVE∪PENDING 只排除重复派单。不得删除真实依赖来填槽；长期低利用率时检查依赖依据、任务切分和整合热点并主动重排。
 
 ### 3b. 启动或恢复一个 change
 
@@ -233,77 +189,32 @@ READY=$(jq -c --argjson done "$DONE" --argjson active "$ACTIVE" --argjson pendin
 npc change run --seq "$SEQ" --isolated --handoff ${AUTO:+--auto} > "$RUN_DIR/change-run-$SEQ.json" 2> "$RUN_DIR/change-run-$SEQ.stderr.log"
 ```
 
-- `needs-coder` → 读取 `phase/round/worktree/prompt_file/prompt`，派 Codex 或 Claude Code 原生 coder 在**给出的同一个 worktree** 中完成任务，不再另建一个隔离分支。允许其读源码、运行调试工具、补测试、验证假设。复用合适的现有 agent 可以保留修复上下文。保存句柄，确认无同一任务存活后才重派。
-- 要求 coder 提交实际代码，保存 RESULT 文件（implement 使用 tasks；fix 使用 fixed/categories_scanned/regressions_added）和 manifest。两种阶段都必须返回 commit、tests、summary；主 agent 可以查看必要证据，不能把自报 pass 当真实测试。
-- 收单后释放该原生执行槽位，再用 `npc change run --seq "$SEQ" --isolated --handoff --result-file "$RESULT_FILE" --manifest "$MANIFEST"` 继续。npc 校验产物并独立 review；需要下一轮 fix 时再次返回 needs-coder。不要每次加 `--from review`，它会强制新增一轮而失去自动续跑语义。
-- 已有 implementer worktree 可用首次 `--worktree "$WT" --result-file "$RESULT_FILE" --manifest "$MANIFEST"` 接入，不必先把未审查实现放到目标分支。
+- `needs-coder` → 读取 `phase/round/worktree/prompt_file/prompt`，派原生 coder 在**给出的同一个 worktree** 中完成任务，不另建隔离分支。允许其读源码、运行调试工具、补测试、验证假设；复用合适的现有 agent 可以保留修复上下文。保存句柄，确认无同一任务存活后才重派。
+- coder 必须提交实际代码，保存 RESULT 文件（implement 用 tasks；fix 用 fixed/categories_scanned/regressions_added）和 manifest，都返回 commit、tests、summary；主 agent 可以查看必要证据，不能把自报 pass 当真实测试。
+- 收单后释放该原生执行槽位，再用 `npc change run --seq "$SEQ" --isolated --handoff --result-file "$RESULT_FILE" --manifest "$MANIFEST"` 继续。npc 校验产物并独立 review；需要下一轮 fix 时再次返回 needs-coder。不要每次加 `--from review`，它会强制新增一轮。
+- 已有 implementer worktree 可用首次 `--worktree "$WT" --result-file "$RESULT_FILE" --manifest "$MANIFEST"` 接入。
 
-**headless 替代路径**：不加 `--handoff`，npc 在独立 worktree 内按 `[coder]` 调 implement/fix 子进程，review 仍是独立验证。用宿主后台任务运行，按实际占用计入同一并发预算；不要求先整合，也不持目标分支锁等待模型。
+**headless 替代路径**：不加 `--handoff`，npc 在独立 worktree 内按 `[coder]` 调 implement/fix 子进程，review 仍是独立验证。用宿主后台任务运行，按实际占用计入同一并发预算。
 
 ### 3c. 发布已准备产物
 
-`ready-to-integrate` → ACTIVE/INNER 移除、PENDING 加入，先保存回执，然后运行：
+`ready-to-integrate` → ACTIVE/INNER 移除、PENDING 加入，先保存回执，然后：
 
 ```bash
 npc integrate --seq "$SEQ" --prepared
 ```
 
-- npc 把启动目标分支的新提交合到 change worktree，按补丁身份（`git patch-id --verbatim`，不含 `[integrate].derived` 声明的派生文件）校验与已审查补丁一致，并在组合树复跑测试；目标分支在此期间可供其他发布使用。当前候选已验证时复用测试回执。仅派生文件冲突时 npc 取目标分支版本并执行 `[integrate].regenerate` 重新生成，不进入 needs-resolution。
-- 组合测试后短暂抢目标锁，复核启动分支身份、基线 HEAD 和干净状态，快进发布并 archive。保存原 implement/fix 提交链，无需 hash 翻译。worktree 保留供核查，不自动删除。
-- `archived` → PENDING 移除，DONE/FINISHED 加入并续闸。正常路径只有此处满足下游代码依赖。
-- `target-busy` / `target-moved` 表示**启动目标**忙或已推进；保存 PENDING，稍后重试 publication，不重跑 implement。`archive-failed` 同样保留发布回执，解决原因后重试归档。
-- `needs-review` → 补丁已改变，转 ACTIVE/INNER，在现有 worktree 执行 `change run --isolated --handoff --from review`。npc 记录最近一次 clean 审查的补丁，复审只针对两版补丁的集成增量（`round-N.integration-delta.diff`），已审查且未变化的代码不再作为 blocking 范围。
-- `needs-resolution`（`reason` 为 merge-conflict / merge-failed / regenerate-failed / regenerate-touched-sources / regenerate-incomplete / hook-modified-worktree / merge-would-overwrite-ignored，`conflicts` / `files` 列出涉及文件；`abort_incomplete` 表示合并中止后 worktree 未恢复干净，须先核对并整理；hook-modified-worktree 表示合并提交已生成、hook 改写的文件未提交，须核对后提交）/ `tests-failed` → agent 读取必要诊断，在原 worktree 合入最新目标提交、解决冲突或测试回归并提交，然后按上述路径做增量复审；禁止丢弃原实现或改在目标工作区裸写。同一派生文件（锁文件、生成代码）反复冲突时，在工程 `.npc/config.toml` 声明 `[integrate]`。
-- `needs-recovery` → 核对未装订提交和回执，优先恢复已有工作。`needs-decision` → 主 agent 按证据选择修复、调整执行体、拆分任务或解释阻塞（交互档在 blocking 连续两轮未严格下降，或 blocking 轮数每累计 3 轮时进入该决策点，用于识别技术路线层面的不收敛）；不得仅因轮数上限把 critical/high 问题当可接受并归档。
-- `aborted` → 停止调度并保留所有产物。未知错误先诊断，不猜成成功或终态失败。准备/发布命令可重试；不要绕过锁或使用 force。
+`archived` → PENDING 移除，DONE/FINISHED 加入并续闸；正常路径只有此处满足下游代码依赖。其它任何 `status`（`target-busy` / `target-moved` / `archive-failed` / `needs-review` / `needs-resolution` / `tests-failed` / `needs-recovery` / `needs-decision` / `aborted`）读 `--section publish` 按对应分支处理；不要绕过锁或使用 force。
 
 ### 3d. 工程反馈与主动重排
 
-空槽持续存在、整合风险集中、同根因重复 review/fix、阶段超时或需求变化，都是重新检查计划的信号。主 agent 可以按需读规格、源码、review/findings、测试日志；需要独立意见时派有明确边界的分析任务，避免每次都重读所有 N×4 文档或固定派双架构师。
+空槽持续存在、整合风险集中、同根因重复 review/fix、阶段超时或需求变化，都是重新检查计划的信号。按需读规格、源码、review/findings、测试日志；需要独立意见时派有明确边界的分析任务，避免每次都重读所有文档或固定派双架构师。优先保持原 coder 的修复上下文，必要时换执行体；小改动可由主 agent 在该 worktree 直接修复，再交独立 reviewer。一行回执只是为了省 context，不得让 agent 为遵守一行摘要而放弃诊断能力。
 
-优先保持原 coder 的修复上下文，必要时换执行体；复用已完成阶段与固定提交的验证结果。小改动可由主 agent 在该 worktree 直接修复，再交独立 reviewer。不得让 agent 为遵守一行摘要而放弃诊断能力。
-
-记录执行时长、等依赖/容量/发布时间、重复阶段和失败原因。`max(实现工作量/容量, 内环工作量/容量)` 只是资源下界，不能当墙钟承诺；关键路径、尾部收尾、限流与组合验证也要计入。收尾报告区分实测和估算。
+记录执行时长、等依赖/容量/发布时间、重复阶段和失败原因。`max(实现工作量/容量, 内环工作量/容量)` 只是资源下界，不能当墙钟承诺。FINISHED 覆盖全部 NODES 后读 `--section finish` 收尾。
 
 ## Step 3S — 单执行槽位
 
 `--serial` 仅把 MAX_PARALLEL 设为 1，仍使用 Step 3 的 worktree 闭环、回执和发布协议。宿主没有原生 agent 时使用 headless 路径；没有后台能力时前台运行。不要恢复为“先把所有实现放到共享工作区，再串行修复”。
-
-## Step 4 — 收尾
-
-```bash
-npc state finalize && npc summary render && npc index append
-# 已核验并 finish/cancel 所有执行体，list --open 为空后停止监控
-npc monitor list --open
-npc monitor stop
-npc cost --since "$RUN_T0"
-```
-
-`finalize` 若因 `needs-user-decision` 返回 exit 1：先把悬而未决的 change 按 3d 的决策分支处理掉再重跑 finalize。收尾汇报对照 run-summary.md 的 Goal Coverage 段提示用户核对缺口（逐 change 全过 ≠ 组合达标），缺口给出新 change 建议清单。
-
-## Output（给用户的最终汇报）
-
-```
-## Spine Run 完成：<final_status>
-
-**模式**：auto | interactive        **调度**：pipeline（max-parallel N）| serial
-**计划**：N changes / L 层           **结果**：archived A / failed F / skipped S
-**用时**：<duration>                 **并发峰值**：<max parallel 实际达到>
-
-### 各 change
-- change-a  archived @ <commit>  (review 2 轮, 层 1)
-- change-b  archived @ <commit>  (review 0 轮, 层 1)
-- change-c  skipped — <reason>
-
-### Goal Coverage 缺口
-- <run-summary.md 指出的组合缺口与建议新 change>
-
-### 轨迹与日志（供后续分析）
-- 状态：<state_json 路径>
-- 汇总：<run-summary.md 路径>
-- 跨 run 指标：~/task_log/_telemetry/
-- 想优化本 harness？跑 `/spine-analyze`
-```
 
 ---
 

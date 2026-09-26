@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import importlib.metadata
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -17,6 +18,10 @@ import pytest
 
 from npc import doctor
 from npc import paths as _paths
+
+# chmod 000 does not stop root from reading, so unreadable-file cases need a non-root user.
+needs_non_root = pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0, reason="root ignores file permissions")
 
 
 # ============================================================
@@ -275,6 +280,7 @@ def test_schema_missing_is_warn(tmp_path: Path):
     assert sc["required"] is False
 
 
+@needs_non_root
 def test_schema_unreadable_is_warn(tmp_path: Path):
     home = _make_home(tmp_path, schema=True)
     schema_path = home / "task_log" / _paths.SCHEMA_FILENAME
@@ -332,6 +338,7 @@ def test_mimo_env_missing_is_warn_not_missing(tmp_path: Path):
     assert m["required"] is False
 
 
+@needs_non_root
 def test_mimo_env_unreadable_is_warn(tmp_path: Path):
     home = _make_home(tmp_path, mimo=True)
     mimo_path = home / ".config" / "npc" / "mimo.env"
