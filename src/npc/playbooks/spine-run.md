@@ -63,7 +63,7 @@ metadata:
 
 ## Step 0 — 前置检查（缺依赖立即停）
 
-- `npc --version` ≥ 1.9.1；缺或版本过低 → 提示从发布 tag 安装（`uv tool install --reinstall --from git+https://github.com/winewei/agent-spine@v<版本> npc`）并停止；开发期验证用仓库内 `uv run npc`，不要用 `--from .` 本地目录安装。
+- `npc --version` ≥ 1.10.0；缺或版本过低 → 提示从发布 tag 安装（`uv tool install --reinstall --from git+https://github.com/winewei/agent-spine@v<版本> npc`）并停止；开发期验证用仓库内 `uv run npc`，不要用 `--from .` 本地目录安装。
 - `npc doctor` 通过；配置的 review engine 及其可执行程序/凭据必须可用（默认 codex）。缺失时在初始化前停止；不能声明“跳 review”后仍调用 `change run --from review`，也不能静默免审归档。`experience` 项为 warn 只记一行降级；经验层由 `npc agent prompt render` / `npc archive run` 自动处理，主 session 不读经验正文，也绝不把经验给 review。
 - `openspec` 可用（`openspec list --json` 是计划入口）。
 - git 仓库且启动工作区 clean、位于命名分支。`npc init` 记录该分支的完整 ref 与启动提交，它是本次 run 的整合目标，绝不默认 checkout main/master；续跑保留原目标，不能偷偷重绑定。

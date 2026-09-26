@@ -8,7 +8,7 @@ agents 内容以宿主中立措辞收编到包资源 ``src/npc/playbooks/``，np
 - ``npc playbook show <name> [--section S]``：**raw markdown 到 stdout**（唯一的非
   JSON stdout 例外，方便任意宿主把 playbook 直接拉进 context）
 
-按需分节（1.9.1）：``<file 去后缀>/<section>.md`` 下的文件是低频分支（恢复、
+按需分节（1.10.0）：``<file 去后缀>/<section>.md`` 下的文件是低频分支（恢复、
 发布回执、monitor 事件……）。它们不安装进宿主、不常驻 context，由常驻正文在
 触发条件出现时用 ``--section`` 取用，内容始终与已安装的 npc 版本一致。
 - ``npc playbook install --host claude|codex | --dest DIR``：物化到宿主的

@@ -467,7 +467,7 @@ def test_observation_taken_before_intervene_cannot_reraise_signal(tmp_path):
     assert row["pending"]["kind"] == "DONE_SIGNAL"
 
 
-# ---------------------------------------------------------------- 1.9.1: one-line output
+# ---------------------------------------------------------------- 1.10.0: one-line output
 
 def test_line_render_keeps_every_pending_action_in_one_line(tmp_path):
     doc = document()
