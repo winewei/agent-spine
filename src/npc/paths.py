@@ -21,9 +21,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import secrets
 import subprocess
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -33,6 +34,23 @@ RUN_JSON_FILENAME = "run.json"
 ACTIVE_JSON_FILENAME = "active.json"
 RUN_JSON_SCHEMA_VERSION = 1
 ACTIVE_JSON_SCHEMA_VERSION = 1
+# run.events.jsonl envelope version (2.0): every run-level event line carries
+# ``ts`` + ``event`` and, when known, the correlation ids run_id / job_id /
+# attempt_id (see events.append_event). Recorded in run.json, not per line.
+EVENTS_SCHEMA_VERSION = 1
+
+# run.json fields owned by the run itself rather than derived from Paths: they
+# survive every rewrite (resume, re-init) so identity never changes silently.
+_PRESERVED_RUN_FIELDS = (
+    "run_id",
+    "created_at",
+    "events_schema_version",
+    "job",
+    "mode",
+    "agent_attached_at",
+    "supersedes",
+    "superseded_by",
+)
 
 
 @dataclass(frozen=True)
@@ -132,6 +150,31 @@ def make_run_ts(now: datetime | None = None) -> str:
     return dt.strftime("%Y-%m-%d-%H%M")
 
 
+def unique_run_ts(task_log_dir: Path, now: datetime | None = None) -> str:
+    """A run_ts not used by any existing run in ``task_log_dir``.
+
+    run_ts has minute resolution; two runs created within one minute would share
+    a run directory (and the second would inherit the first run's run.json).
+    A numeric suffix (``-2``, ``-3`` …) keeps them apart.
+    """
+    ts = make_run_ts(now)
+    candidate, n = ts, 1
+    while (task_log_dir / candidate).exists() or (task_log_dir / f"{candidate}-plan-state.json").exists():
+        n += 1
+        candidate = f"{ts}-{n}"
+    return candidate
+
+
+def new_run_id(now: datetime | None = None) -> str:
+    """Globally unique engineering-run identity (2.0).
+
+    UTC time prefix for sorting plus 48 random bits; deliberately independent of
+    the local path, proj_key and run_ts, which are local storage details.
+    """
+    dt = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    return f"run-{dt.strftime('%Y%m%dT%H%M%SZ')}-{secrets.token_hex(6)}"
+
+
 def task_log_dir_for(repo_root: Path, home: Path | None = None) -> Path:
     """根据 repo_root 派生 ``<home>/task_log/<proj_key>``。"""
     h = home or Path.home()
@@ -212,24 +255,57 @@ def active_json_path_for(task_log_dir: Path) -> Path:
     return task_log_dir / ACTIVE_JSON_FILENAME
 
 
-def write_run_json(paths: Paths) -> Path:
-    """把 Paths 写入 ``<run_dir>/run.json``，返回写入路径。"""
+def _atomic_write_json(target: Path, payload: dict) -> None:
+    tmp = target.with_suffix(f"{target.suffix}.{os.getpid()}.tmp")
+    try:
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        os.replace(tmp, target)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+
+
+def write_run_json(paths: Paths, **updates) -> Path:
+    """把 Paths 写入 ``<run_dir>/run.json``（原子替换），返回写入路径。
+
+    Rewrites keep the run's own identity (``run_id``, job binding, …) and its
+    recorded integration target; ``updates`` set or replace run-owned fields.
+    A run.json without ``run_id`` (1.x) receives one on its first 2.0 write.
+    """
     target = run_json_path_for(paths.task_log_dir, paths.run_ts)
     target.parent.mkdir(parents=True, exist_ok=True)
     payload = paths.to_run_json_dict()
+    old: dict = {}
     if target.is_file():
+        try:
+            old = json.loads(target.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as e:
+            raise PathsError(f"run.json 不是合法 JSON：{target}：{e}") from e
+        if not isinstance(old, dict):
+            raise PathsError(f"run.json 不是 JSON 对象：{target}")
         # init on resume must not silently rebind the integration branch.
-        old = json.loads(target.read_text(encoding="utf-8"))
         if "target_ref" in old:
             payload.update({k: old.get(k) for k in ("target_ref", "target_initial_commit")})
         else:
             # The original branch of legacy runs is unknown; don't guess.
             payload.update(target_ref=None, target_initial_commit=None)
-    target.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
+        payload.update({k: old[k] for k in _PRESERVED_RUN_FIELDS if k in old})
+    payload.update(updates)
+    if not payload.get("run_id"):
+        payload["run_id"] = new_run_id()
+    payload.setdefault("created_at", datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"))
+    payload.setdefault("events_schema_version", EVENTS_SCHEMA_VERSION)
+    _atomic_write_json(target, payload)
     return target
+
+
+def read_run_meta(run_dir: Path) -> dict | None:
+    """Raw ``run.json`` dict of a run directory; None when absent or unreadable."""
+    try:
+        data = json.loads((run_dir / RUN_JSON_FILENAME).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def read_run_json(run_json_path: Path) -> Paths:

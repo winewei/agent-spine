@@ -2,13 +2,14 @@
 
 [English](README.md) | **简体中文**
 
-人驾驭的自主工程 harness，跑在任意 agent CLI 宿主进程内（Claude Code / Kimi CLI / Qwen Code / Codex / OpenCode / …），从 spec 一路推进到代码交付。
+宿主中立的工程执行运行时，跑在任意 agent CLI 宿主进程内（Claude Code / Kimi CLI / Qwen Code / Codex / OpenCode / …），从 spec 一路推进到经验证的代码交付——既可由人直接驾驭，也可（2.0）由外部 worker（如 [Ganglion](https://github.com/winewei/ganglion)、CI）带着一个工程 job 无人值守地调用，并取回结构化结果。
 
 agent-spine 把一次自主编码 run 拆成两层，层间以严格契约通信：**智能层**是宿主中立的 playbook，负责调度与语义判断；**确定性执行层**是 `npc` CLI，负责一切机械动作。结构化回执用于可靠交接；主 agent 按需读源码、审查意见和日志，负责诊断与工程决策。
 
 ## 核心能力
 
 - **spec 到交付的自主闭环** — 给 harness 一批 OpenSpec change 或一句话目标，它自动完成 plan → implement → review → fix → archive。交互档在决策分叉点停下问人；`--auto` 档全程无人值守，例行决策下沉给 `npc auto-decide`。
+- **工程运行时契约（2.0）** — 输入是版本化的 `EngineeringJob`（`/spine-run --job job.json`、`npc run start --job`），输出是持久、原子写出的 `EngineeringResult`（`result.json`、`npc result show`），由权威 state 确定性派生、不解析 LLM 散文，区分 completed / completed-with-issues / failed / aborted / blocked，未经审查、失败或未完成的工作绝不报告为成功。稳定 `run_id`；外部 `job_id`/`attempt_id` 作为不透明关联 id 出现在状态、事件与结果中；`npc status --external` 与 `npc run checkpoint` 不暴露内部细节即可观测进度。spine 不是调度器：租约、worker、重试与进程生命周期归启动方。见 [docs/runtime-contract.md](docs/runtime-contract.md)。
 - **完整闭环并行（1.8.1）** — 每个 change 在自己的 git worktree 中完成 implement/review/fix；原生 Codex/Claude Code agent 可接手实现和修复，通过后用 `npc integrate --prepared` 发布到主 session 启动分支。只有发布与归档短暂互斥，共享文件不再自动阻止并行。输入可以是一句话目标（先拆解成 changes）、指定 change 名，或留空（= 全部 active changes）。
 - **后台任务监控（1.9）** — `npc monitor` 以工作产物（专属产物、worktree diff、探针进度标记）观测 sub-agent、远程作业与后台命令；完成、退出、截止时间只产生信号，由主 session 核验后关闭任务；follow 只在出现新的待决策事项时唤醒主 session，`--format line`（1.9.1）把每次唤醒压成一行纯文本，完整信息留在磁盘。
 - **独立 review 闸门** — 每个 change 经过 premium 引擎（`codex exec` 或 `claude -p`，可插拔）驱动的 review→fix 循环，带 blocking 趋势追踪与 stale 检测。廉价执行后端在结构上被禁止给自己的产出盖章（`npc verify routing` 强制拦截）。
@@ -16,7 +17,7 @@ agent-spine 把一次自主编码 run 拆成两层，层间以严格契约通信
 - **确定性执行层** — 状态、事件、prompt 模板、review 解析、archive、git 机械动作各是一条 `npc` 子命令：stdout 一行 JSON + 文档化 exit code 契约（`0` 成功 / `1` 业务失败 / `2` 用法错 / `3` 环境错 / `4` 依赖缺失）。
 - **上下文经济性** — sub-agent 完整 prompt 渲染到磁盘，主 session 只传 ~150 tokens 薄引导语（spawn 环节约省 93% token）。结果留在磁盘、context 只放一行指针；`spine-run` playbook 只常驻调度循环，恢复、发布回执、monitor 事件等低频分支用 `npc playbook show spine-run --section …` 按需加载（1.9.1）。
 - **宿主中立** — `npc` 是唯一分发物。playbook 随包发行，经 `npc playbook install` 物化到任意宿主（Claude Code、Codex CLI 或任意目录）。每份 playbook 顶部带宿主适配表，把 Claude Code 专有机制映射为通用回退。
-- **状态外置、可续跑** — 全部运行状态落在 `~/task_log/`，对目标仓库零侵入。跨 session 续跑（`npc resume detect`）、git/state 漂移自愈（`npc state repair`）、跨 run 指标沉淀（`npc telemetry hotspots`）。
+- **状态外置、可续跑** — 全部运行状态落在 `~/task_log/`，对目标仓库零侵入。每个 run 有稳定的 `run_id`（2.0），跨续跑、压缩与新的外部 attempt 不变。跨 session 续跑（`npc resume detect`）、git/state 漂移自愈（`npc state repair`）、跨 run 指标沉淀（`npc telemetry hotspots`）。
 - **经验层（可选，1.8）** — 每个 change 的 coder 都是全新起点，批次里反复重新发现同一环境事实、反复吃同一类 review finding。本机运行 [OpenViking](https://github.com/volcengine/OpenViking) 后，npc 把每个已归档且 review 通过的 change 轨迹蒸馏为可复用规则，在下一个 change 的 coder prompt 里注入最相关的 2–3 条。默认关闭；不碰 review 闸门；server 不在时自动退化为无操作。见 [docs/experience.md](docs/experience.md)。
 
 ## 工作原理
@@ -42,7 +43,7 @@ agent-spine 把一次自主编码 run 拆成两层，层间以严格契约通信
 ```bash
 # 1) 直接从 GitHub 远程安装 npc 命令（无需 clone）
 uv tool install --force --from git+https://github.com/winewei/agent-spine.git npc
-npc --version          # npc 1.9.1
+npc --version          # npc 2.0.0
 
 # 2) 把 playbooks 物化到你的宿主 CLI（三选一）
 npc playbook install --host claude    # Claude Code：commands/skills/agents 目录
@@ -79,6 +80,9 @@ Claude Code、Kimi CLI、Qwen Code、Codex CLI、OpenCode——其它 agent CLI 
 | 命令 | 一次调用完成 |
 |---|---|
 | `npc init --auto` / `npc resume detect` | 初始化或续跑一个 run（`~/task_log/` 下落 `run.json` + `active.json`） |
+| `npc run start --job F` / `npc init --job F` | 把外部 EngineeringJob 绑定到唯一 run（启动方侧 / agent 侧） |
+| `npc status --external` / `npc result show` | 归一化执行状态 / 结构化 EngineeringResult |
+| `npc state finalize --goal-complete\|--goal-gap T` / `npc run abort` | 收尾（写 `result.json`）/ 以 aborted 或 `--blocked` 终止 |
 | `npc implement record` / `npc fix record` | 校验 coder 的 RESULT 行，装订 phase 计时与状态 |
 | `npc review run --seq N --round M` | focus 渲染 → review 引擎执行（含重试）→ parse → trend → stale 判定 |
 | `npc archive run --seq N` | precheck → `openspec validate` → `openspec archive` → git commit |
@@ -96,9 +100,11 @@ Claude Code、Kimi CLI、Qwen Code、Codex CLI、OpenCode——其它 agent CLI 
 ~/task_log/<PROJ_KEY>/
 ├── active.json                     # 指向当前 active run
 ├── index.jsonl                     # 跨 run 索引（每 run 一行 JSON）
+├── jobs/                           # 2.0：外部 job_id → run 索引
 ├── <run_ts>-plan-state.json        # run 权威状态（另有 .md 人类视图）
 └── <run_ts>/                       # 该 run 的中间产物
     ├── run.json / run.events.jsonl / run-summary.md
+    ├── result.json                 # 2.0：EngineeringResult（终态 run）
     ├── tasks/                      # watchable 后台任务契约
     └── 001-<change>/               # 每 change 的 prompt / review / summary
 ```
@@ -114,6 +120,7 @@ TOML 分层深合并：全局 `~/.config/npc/config.toml` 定义 provider 与凭
 - **JSON + exit code 是通信契约** — 主 session 用 `jq` 取字段、用 `$?` 分支，不解析自然语言。
 - **状态原子化 + 可自愈** — 每次状态写入走 tmp + `os.replace`；git HEAD 与 task_log 漂移时修复而非忽略。
 - **执行可以廉价，review 必须 premium** — 第三方后端只许实现，不许给自己的产出盖章。
+- **工程运行时，不是调度器** — spine 负责工程生命周期；分布式归属、调度与进程生命周期归调用它的一方。
 
 完整版本（架构不变量与 roadmap）见 [docs/principles.md](docs/principles.md) 与 [docs/design.md](docs/design.md)。
 
@@ -125,13 +132,15 @@ TOML 分层深合并：全局 `~/.config/npc/config.toml` 定义 provider 与凭
 | [docs/cli.md](docs/cli.md) | `npc` 完整契约：全部命令、stdout schema、exit code |
 | [docs/configuration.md](docs/configuration.md) | review 引擎、coder provider、宿主配置与排错 |
 | [docs/experience.md](docs/experience.md) | 可选经验层：解决什么问题、安装 OpenViking、启用、衡量收益、排错 |
-| [docs/design.md](docs/design.md) | 总体方案与设计决策记录 |
+| [docs/runtime-contract.md](docs/runtime-contract.md) | 2.0 机器契约：EngineeringJob、run 身份、外部状态、EngineeringResult、检查点、事件、交付边界（英文） |
+| [docs/release-2.0.0.md](docs/release-2.0.0.md) | 2.0 动机、架构审计、兼容与迁移（英文） |
+| [docs/design.md](docs/design.md) | 总体方案与设计决策记录（§0 为当前架构；§1–§10 为 v0.x 历史方案） |
 | [docs/principles.md](docs/principles.md) | 架构不变量与 roadmap |
 
 ## 开发
 
 ```bash
-uv run pytest -q            # 全部用例（40 个文件，680+ 用例）
+uv run pytest -q            # 全部用例（46 个文件，1000+ 用例）
 uv run pytest --cov=npc     # 覆盖率
 ```
 

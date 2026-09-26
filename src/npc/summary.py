@@ -222,6 +222,7 @@ def render_index_record(state: dict) -> dict:
     cc = state.get("cc_session") or {}
     return {
         "run_ts": state.get("run_ts"),
+        "run_id": state.get("run_id"),
         "session_id": cc.get("session_id"),
         "transcript_path": cc.get("transcript_path"),
         "project_root": state.get("project_root"),

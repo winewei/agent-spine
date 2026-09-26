@@ -2,7 +2,9 @@
 
 本文件固化 agent-spine harness 的**不可违反原则**。改 skill / agent / npc 时，凡与本文冲突者，以本文为准。这些不变量是从生产级自主系统 aidevos 的零信任架构里提炼出的、适配"人驾驭 skill"定位的最小集——只取便宜且让人的活更轻的，不搬重机器。
 
-定位前提见 README / `docs/design.md`：**spine 是人驾驭的 skill，职责是「从 spec 到结果交付」，不是无人值守的生产系统。**
+定位前提见 README / `docs/design.md` / `docs/runtime-contract.md`：**spine 是带显式验证边界的工程执行运行时，职责是「从 spec 到经验证的交付」。** 它默认由人驾驭；2.0 起也可以被外部 worker（如 Ganglion、CI）无人值守地调用，此时以结构化 EngineeringResult 交付结论，而不是靠人读对话记录。**分布式 worker 归属、调度、租约、进程生命周期等生产控制面职责始终在 spine 之外。**
+
+> 1.x 的原话是"人驾驭的 skill，不是无人值守的生产系统"。其背后的理由不变（见不变量 3：硬轨与人在回路成反比，不预先搬重机器）：无人值守调用并没有放宽任何验证边界——独立 review、发布闸门只认对**确切 HEAD** 的 clean review、测试证据只认 npc 记录的回执——这些正是无人值守结果可信的前提；spine 也不因此长出调度器、租约或控制面。
 
 ---
 
@@ -22,7 +24,7 @@
 系统状态以落盘的结构化数据为准，绝不以 LLM 的自然语言自述为准。
 
 - 结构化回执决定阶段状态；主 session 可以按需读取 prompt / review / summary / 源码和测试日志来诊断，避免无目的全量重复读取。
-- 角色间交接走结构化契约：coder→主 session 只回一行 RESULT；npc→主 session 只回 JSON。
+- 角色间交接走结构化契约：coder→主 session 只回一行 RESULT；npc→主 session 只回 JSON；spine→外部启动方只交 EngineeringResult（`result.json`，由权威 state 确定性派生，不解析 LLM 散文）。
 - 全轨迹落 `~/task_log/<PROJ_KEY>/` + 跨 run 指标落 `_telemetry/`，是复盘与 `/spine-analyze` 的唯一依据。
 - 注入进 prompt 的外部内容必须落盘可重放（`<base>/*.experience.json` 记 uri / score / tokens / HEAD / sha256，注入块本体落同名 `.md`）；主 session 只读 `experience_injected` / `experience.ok` 这类标量，不读经验正文。
 - **反模式**：强迫主 agent 只转发标量、禁止读取问题证据，或每次重派任务都从头阅读所有材料。工具管理机械状态，agent 保留分析、重排、调试与修复能力。
@@ -35,6 +37,7 @@
 - 加任何新硬轨前先问："**这是因为去掉人了吗？**" 不是，就别加。
 - 硬轨应被 `npc telemetry hotspots` 指出的真实方差点位"打"出来，或在定位真的转向无人值守时才加——不预先过度设计。
 - `--auto` 是"少打断人"的便利档，**不等于**把 spine 变成无人产品；人随时可介入。
+- 被外部 worker 以 `--job` 调用（2.0）时，"人"的位置由启动方承接：spine 只负责如实交付结构化结果（含 blocked / aborted / 问题清单），不自行重试、重启进程或认领工作；需要人或凭据时以 `npc run abort --blocked` 落终态，而不是假装成功。
 
 ## 不变量 4 — 成本分层：廉价层只许执行，不许决策与分析
 

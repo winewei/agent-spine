@@ -27,9 +27,9 @@ from . import _io, git_chain as _git_chain, paths as _paths, state as _state
 
 def _append_run_event(run_events: Path, event: dict) -> None:
     """单流 append 到 run.events.jsonl（per-change events.jsonl 已随旧 base 搬走，不再可寻）。"""
-    run_events.parent.mkdir(parents=True, exist_ok=True)
-    with run_events.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n")
+    from .events import append_run_event
+
+    append_run_event(run_events, event)
 
 
 def _resolve_target_seqs(

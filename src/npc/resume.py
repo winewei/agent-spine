@@ -199,4 +199,5 @@ def detect(args: argparse.Namespace) -> None:
     info = compute_resume(state)
     info["state_json"] = str(state_json)
     info["last_updated_at"] = state.get("last_updated_at")
+    info["run_id"] = state.get("run_id")
     _io.emit(info)

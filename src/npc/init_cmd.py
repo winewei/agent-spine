@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 
 from . import _io, paths as _paths, schema, session, resume, git_chain as _git_chain, state as _state
-from . import config as _config, hosts as _hosts, settings_auth as _settings_auth
+from . import config as _config, hosts as _hosts, job as _job, settings_auth as _settings_auth
 
 
 PORTABLE_TIMEOUT_REL = ".local/bin/portable-timeout"
@@ -132,29 +132,64 @@ def run(args: argparse.Namespace) -> None:
     task_log_dir = home / "task_log" / proj_key
     resume_state_json: Path | None = None
     needs_resume = False
-    if not args.fresh:
-        if task_log_dir.is_dir():
-            resume_state_json = resume.find_latest_in_progress(task_log_dir)
-            needs_resume = resume_state_json is not None
-
-    # 3. 决定本次使用的 run_ts / paths
-    if needs_resume and resume_state_json is not None:
-        # 复用旧 run 的 ts
+    job: _job.Job | None = None
+    bound: dict | None = None
+    if getattr(args, "job", None):
+        # 2.0: an EngineeringJob binds (or re-binds) exactly one run; see npc.job.
         try:
-            old = json.loads(resume_state_json.read_text(encoding="utf-8"))
-            old_run_ts = old.get("run_ts") or resume_state_json.name.replace("-plan-state.json", "")
-        except (OSError, json.JSONDecodeError):
-            old_run_ts = resume_state_json.name.replace("-plan-state.json", "")
-        p = _paths.compute_paths(repo_root, run_ts=old_run_ts, home=home)
+            job = _job.load_job(args.job)
+            if Path(job.root).resolve() != repo_root.resolve():
+                raise _job.JobError("repository-mismatch",
+                                    f"job repository.root {job.root} is not this repository ({repo_root})",
+                                    exit_code=3)
+            bound = _job.bind(repo_root, job, home=home, fresh=bool(args.fresh), agent=True)
+            p = bound["paths"]
+            needs_resume = _job.state_status(p) == "in-progress"
+        except _job.JobError as e:
+            e.emit()
+            return
+        except _paths.PathsError as e:
+            _io.emit_error("run-metadata-corrupt", str(e), exit_code=3)
+            return
+        resume_state_json = p.state_json if needs_resume else None
     else:
-        p = _paths.compute_paths(repo_root, home=home)
+        if not args.fresh:
+            if task_log_dir.is_dir():
+                resume_state_json = resume.find_latest_in_progress(task_log_dir)
+                needs_resume = resume_state_json is not None
+
+        # 3. 决定本次使用的 run_ts / paths
+        if needs_resume and resume_state_json is not None:
+            # 复用旧 run 的 ts
+            try:
+                old = json.loads(resume_state_json.read_text(encoding="utf-8"))
+                old_run_ts = old.get("run_ts") or resume_state_json.name.replace("-plan-state.json", "")
+            except (OSError, json.JSONDecodeError):
+                old_run_ts = resume_state_json.name.replace("-plan-state.json", "")
+            p = _paths.compute_paths(repo_root, run_ts=old_run_ts, home=home)
+        else:
+            p = _paths.compute_paths(repo_root, run_ts=_paths.unique_run_ts(task_log_dir), home=home)
 
     # 4. 确保目录
     _paths.ensure_dirs(p)
 
     # 4b. 落 run.json + active.json（v0.2 起作为子命令默认 resolve 入口）
-    run_json_path = _paths.write_run_json(p)
+    existing_meta = _paths.read_run_meta(p.run_dir) or {}
+    if job is not None:
+        mode = "auto" if args.auto else job.mode
+    elif isinstance(existing_meta.get("job"), dict):
+        # Resuming a job-bound run by hand keeps the job's mode unless --auto.
+        mode = "auto" if args.auto else existing_meta.get("mode") or "interactive"
+    else:
+        mode = "auto" if args.auto else "interactive"
+    try:
+        run_json_path = _paths.write_run_json(p, mode=mode)
+        _job.mark_agent_attached(p)
+    except _paths.PathsError as e:
+        _io.emit_error("run-metadata-corrupt", str(e), exit_code=3)
+        return
     _paths.set_active(p.task_log_dir, p.run_ts)
+    run_meta = _paths.read_run_meta(p.run_dir) or {}
 
     # 5. 自举 schema
     schema_created = schema.ensure_schema(p.schema_path)
@@ -177,8 +212,6 @@ def run(args: argparse.Namespace) -> None:
         _io.info(f"已写入 review schema：{p.schema_path}")
     if pt_created:
         _io.info(f"已写入 portable-timeout wrapper：{pt_path}")
-
-    mode = "auto" if args.auto else "interactive"
 
     # 8b. auto 授权：仅 --auto 且宿主支持 settings 授权（claude）时写项目级权限（不阻塞 init）
     auto_auth: dict | None = None
@@ -214,7 +247,16 @@ def run(args: argparse.Namespace) -> None:
             _io.warn(f"state_drift 扫描失败：{e}")
             state_drift = None
 
+    bound_job = run_meta.get("job") if isinstance(run_meta.get("job"), dict) else None
     payload = {
+        "run_id": run_meta.get("run_id"),
+        "job": ({"job_id": bound_job.get("job_id"), "attempt_id": bound_job.get("attempt_id"),
+                 "goal": bound_job.get("goal"), "mode": bound_job.get("mode"),
+                 "limits": bound_job.get("limits") or {},
+                 "target_ref": (bound_job.get("repository") or {}).get("target_ref"),
+                 "attempts": len(bound_job.get("attempts") or [])} if bound_job else None),
+        "job_run_created": bool(bound and bound["created"]),
+        "result_path": str(p.run_dir / "result.json"),
         "repo_root": str(p.repo_root),
         "proj_key": p.proj_key,
         "task_log_dir": str(p.task_log_dir),
