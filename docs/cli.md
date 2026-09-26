@@ -2162,19 +2162,24 @@ v1.7 起仓库不再发布 Claude Code plugin；原 plugin 的 commands / skills
 
 ```json
 {"ok": true, "playbooks": [
-  {"name": "spine-run", "kind": "command", "summary": "...", "bytes": 11630},
-  {"name": "new-plan-changes-v3", "kind": "skill", "summary": "...", "bytes": 40777},
-  {"name": "spine-coder", "kind": "agent", "summary": "...", "bytes": 4683}
+  {"name": "spine-run", "kind": "command", "summary": "...", "bytes": 19642,
+   "sections": {"finish": 1557, "monitor": 5657, "plan": 1367, "publish": 2872, "recovery": 1949}},
+  {"name": "new-plan-changes-v3", "kind": "skill", "summary": "...", "bytes": 40777, "sections": {}},
+  {"name": "spine-coder", "kind": "agent", "summary": "...", "bytes": 4683, "sections": {}}
 ]}
 ```
 
+`sections`（1.9.1）：按需分节名 → 字节数。
+
 **exit**：`0`
 
-### `npc playbook show <name>`
+### `npc playbook show <name> [--section S]`
 
-输出 playbook 原文 markdown 到 stdout——**stdout 单行 JSON 契约的唯一例外**，设计给任意宿主把工作流直接拉进 context 执行。错误路径（未知名字）仍是单行 JSON + exit 2。
+输出 playbook 原文 markdown 到 stdout——**stdout 单行 JSON 契约的唯一例外**，设计给任意宿主把工作流直接拉进 context 执行。错误路径（未知名字/分节）仍是单行 JSON + exit 2。
 
-**exit**：`0` 成功；`2` 未知 playbook 名
+`--section S`（1.9.1）只输出按需分节。常驻正文只保留每次都要执行的主流程；低频分支（spine-run 的 `plan` / `monitor` / `publish` / `recovery` / `finish`）放在包资源 `playbooks/<name>/<S>.md`，在触发条件出现时才取用。分节不随 `install` 写入宿主，内容始终与已安装的 npc 版本一致。
+
+**exit**：`0` 成功；`2` 未知 playbook 名或分节
 
 ### `npc playbook install (--host claude|codex | --dest DIR) [--name N ...]`
 
@@ -2316,6 +2321,7 @@ npc index append
 
 | 版本 | 关键变化 |
 |---|---|
+| **1.9.1** | 主 session context 预算：`monitor follow` 默认输出一行纯文本（`monitor: N open, M pending | #ID KIND TASK [-> HANDLE] [asked] [idle Nm] [probe-error]; ... | detail: npc monitor list --open`，`*` 标记新动作），`tick`/`follow` 新增 `--format line|json`（`tick` 仍默认 json，`--format json` 恢复 follow 的 1.9.0 输出）；`playbook show --section` 按需分节，spine-run 常驻正文由 32KB 降到约 20KB，恢复/发布回执/monitor 事件/多 change 计划/收尾移入分节；`playbook list` 增 `sections` 字段 |
 | **1.9.0** | `npc monitor` 统一后台任务观测：新增 `--kind job` 与 `--probe` / `--done` / `--alive` / `--deadline-seconds`，终态观测产生 `DONE_SIGNAL` / `EXITED_SIGNAL` / `DEADLINE`（任务进入 `signaled`，只由 `finish` / `cancel` 关闭），job 无进展产生 `STALL`；证据持续变化的 agent 询问间隔放宽到 1800 秒；follow 只在新动作时输出并按 `--remind-seconds` 重复提醒未处理动作，不再因自身操作或心跳唤醒主 session；检查命令在锁外执行；新增 `list` / `cancel`、`finish --result`、`ack --deadline-seconds`、host 作用域 `--owner`；决策记录改写入 `monitor.history.jsonl` |
 | **1.8.2** | 隔离发布协议：已审查补丁的一致性改用 `git patch-id --verbatim`（忽略行号偏移与前像 blob id，保留空白与上下文），新增 `[integrate].derived/regenerate` 派生文件声明（不参与比对；仅派生文件冲突或双方都改动时重新生成）；发布失效后复审只审集成增量（`round-N.integration-delta.diff`）；`needs-resolution` 回执带 `reason`/`conflicts`/`files`；测试命令在独立进程组运行、结束或超时整组回收，新增 `[verify].test_timeout`；交互档 blocking 轮数累计达 3 时触发一次 `stale` 决策点；`isolated.transition` 事件归入正确 change 目录并统一本地时区时间戳 |
 | **1.7.1** | `archive run`：`openspec archive` 因 delta 标题与基线 Requirement 冲突静默中止（打印 Aborted 但 exit 0）时，以 change 目录仍存在判 `openspec-archive-failed` 并回传 openspec 输出，不再误报 `git-commit-failed`；`[verify].test_baseline = "strict|diff"`：`npc integrate` 的 verify tests 支持基线 diff（整合前记录 HEAD 失败集合，整合后失败集合 ⊆ 基线即通过），适配存在既有污染失败的仓库；成功输出新增 `tests` 字段与 `pass-baseline-diff` 状态 |
@@ -2384,6 +2390,14 @@ npc monitor register --id ID --role ROLE --handle HANDLE [--kind agent|job]
 
 ### 输出
 
-`tick` 与 `follow` 输出 `{"ok","stopped","active","actions":[...]}`，`active` 为未关闭任务数，每个动作含 `id`、`agent_id`、`handle`、`role`、`kind`、`task_kind`、`created_at`、`sent_at`、`no_progress`、`progress_age_seconds`、`observation_error`。follow 只在出现新动作或动作转为 `no_progress` 时输出，未处理动作每 `--remind-seconds` 重复一次；主 session 的 register/ack/finish 不触发输出，空闲时不输出。每行都包含全部未处理动作，宿主后台监视工具到期后重新挂接不会丢失事项。
+`--format json`（`tick` 默认）输出 `{"ok","stopped","active","actions":[...]}`，`active` 为未关闭任务数，每个动作含 `id`、`agent_id`、`handle`、`role`、`kind`、`task_kind`、`created_at`、`sent_at`、`no_progress`、`progress_age_seconds`、`observation_error`。follow 只在出现新动作或动作转为 `no_progress` 时输出，未处理动作每 `--remind-seconds` 重复一次；主 session 的 register/ack/finish 不触发输出，空闲时不输出。每行都包含全部未处理动作，宿主后台监视工具到期后重新挂接不会丢失事项。
+
+`--format line`（`follow` 默认，1.9.1）把同一结果压成一行纯文本，只保留决策所需字段，完整结构留在 `monitor.json`，由 `list --open` 按需读取：
+
+```
+monitor: 3 open, 2 pending | *#12 CHECK_IN impl-003 -> agent:a1b2; #9 DONE_SIGNAL review-002 | detail: npc monitor list --open
+```
+
+逐项为 `#<action id> <kind> <task id>`：`*` 前缀表示本次新增；`-> HANDLE` 仅出现在 `CHECK_IN` / `CONTROL_REQUIRED` 且询问尚未发送时，表示下一步向该句柄发询问；已发送则为 `asked`；`idle Nm` 对应 `no_progress=true`；`probe-error` 对应非空 `observation_error`。无动作时为 `monitor: N open, 0 pending`，停止后为 `monitor stopped`。
 
 监控只维护自己的检查点，不直接发宿主消息、停止进程或修改 Git/业务 state。恢复时先 `tick` 补算离线期间到期的终态与截止时间，保留未完成 action 与计时；缺少转录不等于任务完成。`npc watch` 仍提供只读活动快照，供核对漏登任务；只有真实通知能力或主 session 的有界等待才能驱动干预，单独运行 follow 不等于自治控制。

@@ -1265,7 +1265,8 @@ exit code:
         formatter_class=_EPILOG_FMT,
         epilog="""\
 stdout:
-  {"ok": true, "playbooks": [{"name","kind":"command|skill|agent","summary","bytes"}, ...]}
+  {"ok": true, "playbooks": [{"name","kind":"command|skill|agent","summary","bytes",
+                               "sections":{"<section>": <bytes>}}, ...]}
 
 exit code:
   0  成功
@@ -1281,14 +1282,16 @@ exit code:
         epilog="""\
 stdout:
   playbook 原文 markdown（**非 JSON**——设计给任意宿主直接拉进 context 用；
-  错误路径仍是单行 JSON + exit code）
+  错误路径仍是单行 JSON + exit code）。--section 只输出按需分节。
 
 exit code:
   0  成功
-  2  未知 playbook 名
+  2  未知 playbook 名 / 未知分节
 """,
     )
     p_pb_show.add_argument("name", help="playbook 名（见 playbook list）")
+    p_pb_show.add_argument("--section", default=None,
+                           help="只输出按需分节（见 playbook list 的 sections）")
     p_pb_show.set_defaults(
         handler=_make_handler("playbook", "cli_show"), _cmd_path="playbook show"
     )

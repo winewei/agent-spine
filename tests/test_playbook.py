@@ -238,3 +238,43 @@ def test_spine_checkpoint_retains_concurrent_jobs(tmp_path):
     saved = json.loads((tmp_path / "scheduler.json").read_text())
     assert saved == {"run_ts": "original", "done": ["a"], "finished": ["d"],
                      "active": ["b"], "pending": ["c"], "inner": ["a"], "jobs": jobs}
+
+
+def test_spine_run_sections_referenced_from_core_all_exist():
+    import re
+    pb = playbook.get("spine-run")
+    core = playbook.read_text(pb)
+    referenced = set(re.findall(r"--section (\w+)", core))
+    assert referenced == set(playbook.sections(pb)) == {
+        "finish", "monitor", "plan", "publish", "recovery"}
+    for name in referenced:
+        assert playbook.read_section(pb, name).startswith(f"# spine-run §{name}")
+
+
+def test_spine_run_core_stays_small():
+    # The core stays resident for the whole run; low-frequency branches live in sections.
+    pb = playbook.get("spine-run")
+    assert len(playbook.read_text(pb).encode("utf-8")) < 22_000
+
+
+def test_sections_absent_for_flat_playbooks_and_unknown_section_raises():
+    pb = playbook.get("spine-analyze")
+    assert playbook.sections(pb) == []
+    with pytest.raises(playbook.PlaybookError):
+        playbook.read_section(pb, "monitor")
+
+
+def test_cli_show_section(capsys):
+    import argparse
+
+    playbook.cli_show(argparse.Namespace(name="spine-run", section="publish"))
+    assert capsys.readouterr().out.startswith("# spine-run §publish")
+    with pytest.raises(SystemExit) as ei:
+        playbook.cli_show(argparse.Namespace(name="spine-run", section="nope"))
+    assert ei.value.code == 2
+
+
+def test_install_does_not_copy_sections(tmp_path: Path):
+    result = playbook.install(["spine-run"], host=None, dest=tmp_path)
+    assert [p.name for p in tmp_path.iterdir()] == ["spine-run.md"]
+    assert result["installed"][0]["name"] == "spine-run"

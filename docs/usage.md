@@ -10,7 +10,7 @@
 
 ```bash
 uv tool install --force --from git+https://github.com/winewei/agent-spine.git npc
-npc --version          # 应输出 npc 1.7.0
+npc --version          # 应输出 npc 1.9.1
 ```
 
 **不要**用本地 checkout 安装全局 `npc`（`uv tool install --from .`）——开发中的代码会影响本机在用的 CLI。开发期验证在仓库内用 `uv run npc ...`；发布后从 tag 重装：`uv tool install --reinstall --from git+https://github.com/winewei/agent-spine@v<版本> npc`。`npc doctor` 的 `install-source` 项会把本地目录安装标为 warn。
