@@ -467,7 +467,7 @@ def test_observation_taken_before_intervene_cannot_reraise_signal(tmp_path):
     assert row["pending"]["kind"] == "DONE_SIGNAL"
 
 
-# ---------------------------------------------------------------- 1.10.0: one-line output
+# ---------------------------------------------------------------- 1.9.1: one-line output
 
 def test_line_render_keeps_every_pending_action_in_one_line(tmp_path):
     doc = document()
@@ -514,8 +514,9 @@ def test_emitter_reports_fresh_ids():
     assert emit.fresh == {"2"}
 
 
-def test_format_defaults_line_for_follow_and_json_for_tick():
+def test_format_defaults_to_json_contract():
     parser = _build_parser()
-    assert parser.parse_args(["monitor", "follow"]).format == "line"
+    assert parser.parse_args(["monitor", "follow"]).format == "json"
     assert parser.parse_args(["monitor", "tick"]).format == "json"
+    assert parser.parse_args(["monitor", "follow", "--format", "line"]).format == "line"
     assert parser.parse_args(["monitor", "tick", "--format", "line"]).format == "line"

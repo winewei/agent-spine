@@ -63,7 +63,7 @@ metadata:
 
 ## Step 0 — 前置检查（缺依赖立即停）
 
-- `npc --version` ≥ 1.10.0；缺或版本过低 → 提示从发布 tag 安装（`uv tool install --reinstall --from git+https://github.com/winewei/agent-spine@v<版本> npc`）并停止；开发期验证用仓库内 `uv run npc`，不要用 `--from .` 本地目录安装。
+- `npc --version` ≥ 1.9.1；缺或版本过低 → 提示从发布 tag 安装（`uv tool install --reinstall --from git+https://github.com/winewei/agent-spine@v<版本> npc`）并停止；开发期验证用仓库内 `uv run npc`，不要用 `--from .` 本地目录安装。
 - `npc doctor` 通过；配置的 review engine 及其可执行程序/凭据必须可用（默认 codex）。缺失时在初始化前停止；不能声明“跳 review”后仍调用 `change run --from review`，也不能静默免审归档。`experience` 项为 warn 只记一行降级；经验层由 `npc agent prompt render` / `npc archive run` 自动处理，主 session 不读经验正文，也绝不把经验给 review。
 - `openspec` 可用（`openspec list --json` 是计划入口）。
 - git 仓库且启动工作区 clean、位于命名分支。`npc init` 记录该分支的完整 ref 与启动提交，它是本次 run 的整合目标，绝不默认 checkout main/master；续跑保留原目标，不能偷偷重绑定。
@@ -91,7 +91,7 @@ export RUN_DIR RUN_TS STATE_JSON RUN_T0
 
 ### 启动 monitor（计划分析之前，整个 run 只启动一个）
 
-初始化后立即执行 `npc monitor tick`，创建或恢复 `$RUN_DIR/monitor.json`，随后在后台启动 `npc monitor follow --interval 60`（Claude Code 用 `Monitor(command="npc monitor follow --interval 60")`，到期后立即重新挂接）。它是确定性后台监控，不占 LLM 槽位；只在出现新动作时输出**一行**，例如：
+初始化后立即执行 `npc monitor tick`，创建或恢复 `$RUN_DIR/monitor.json`，随后在后台启动 `npc monitor follow --interval 60 --format line`（Claude Code 用 `Monitor(command="npc monitor follow --interval 60 --format line")`，到期后立即重新挂接）。它是确定性后台监控，不占 LLM 槽位；只在出现新动作时输出**一行**，例如：
 
 ```
 monitor: 3 open, 2 pending | *#12 CHECK_IN impl-003 -> agent:a1b2; #9 DONE_SIGNAL review-002 | detail: npc monitor list --open

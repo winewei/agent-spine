@@ -278,3 +278,11 @@ def test_install_does_not_copy_sections(tmp_path: Path):
     result = playbook.install(["spine-run"], host=None, dest=tmp_path)
     assert [p.name for p in tmp_path.iterdir()] == ["spine-run.md"]
     assert result["installed"][0]["name"] == "spine-run"
+
+
+def test_spine_run_follows_monitor_in_line_format():
+    # npc keeps JSON as the stdout default; the playbook opts into the compact line.
+    core = playbook.read_text(playbook.get("spine-run"))
+    assert "npc monitor follow --interval 60 --format line" in core
+    assert "npc monitor follow --interval 60\"" not in core
+    assert "npc monitor follow --interval 60`" not in core

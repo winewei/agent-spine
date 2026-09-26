@@ -10,11 +10,11 @@ agent-spine 把一次自主编码 run 拆成两层，层间以严格契约通信
 
 - **spec 到交付的自主闭环** — 给 harness 一批 OpenSpec change 或一句话目标，它自动完成 plan → implement → review → fix → archive。交互档在决策分叉点停下问人；`--auto` 档全程无人值守，例行决策下沉给 `npc auto-decide`。
 - **完整闭环并行（1.8.1）** — 每个 change 在自己的 git worktree 中完成 implement/review/fix；原生 Codex/Claude Code agent 可接手实现和修复，通过后用 `npc integrate --prepared` 发布到主 session 启动分支。只有发布与归档短暂互斥，共享文件不再自动阻止并行。输入可以是一句话目标（先拆解成 changes）、指定 change 名，或留空（= 全部 active changes）。
-- **后台任务监控（1.9）** — `npc monitor` 以工作产物（专属产物、worktree diff、探针进度标记）观测 sub-agent、远程作业与后台命令；完成、退出、截止时间只产生信号，由主 session 核验后关闭任务；follow 只在出现新的待决策事项时唤醒主 session，且只输出一行纯文本（1.10.0），完整信息留在磁盘。
+- **后台任务监控（1.9）** — `npc monitor` 以工作产物（专属产物、worktree diff、探针进度标记）观测 sub-agent、远程作业与后台命令；完成、退出、截止时间只产生信号，由主 session 核验后关闭任务；follow 只在出现新的待决策事项时唤醒主 session，`--format line`（1.9.1）把每次唤醒压成一行纯文本，完整信息留在磁盘。
 - **独立 review 闸门** — 每个 change 经过 premium 引擎（`codex exec` 或 `claude -p`，可插拔）驱动的 review→fix 循环，带 blocking 趋势追踪与 stale 检测。廉价执行后端在结构上被禁止给自己的产出盖章（`npc verify routing` 强制拦截）。
 - **coder 多模型路由** — provider 注册表把 implement / fix 路由到任意 Anthropic 兼容端点（Kimi / Qwen / DeepSeek / …）或 `codex exec`。凭据与模型全局定义一次，每个工程只声明用哪个，可按阶段细分。
 - **确定性执行层** — 状态、事件、prompt 模板、review 解析、archive、git 机械动作各是一条 `npc` 子命令：stdout 一行 JSON + 文档化 exit code 契约（`0` 成功 / `1` 业务失败 / `2` 用法错 / `3` 环境错 / `4` 依赖缺失）。
-- **上下文经济性** — sub-agent 完整 prompt 渲染到磁盘，主 session 只传 ~150 tokens 薄引导语（spawn 环节约省 93% token）。结果留在磁盘、context 只放一行指针；`spine-run` playbook 只常驻调度循环，恢复、发布回执、monitor 事件等低频分支用 `npc playbook show spine-run --section …` 按需加载（1.10.0）。
+- **上下文经济性** — sub-agent 完整 prompt 渲染到磁盘，主 session 只传 ~150 tokens 薄引导语（spawn 环节约省 93% token）。结果留在磁盘、context 只放一行指针；`spine-run` playbook 只常驻调度循环，恢复、发布回执、monitor 事件等低频分支用 `npc playbook show spine-run --section …` 按需加载（1.9.1）。
 - **宿主中立** — `npc` 是唯一分发物。playbook 随包发行，经 `npc playbook install` 物化到任意宿主（Claude Code、Codex CLI 或任意目录）。每份 playbook 顶部带宿主适配表，把 Claude Code 专有机制映射为通用回退。
 - **状态外置、可续跑** — 全部运行状态落在 `~/task_log/`，对目标仓库零侵入。跨 session 续跑（`npc resume detect`）、git/state 漂移自愈（`npc state repair`）、跨 run 指标沉淀（`npc telemetry hotspots`）。
 - **经验层（可选，1.8）** — 每个 change 的 coder 都是全新起点，批次里反复重新发现同一环境事实、反复吃同一类 review finding。本机运行 [OpenViking](https://github.com/volcengine/OpenViking) 后，npc 把每个已归档且 review 通过的 change 轨迹蒸馏为可复用规则，在下一个 change 的 coder prompt 里注入最相关的 2–3 条。默认关闭；不碰 review 闸门；server 不在时自动退化为无操作。见 [docs/experience.md](docs/experience.md)。
@@ -42,7 +42,7 @@ agent-spine 把一次自主编码 run 拆成两层，层间以严格契约通信
 ```bash
 # 1) 直接从 GitHub 远程安装 npc 命令（无需 clone）
 uv tool install --force --from git+https://github.com/winewei/agent-spine.git npc
-npc --version          # npc 1.10.0
+npc --version          # npc 1.9.1
 
 # 2) 把 playbooks 物化到你的宿主 CLI（三选一）
 npc playbook install --host claude    # Claude Code：commands/skills/agents 目录

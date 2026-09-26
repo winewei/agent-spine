@@ -6,11 +6,11 @@ metadata:
   tags: [openspec, parallel, worktree, alias]
 ---
 
-# new-plan-changes-v4 → spine-run（1.10.0）
+# new-plan-changes-v4 → spine-run（1.9.1）
 
 读取同目录 `references/spine-run.md`（若安装器已提供）；否则运行 `npc playbook show spine-run` 读取完整 playbook，然后执行。Claude Code 也可调用已同步的 `/spine-run`。只维护这一份执行协议，不再使用旧版波次屏障和共享工作区内环。
 
-执行前检查 `npc --version` 至少为 **1.10.0**，且 `npc monitor register --help` 支持 `--kind` / `--done`、`npc change run --help` 支持新协议。若 CLI 低于 1.10.0，明确指出版本不匹配；不能用旧 CLI 默默执行新 skill。更新 CLI 后重新安装配套 playbook。
+执行前检查 `npc --version` 至少为 **1.9.1**，且 `npc monitor register --help` 支持 `--kind` / `--done`、`npc change run --help` 支持新协议。若 CLI 低于 1.9.1，明确指出版本不匹配；不能用旧 CLI 默默执行新 skill。更新 CLI 后重新安装配套 playbook。
 
 关键契约：
 

@@ -541,8 +541,8 @@ def add_parser(sub) -> None:
             p.add_argument("--stalled-seconds", type=_positive, default=900)
             p.add_argument("--grace-seconds", type=_positive, default=300)
             p.add_argument("--format", choices=["line", "json"],
-                           default="line" if name == "follow" else "json",
-                           help="line：一行纯文本（follow 默认，进宿主 context）；json：完整结构")
+                           default="json",
+                           help="json：完整结构（默认，stdout 契约）；line：一行纯文本，供宿主 context 使用")
         if name == "follow":
             p.add_argument("--interval", type=_positive, default=60)
             p.add_argument("--remind-seconds", type=_positive, default=1800,

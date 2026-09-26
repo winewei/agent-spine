@@ -27,7 +27,7 @@ command -v git && command -v uv && echo OK
 ### 1. 装 npc 命令（从 GitHub 远程安装）
 ```bash
 uv tool install --force --from git+https://github.com/winewei/agent-spine.git npc
-npc --version          # 期望：npc 1.10.0
+npc --version          # 期望：npc 1.9.1
 ```
 验证：`npc --version` 有输出即成功。`--force` 必需（覆盖旧版）。
 
